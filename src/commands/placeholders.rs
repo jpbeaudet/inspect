@@ -17,8 +17,6 @@ pub fn run(cmd: Command) -> anyhow::Result<ExitKind> {
 
 fn describe(cmd: &Command) -> (&'static str, &'static str) {
     match cmd {
-        Command::Setup(_) => ("setup", "Phase 2"),
-        Command::Discover(_) => ("discover", "Phase 2"),
         Command::Status(_) => ("status", "Phase 4"),
         Command::Health(_) => ("health", "Phase 4"),
         Command::Logs(_) => ("logs", "Phase 4"),
@@ -60,6 +58,9 @@ fn describe(cmd: &Command) -> (&'static str, &'static str) {
         | Command::Connect(_)
         | Command::Disconnect(_)
         | Command::Connections(_)
-        | Command::DisconnectAll(_) => ("(internal)", "Phases 0/1"),
+        | Command::DisconnectAll(_)
+        | Command::Setup(_)
+        | Command::Discover(_)
+        | Command::Profile(_) => ("(internal)", "Phases 0/1/2"),
     }
 }

@@ -9,8 +9,10 @@ use clap::Parser;
 mod cli;
 mod commands;
 mod config;
+mod discovery;
 mod error;
 mod paths;
+mod profile;
 mod redact;
 mod ssh;
 
@@ -46,9 +48,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Disconnect(args) => commands::disconnect::run(args),
         Command::Connections(args) => commands::connections::run(args),
         Command::DisconnectAll(args) => commands::disconnect_all::run(args),
-        Command::Setup(_)
-        | Command::Discover(_)
-        | Command::Status(_)
+        Command::Setup(args) | Command::Discover(args) => commands::setup::run(args),
+        Command::Profile(args) => commands::profile::run(args),
+        Command::Status(_)
         | Command::Health(_)
         | Command::Logs(_)
         | Command::Grep(_)

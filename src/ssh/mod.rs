@@ -8,10 +8,13 @@
 //! All sockets live in `~/.inspect/sockets/<ns>.sock` with mode 0600.
 
 pub mod askpass;
+pub mod exec;
 pub mod master;
 pub mod options;
 pub mod ttl;
 
+#[allow(unused_imports)]
+pub use exec::{run_remote, RemoteOutput, RunOpts};
 #[allow(unused_imports)]
 pub use master::{
     check_socket, ensure_sockets_dir, exit_master, list_sockets, socket_path, start_master,

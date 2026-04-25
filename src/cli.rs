@@ -53,11 +53,13 @@ pub enum Command {
     /// Close all persistent connections.
     DisconnectAll(DisconnectAllArgs),
 
-    // ---- Phase 2 placeholders ------------------------------------------------
-    /// Run discovery against a namespace.
-    Setup(SelectorArgs),
+    // ---- Phase 2 discovery ---------------------------------------------------
+    /// Run discovery against a namespace and persist its profile.
+    Setup(SetupArgs),
     /// Alias of `setup`.
-    Discover(SelectorArgs),
+    Discover(SetupArgs),
+    /// Show the cached profile for a namespace.
+    Profile(ProfileArgs),
 
     // ---- Phase 4 read verbs --------------------------------------------------
     /// Show service inventory and health rollup.
@@ -259,6 +261,37 @@ pub struct DisconnectAllArgs {
     /// Skip confirmation prompt.
     #[arg(long, short)]
     pub yes: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    /// Namespace to discover.
+    pub namespace: String,
+    /// Force a full re-discovery, ignoring cache TTL.
+    #[arg(long)]
+    pub force: bool,
+    /// Skip the systemd probe (useful when the user has no journal access).
+    #[arg(long)]
+    pub skip_systemd: bool,
+    /// Skip host-port listener probes.
+    #[arg(long)]
+    pub skip_host_listeners: bool,
+    /// Run a synchronous drift check against the cached profile and exit
+    /// without re-discovering.
+    #[arg(long, conflicts_with_all = ["force", "skip_systemd", "skip_host_listeners"])]
+    pub check_drift: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileArgs {
+    /// Namespace whose profile to display.
+    pub namespace: String,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
