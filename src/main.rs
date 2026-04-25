@@ -17,6 +17,7 @@ mod profile;
 mod redact;
 mod selector;
 mod ssh;
+mod verbs;
 
 use cli::{Cli, Command};
 use error::ExitKind;
@@ -54,19 +55,19 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Profile(args) => commands::profile::run(args),
         Command::Alias(args) => commands::alias::run(args),
         Command::Resolve(args) => commands::resolve::run(args),
-        Command::Status(_)
-        | Command::Health(_)
-        | Command::Logs(_)
-        | Command::Grep(_)
-        | Command::Cat(_)
-        | Command::Ls(_)
-        | Command::Find(_)
-        | Command::Ps(_)
-        | Command::Volumes(_)
-        | Command::Images(_)
-        | Command::Network(_)
-        | Command::Ports(_)
-        | Command::Why(_)
+        Command::Status(args) => verbs::status::run(args),
+        Command::Health(args) => verbs::health::run(args),
+        Command::Logs(args) => verbs::logs::run(args),
+        Command::Grep(args) => verbs::grep::run(args),
+        Command::Cat(args) => verbs::cat::run(args),
+        Command::Ls(args) => verbs::ls::run(args),
+        Command::Find(args) => verbs::find::run(args),
+        Command::Ps(args) => verbs::ps::run(args),
+        Command::Volumes(args) => verbs::volumes::run(args),
+        Command::Images(args) => verbs::images::run(args),
+        Command::Network(args) => verbs::network::run(args),
+        Command::Ports(args) => verbs::ports::run(args),
+        Command::Why(_)
         | Command::Connectivity(_)
         | Command::Recipe(_)
         | Command::Search(_)

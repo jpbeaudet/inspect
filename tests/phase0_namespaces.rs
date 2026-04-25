@@ -307,8 +307,9 @@ fn placeholder_verb_returns_phase_message() {
     let mut cmd = bin();
     clear_inspect_env(&mut cmd);
     cmd.env("INSPECT_HOME", &home)
-        .args(["status", "arte"])
+        .args(["why", "arte"])
         .assert()
         .failure() // exit 2 for unimplemented verbs
-        .stdout(predicate::str::contains("not implemented in Phase 0"));
+        .stdout(predicate::str::contains("not implemented yet"))
+        .stdout(predicate::str::contains("Phase 9"));
 }

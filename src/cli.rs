@@ -63,29 +63,29 @@ pub enum Command {
 
     // ---- Phase 4 read verbs --------------------------------------------------
     /// Show service inventory and health rollup.
-    Status(SelectorArgs),
+    Status(StatusArgs),
     /// Detailed health checks.
-    Health(SelectorArgs),
+    Health(HealthArgs),
     /// Tail or view container logs.
-    Logs(SelectorArgs),
+    Logs(LogsArgs),
     /// Search content in logs or files.
-    Grep(SelectorArgs),
+    Grep(GrepArgs),
     /// Read a file.
-    Cat(SelectorArgs),
+    Cat(CatArgs),
     /// List directory contents.
-    Ls(SelectorArgs),
+    Ls(LsArgs),
     /// Find files by pattern.
-    Find(SelectorArgs),
+    Find(FindArgs),
     /// List running containers.
-    Ps(SelectorArgs),
+    Ps(PsArgs),
     /// List volumes.
-    Volumes(SelectorArgs),
+    Volumes(SimpleSelectorArgs),
     /// List images.
-    Images(SelectorArgs),
+    Images(SimpleSelectorArgs),
     /// List networks.
-    Network(SelectorArgs),
+    Network(SimpleSelectorArgs),
     /// List listening ports.
-    Ports(SelectorArgs),
+    Ports(SimpleSelectorArgs),
     /// Diagnostic walk for a service.
     Why(SelectorArgs),
     /// Connectivity matrix.
@@ -362,6 +362,150 @@ pub struct ResolveArgs {
     /// Selector text (e.g. `arte/pulse`, `prod-*/storage`, `@plogs`).
     pub selector: String,
     /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+// ---- Phase 4 read verbs ------------------------------------------------------
+
+/// Reusable arg block for verbs that just need a selector + `--json`.
+#[derive(Debug, Args)]
+pub struct SimpleSelectorArgs {
+    /// Selector (server, server/service, etc.).
+    pub selector: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Selector (server, server/service, etc.).
+    pub selector: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    pub selector: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PsArgs {
+    pub selector: String,
+    /// Show all containers (default shows just running).
+    #[arg(short = 'a', long)]
+    pub all: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LogsArgs {
+    pub selector: String,
+    /// Show logs since duration (e.g. 30s, 5m, 1h, 2d).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Show logs until duration.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Number of lines from the tail.
+    #[arg(long)]
+    pub tail: Option<u64>,
+    /// Stream logs.
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Hidden: ssh-side timeout for follow mode (seconds).
+    #[arg(long, hide = true)]
+    pub follow_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct GrepArgs {
+    /// Pattern to search for.
+    pub pattern: String,
+    /// Selector. May include `:path` to grep a file.
+    pub selector: String,
+    #[arg(long)]
+    pub since: Option<String>,
+    #[arg(long)]
+    pub until: Option<String>,
+    #[arg(long)]
+    pub tail: Option<u64>,
+
+    /// Case-insensitive (overrides smart-case).
+    #[arg(short = 'i', long = "ignore-case")]
+    pub ignore_case: bool,
+    /// Force case-sensitive (overrides smart-case).
+    #[arg(short = 's', long = "case-sensitive")]
+    pub case_sensitive: bool,
+    /// Match whole words.
+    #[arg(short = 'w', long = "word")]
+    pub word: bool,
+    /// Treat pattern as fixed string.
+    #[arg(short = 'F', long = "fixed-strings")]
+    pub fixed: bool,
+    /// Treat pattern as extended regex.
+    #[arg(short = 'E', long = "extended-regexp")]
+    pub extended: bool,
+    /// Invert match.
+    #[arg(short = 'v', long = "invert-match")]
+    pub invert: bool,
+    /// Stop after N matches per target.
+    #[arg(short = 'm', long = "max-count")]
+    pub max_count: Option<u64>,
+    /// Print N lines after each match.
+    #[arg(short = 'A', long = "after")]
+    pub after: Option<u64>,
+    /// Print N lines before each match.
+    #[arg(short = 'B', long = "before")]
+    pub before: Option<u64>,
+    /// Print N lines around each match.
+    #[arg(short = 'C', long = "context")]
+    pub context: Option<u64>,
+    /// Just count matches per target.
+    #[arg(short = 'c', long = "count")]
+    pub count: bool,
+
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CatArgs {
+    /// Selector with `:path` (e.g. `arte/atlas:/etc/atlas.conf`).
+    pub target: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    /// Show hidden entries (`-A`).
+    #[arg(short = 'A', long)]
+    pub all: bool,
+    /// Long listing (`-l`).
+    #[arg(short = 'l', long)]
+    pub long: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FindArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    /// Optional name pattern (find -name).
+    pub pattern: Option<String>,
     #[arg(long)]
     pub json: bool,
 }
