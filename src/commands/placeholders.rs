@@ -45,11 +45,10 @@ fn describe(cmd: &Command) -> (&'static str, &'static str) {
         Command::Chmod(_) => ("chmod", "Phase 5"),
         Command::Chown(_) => ("chown", "Phase 5"),
         Command::Exec(_) => ("exec", "Phase 5"),
-        Command::Alias(_) => ("alias", "Phase 3"),
         Command::Audit(_) => ("audit", "Phase 5"),
         Command::Revert(_) => ("revert", "Phase 5"),
         Command::Fleet(_) => ("fleet", "Phase 11"),
-        // Phase 0/1 verbs should never be routed here.
+        // Phase 0/1/2/3 verbs should never be routed here.
         Command::Add(_)
         | Command::List(_)
         | Command::Remove(_)
@@ -61,6 +60,8 @@ fn describe(cmd: &Command) -> (&'static str, &'static str) {
         | Command::DisconnectAll(_)
         | Command::Setup(_)
         | Command::Discover(_)
-        | Command::Profile(_) => ("(internal)", "Phases 0/1/2"),
+        | Command::Profile(_)
+        | Command::Alias(_)
+        | Command::Resolve(_) => ("(internal)", "Phases 0/1/2/3"),
     }
 }

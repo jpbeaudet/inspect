@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+mod alias;
 mod cli;
 mod commands;
 mod config;
@@ -14,6 +15,7 @@ mod error;
 mod paths;
 mod profile;
 mod redact;
+mod selector;
 mod ssh;
 
 use cli::{Cli, Command};
@@ -50,6 +52,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::DisconnectAll(args) => commands::disconnect_all::run(args),
         Command::Setup(args) | Command::Discover(args) => commands::setup::run(args),
         Command::Profile(args) => commands::profile::run(args),
+        Command::Alias(args) => commands::alias::run(args),
+        Command::Resolve(args) => commands::resolve::run(args),
         Command::Status(_)
         | Command::Health(_)
         | Command::Logs(_)
@@ -78,7 +82,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         | Command::Chmod(_)
         | Command::Chown(_)
         | Command::Exec(_)
-        | Command::Alias(_)
         | Command::Audit(_)
         | Command::Revert(_)
         | Command::Fleet(_) => commands::placeholders::run(cli.command),

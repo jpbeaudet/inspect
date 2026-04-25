@@ -125,7 +125,11 @@ pub enum Command {
 
     // ---- Phase 3 alias management --------------------------------------------
     /// Manage selector aliases.
-    Alias(SelectorArgs),
+    Alias(AliasArgs),
+
+    /// Resolve a selector against discovered profiles and print the targets.
+    /// Useful for testing selector grammar before the read/write verbs land.
+    Resolve(ResolveArgs),
 
     // ---- Phase 5 audit + revert ----------------------------------------------
     /// Inspect or query the local audit log.
@@ -292,6 +296,71 @@ pub struct SetupArgs {
 pub struct ProfileArgs {
     /// Namespace whose profile to display.
     pub namespace: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+// ---- Phase 3 -----------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct AliasArgs {
+    #[command(subcommand)]
+    pub command: AliasCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    /// Save a selector under a short name.
+    Add(AliasAddArgs),
+    /// List configured aliases.
+    List(AliasListArgs),
+    /// Remove an alias.
+    Remove(AliasRemoveArgs),
+    /// Show one alias in detail.
+    Show(AliasShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasAddArgs {
+    /// Alias name (without the leading '@').
+    pub name: String,
+    /// Selector text to save (verb-style or LogQL `{...}` form).
+    pub selector: String,
+    /// Optional description shown by `alias list`.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Overwrite an existing alias.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasListArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasRemoveArgs {
+    /// Alias name (without the leading '@').
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasShowArgs {
+    /// Alias name (without the leading '@').
+    pub name: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    /// Selector text (e.g. `arte/pulse`, `prod-*/storage`, `@plogs`).
+    pub selector: String,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
