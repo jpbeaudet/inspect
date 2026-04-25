@@ -17,10 +17,6 @@ pub fn run(cmd: Command) -> anyhow::Result<ExitKind> {
 
 fn describe(cmd: &Command) -> (&'static str, &'static str) {
     match cmd {
-        Command::Connect(_) => ("connect", "Phase 1"),
-        Command::Disconnect(_) => ("disconnect", "Phase 1"),
-        Command::Connections => ("connections", "Phase 1"),
-        Command::DisconnectAll => ("disconnect-all", "Phase 1"),
         Command::Setup(_) => ("setup", "Phase 2"),
         Command::Discover(_) => ("discover", "Phase 2"),
         Command::Status(_) => ("status", "Phase 4"),
@@ -55,11 +51,15 @@ fn describe(cmd: &Command) -> (&'static str, &'static str) {
         Command::Audit(_) => ("audit", "Phase 5"),
         Command::Revert(_) => ("revert", "Phase 5"),
         Command::Fleet(_) => ("fleet", "Phase 11"),
-        // Phase 0 verbs should never be routed here.
+        // Phase 0/1 verbs should never be routed here.
         Command::Add(_)
         | Command::List(_)
         | Command::Remove(_)
         | Command::Test(_)
-        | Command::Show(_) => ("(internal)", "Phase 0"),
+        | Command::Show(_)
+        | Command::Connect(_)
+        | Command::Disconnect(_)
+        | Command::Connections(_)
+        | Command::DisconnectAll(_) => ("(internal)", "Phases 0/1"),
     }
 }

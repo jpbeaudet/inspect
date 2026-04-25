@@ -12,6 +12,7 @@ mod config;
 mod error;
 mod paths;
 mod redact;
+mod ssh;
 
 use cli::{Cli, Command};
 use error::ExitKind;
@@ -41,11 +42,11 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Remove(args) => commands::remove::run(args),
         Command::Test(args) => commands::test::run(args),
         Command::Show(args) => commands::show::run(args),
-        Command::Connect(_)
-        | Command::Disconnect(_)
-        | Command::Connections
-        | Command::DisconnectAll
-        | Command::Setup(_)
+        Command::Connect(args) => commands::connect::run(args),
+        Command::Disconnect(args) => commands::disconnect::run(args),
+        Command::Connections(args) => commands::connections::run(args),
+        Command::DisconnectAll(args) => commands::disconnect_all::run(args),
+        Command::Setup(_)
         | Command::Discover(_)
         | Command::Status(_)
         | Command::Health(_)

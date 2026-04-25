@@ -43,15 +43,15 @@ pub enum Command {
     /// Show a namespace's resolved configuration (secrets redacted).
     Show(ShowArgs),
 
-    // ---- Phase 1 placeholders ------------------------------------------------
+    // ---- Phase 1 ssh lifecycle ----------------------------------------------
     /// Open a persistent SSH session for a namespace.
-    Connect(SelectorArgs),
+    Connect(ConnectArgs),
     /// Close the persistent SSH session for a namespace.
-    Disconnect(SelectorArgs),
+    Disconnect(DisconnectArgs),
     /// List active persistent connections.
-    Connections,
+    Connections(ConnectionsArgs),
     /// Close all persistent connections.
-    DisconnectAll,
+    DisconnectAll(DisconnectAllArgs),
 
     // ---- Phase 2 placeholders ------------------------------------------------
     /// Run discovery against a namespace.
@@ -214,4 +214,52 @@ pub struct SelectorArgs {
     /// Free-form selector or arguments. Validated in later phases.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectArgs {
+    /// Namespace to connect.
+    pub namespace: String,
+    /// Override the ControlPersist TTL (e.g. `4h`, `30m`, `2d`). Defaults
+    /// to 4h inside Codespaces and 30m elsewhere.
+    #[arg(long)]
+    pub ttl: Option<String>,
+    /// Skip the probe for an existing user-managed mux.
+    #[arg(long)]
+    pub no_existing_mux: bool,
+    /// Force interactive prompt even when an env passphrase var is set.
+    #[arg(long)]
+    pub interactive: bool,
+    /// Disable interactive prompts entirely (CI mode).
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DisconnectArgs {
+    /// Namespace to disconnect.
+    pub namespace: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectionsArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DisconnectAllArgs {
+    /// Skip confirmation prompt.
+    #[arg(long, short)]
+    pub yes: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
