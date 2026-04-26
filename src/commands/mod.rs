@@ -13,6 +13,7 @@ pub mod profile;
 pub mod remove;
 pub mod resolve;
 pub mod revert;
+pub mod search;
 pub mod setup;
 pub mod show;
 pub mod test;

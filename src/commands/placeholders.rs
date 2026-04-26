@@ -16,7 +16,6 @@ fn describe(cmd: &Command) -> (&'static str, &'static str) {
         Command::Why(_) => ("why", "Phase 9"),
         Command::Connectivity(_) => ("connectivity", "Phase 9"),
         Command::Recipe(_) => ("recipe", "Phase 9"),
-        Command::Search(_) => ("search", "Phases 6/7"),
         Command::Fleet(_) => ("fleet", "Phase 11"),
         _ => ("(internal)", "implemented"),
     }

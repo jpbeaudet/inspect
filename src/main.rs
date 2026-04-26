@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod discovery;
 mod error;
+mod logql;
 mod paths;
 mod profile;
 mod redact;
@@ -68,6 +69,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Images(args) => verbs::images::run(args),
         Command::Network(args) => verbs::network::run(args),
         Command::Ports(args) => verbs::ports::run(args),
+        Command::Search(args) => commands::search::run(args),
         Command::Restart(args) => verbs::write::lifecycle::restart(args),
         Command::Stop(args) => verbs::write::lifecycle::stop(args),
         Command::Start(args) => verbs::write::lifecycle::start(args),
@@ -85,7 +87,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Why(_)
         | Command::Connectivity(_)
         | Command::Recipe(_)
-        | Command::Search(_)
         | Command::Fleet(_) => commands::placeholders::run(cli.command),
     }
 }

@@ -1,0 +1,192 @@
+//! Round-trip tests against the canonical examples in bible §9.12.
+
+use super::ast::*;
+use super::*;
+
+fn ok(input: &str) -> Query {
+    parse(input).unwrap_or_else(|e| panic!("expected ok, got: {}\n{}", e, e.render(input)))
+}
+
+fn err(input: &str) -> ParseError {
+    parse(input).expect_err("expected parse error")
+}
+
+#[test]
+fn simple_selector_with_filter() {
+    let q = ok(r#"{server=~"prod-.*", service="storage", source="logs"} |= "error""#);
+    assert!(q.is_log());
+    let Query::Log(l) = q else { unreachable!() };
+    assert_eq!(l.selector.branches.len(), 1);
+    let s = &l.selector.branches[0];
+    assert_eq!(s.matchers.len(), 3);
+    assert_eq!(s.matchers[0].name, "server");
+    assert_eq!(s.matchers[0].op, MatchOp::Re);
+    assert_eq!(l.pipeline.len(), 1);
+}
+
+#[test]
+fn json_stage_then_field_filter() {
+    let q = ok(r#"{server="arte", source="logs"} | json | status >= 500"#);
+    let Query::Log(l) = q else { unreachable!() };
+    assert_eq!(l.pipeline.len(), 2);
+    assert!(matches!(
+        l.pipeline[0],
+        PipelineOp::Stage(Stage::Json)
+    ));
+    assert!(matches!(
+        l.pipeline[1],
+        PipelineOp::Stage(Stage::FieldFilter { .. })
+    ));
+}
+
+#[test]
+fn count_over_time_metric() {
+    let q = ok(r#"count_over_time({server="arte", source="logs"} |= "error" [5m])"#);
+    assert!(q.is_metric());
+}
+
+#[test]
+fn topk_with_grouping() {
+    let q = ok(
+        r#"topk(5, sum by (service) (rate({server="arte", source="logs"} |= "error" [1h])))"#,
+    );
+    let Query::Metric(MetricQuery::Vector(v)) = q else {
+        panic!("expected vector aggregation")
+    };
+    assert_eq!(v.func, AggFn::Topk);
+    assert_eq!(v.param, Some(5));
+    let MetricQuery::Vector(inner) = *v.inner else {
+        panic!("expected nested vector aggregation")
+    };
+    assert_eq!(inner.func, AggFn::Sum);
+    assert!(matches!(
+        inner.grouping,
+        Some(Grouping {
+            mode: GroupingMode::By,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn map_stage_with_subquery() {
+    let q = ok(
+        r#"{server="arte", source="logs"} |= "milvus" | json | map { {server="arte", service="$service", source=~"file:.*"} |~ "milvus" }"#,
+    );
+    let Query::Log(l) = q else { unreachable!() };
+    let last = l.pipeline.last().unwrap();
+    let PipelineOp::Stage(Stage::Map { sub, .. }) = last else {
+        panic!("expected map stage")
+    };
+    assert_eq!(sub.selector.branches.len(), 1);
+}
+
+#[test]
+fn selector_union_with_or() {
+    let q = ok(
+        r#"{server="arte", service="atlas", source="logs"} or {server="arte", service="atlas", source="file:/etc/atlas.conf"} |= "milvus""#,
+    );
+    let Query::Log(l) = q else { unreachable!() };
+    assert_eq!(l.selector.branches.len(), 2);
+}
+
+#[test]
+fn field_filter_boolean() {
+    let q = ok(
+        r#"{server="arte", source="logs"} | json | status >= 500 and method == "POST" or path =~ "/api/.*""#,
+    );
+    let Query::Log(l) = q else { unreachable!() };
+    let PipelineOp::Stage(Stage::FieldFilter { expr, .. }) = &l.pipeline[1] else {
+        panic!("expected field filter")
+    };
+    // top is `or`
+    assert!(matches!(expr, FieldExpr::Or(_, _)));
+}
+
+#[test]
+fn label_format_and_drop() {
+    let q = ok(
+        r#"{server="arte", source="logs"} | json | label_format svc="{{.service}}" | drop tmp, debug"#,
+    );
+    let Query::Log(l) = q else { unreachable!() };
+    assert!(matches!(l.pipeline[1], PipelineOp::Stage(Stage::LabelFormat { .. })));
+    assert!(matches!(l.pipeline[2], PipelineOp::Stage(Stage::Drop { .. })));
+}
+
+#[test]
+fn alias_substitution() {
+    let q = parse_with_aliases(r#"@plogs |= "x""#, |n| {
+        if n == "plogs" {
+            Some(r#"{server="arte", source="logs"}"#.into())
+        } else {
+            None
+        }
+    })
+    .unwrap();
+    assert!(q.is_log());
+}
+
+#[test]
+fn alias_union_or() {
+    let q = parse_with_aliases(r#"@plogs or @atlas |= "milvus""#, |n| match n {
+        "plogs" => Some(r#"{server="arte", source="logs"}"#.into()),
+        "atlas" => Some(r#"{server="arte", source="file:/etc/atlas.conf"}"#.into()),
+        _ => None,
+    })
+    .unwrap();
+    let Query::Log(l) = q else { unreachable!() };
+    assert_eq!(l.selector.branches.len(), 2);
+}
+
+#[test]
+fn unknown_alias_errors() {
+    let e = err("@nope");
+    assert!(e.message.contains("unknown alias"));
+}
+
+#[test]
+fn missing_source_label_errors() {
+    let e = err(r#"{server="arte"} |= "x""#);
+    assert!(e.message.contains("source"));
+}
+
+#[test]
+fn rejects_unterminated_string() {
+    let e = err(r#"{server="arte}"#);
+    assert!(e.message.contains("unterminated") || e.message.contains("string"));
+}
+
+#[test]
+fn topk_requires_integer_param() {
+    let e = err(r#"topk(sum by (service) (rate({source="logs"} [1h])))"#);
+    assert!(e.message.contains("integer"));
+}
+
+#[test]
+fn empty_selector_errors() {
+    let e = err(r#"{} |= "x""#);
+    assert!(e.message.contains("at least one") || e.message.contains("source"));
+}
+
+#[test]
+fn duration_units() {
+    let q = ok(r#"rate({source="logs"} [2h])"#);
+    let Query::Metric(MetricQuery::Range(r)) = q else {
+        panic!("expected range agg")
+    };
+    assert_eq!(r.range_ms, 2 * 3_600_000);
+}
+
+#[test]
+fn render_diagnostic_has_carat() {
+    let e = err(r#"{server=}"#);
+    let r = e.render(r#"{server=}"#);
+    assert!(r.contains("error:"));
+    assert!(r.contains("^"));
+}
+
+#[test]
+fn trailing_garbage_errors() {
+    let e = err(r#"{source="logs"} junk"#);
+    assert!(e.message.contains("trailing"));
+}

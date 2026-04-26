@@ -95,7 +95,7 @@ pub enum Command {
 
     // ---- Phase 6/7 search ----------------------------------------------------
     /// LogQL search across mediums and namespaces.
-    Search(SelectorArgs),
+    Search(SearchArgs),
 
     // ---- Phase 5 write verbs -------------------------------------------------
     /// Restart container(s).
@@ -220,6 +220,30 @@ pub struct SelectorArgs {
     /// Free-form selector or arguments. Validated in later phases.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// LogQL query string. Always pass a single quoted argument.
+    pub query: String,
+    /// Restrict to records newer than this duration (e.g. `5m`, `1h`).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Restrict to records older than this duration.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Tail the last N records before applying further filters.
+    #[arg(long)]
+    pub tail: Option<usize>,
+    /// Stream new records as they arrive (log queries only).
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+    /// Emit machine-readable JSON envelopes instead of human text.
+    #[arg(long)]
+    pub json: bool,
+    /// Disable ANSI color in human output.
+    #[arg(long)]
+    pub no_color: bool,
 }
 
 #[derive(Debug, Args)]
