@@ -1,10 +1,11 @@
 //! `inspect fleet <verb>` — Phase 11 multi-namespace orchestrator.
 //!
 //! Resolves `--ns` to a list of configured namespaces (glob, comma list,
-//! or `@group`), applies the large-fanout interlock, and then fans out the
-//! inner verb across the matched set with bounded concurrency. Failures
-//! on individual namespaces do not abort the run by default — the bible
-//! says "if one namespace fails, fleet continues with the rest".
+//! or `@group`), applies the large-fanout interlock against the **total
+//! target count** (bible §13), and then fans out the inner verb across
+//! the matched set with bounded concurrency. Failures on individual
+//! namespaces do not abort the run by default — the bible says "if one
+//! namespace fails, fleet continues with the rest".
 //!
 //! Implementation strategy: each per-namespace step is executed by
 //! re-invoking the same `inspect` binary as a child process. This keeps
@@ -13,15 +14,17 @@
 //! supported:
 //!
 //! * **Selector verbs** (status, ps, logs, restart, …): the child
-//!   inherits `INSPECT_FLEET_FORCE_NS=<ns>`, which the selector resolver
-//!   honors as an override for the server portion of the selector. The
-//!   user's verb args are forwarded verbatim.
+//!   inherits a private env-var pair (see [`FORCE_NS_VAR`] /
+//!   [`FORCE_PARENT_PID_VAR`]) that the selector resolver honors as an
+//!   override for the server portion of the selector. The user's verb
+//!   args are forwarded verbatim, except that any explicit server atoms
+//!   in the inner selector are rejected up-front (M2) — there is no
+//!   silent intersection.
 //! * **Namespace-positional verbs** (setup, test, connect, …): the
 //!   namespace is injected as the first positional argument, no env
 //!   override is set.
 
-use std::collections::BTreeSet;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -33,7 +36,11 @@ use crate::commands::list::json_string;
 use crate::config::groups;
 use crate::config::resolver as ns_resolver;
 use crate::error::ExitKind;
+use crate::profile::cache::load_profile;
+use crate::profile::schema::{Profile, ServiceKind};
 use crate::safety::gate::{Confirm, ConfirmResult, SafetyGate};
+use crate::selector::ast::{Selector, ServiceSpec};
+use crate::selector::parser::parse_selector;
 
 /// Default concurrency cap (bible §13).
 const DEFAULT_FLEET_CONCURRENCY: usize = 8;
@@ -41,6 +48,17 @@ const DEFAULT_FLEET_CONCURRENCY: usize = 8;
 const MAX_FLEET_CONCURRENCY: usize = 64;
 /// Large-fanout interlock threshold (bible §8.2).
 const FANOUT_THRESHOLD: usize = 10;
+/// Internal env var the selector resolver consults to pin selector
+/// resolution to a single namespace. Renamed from the Phase-11 draft
+/// (`INSPECT_FLEET_FORCE_NS`) so the contract is explicitly private:
+/// honoring the override requires both this var and a matching parent
+/// pid (see [`FORCE_PARENT_PID_VAR`]).
+pub const FORCE_NS_VAR: &str = "INSPECT_INTERNAL_FLEET_FORCE_NS";
+/// PID of the fleet parent that set [`FORCE_NS_VAR`]. The selector
+/// resolver only honors the override when this matches the resolver's
+/// own parent pid, so a stray exported value in a user shell can't
+/// silently scope every subsequent `inspect` invocation.
+pub const FORCE_PARENT_PID_VAR: &str = "INSPECT_INTERNAL_FLEET_PARENT_PID";
 
 /// Verbs that accept a namespace as their first positional arg rather
 /// than a selector. Fleet must inject the namespace into the args list
@@ -90,7 +108,9 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     }
     let known: Vec<String> = all.iter().map(|n| n.name.clone()).collect();
 
-    // Resolve --ns to a concrete list.
+    // Resolve --ns to a concrete list. `@group` is exclusive; mixing it
+    // into a comma-list is rejected up-front so the precedence is
+    // unambiguous (L1).
     let chosen = expand_ns_pattern(&args.ns, &known)?;
     if chosen.is_empty() {
         return Err(anyhow!(
@@ -104,49 +124,104 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
         ));
     }
 
-    // Large-fanout interlock — applied at the namespace count level. The
-    // bible says "large-fanout interlock triggers on total target count";
-    // since target count >= namespace count, gating on namespace count is
-    // a conservative lower bound that always fires when the selector
-    // covers >10 namespaces.
-    let gate = SafetyGate {
-        apply: true,
-        yes: args.yes_all,
-        yes_all: args.yes_all,
-        fanout_threshold: FANOUT_THRESHOLD,
-        non_interactive: std::env::var("INSPECT_NON_INTERACTIVE").is_ok()
-            || !std::io::IsTerminal::is_terminal(&std::io::stdin()),
+    // M2: when fleet pins namespace resolution via the env override,
+    // any server portion in the inner selector would be silently
+    // discarded. We handle this in two ways:
+    //   * a bare token with no `/` (e.g. `pulse`, `_`) is rewritten to
+    //     `_/<token>` so the user's intent ("this service / host on
+    //     each chosen namespace") survives the override unchanged.
+    //   * an explicit server portion (`arte/pulse`, `~prod-1/_`,
+    //     `*/pulse`) is rejected up-front — there is no safe
+    //     interpretation that wouldn't surprise the user.
+    let force_ns_mode = !NAMESPACE_POSITIONAL_VERBS.contains(&args.verb.as_str());
+    let mut inner_args = args.args.clone();
+    if force_ns_mode {
+        if let Some(sel_idx) = first_positional_index(&inner_args) {
+            let raw = inner_args[sel_idx].clone();
+            if let Some(rewritten) = rewrite_inner_selector(&raw)? {
+                inner_args[sel_idx] = rewritten;
+            }
+        }
+    }
+
+    // H2: compute the total target count before fanout so the
+    // large-fanout interlock fires on the actual fanout size, not just
+    // the namespace count. We do a best-effort dry-resolve against each
+    // chosen namespace's cached profile; if a profile isn't present the
+    // namespace contributes 1 (the same lower bound the live verb uses).
+    let inner_selector = first_positional_index(&inner_args).map(|i| inner_args[i].as_str());
+    let total_targets = estimate_total_targets(&chosen, inner_selector, force_ns_mode);
+
+    // L7: build the safety gate via the public constructor so any future
+    // side-effects in `SafetyGate::new` stay in sync.
+    let mut gate = SafetyGate::new(true, args.yes_all, args.yes_all);
+    gate.fanout_threshold = FANOUT_THRESHOLD;
+    let prompt = if total_targets > chosen.len() {
+        format!(
+            "About to fan out to {} target(s) across {} namespace(s). Continue?",
+            total_targets,
+            chosen.len()
+        )
+    } else {
+        format!(
+            "About to fan out to {} namespace(s). Continue?",
+            chosen.len()
+        )
     };
-    match gate.confirm(
-        Confirm::LargeFanout,
-        chosen.len(),
-        "About to fan out to a large number of namespaces. Continue?",
-    ) {
+    match gate.confirm(Confirm::LargeFanout, total_targets, &prompt) {
         ConfirmResult::Apply | ConfirmResult::DryRun => {}
         ConfirmResult::Aborted(why) => {
             return Err(anyhow!("fleet aborted: {why}"));
         }
     }
 
-    // Resolve concurrency.
+    // Resolve concurrency. Emits a stderr warning if an env-supplied
+    // value was clamped (L4).
     let concurrency = resolve_concurrency(args.concurrency)?;
 
     // Self-binary path for child invocations.
     let self_exe = std::env::current_exe()
         .map_err(|e| anyhow!("cannot locate inspect binary for fleet fanout: {e}"))?;
 
+    // M5: pre-warm one SSH master per chosen namespace BEFORE fanout.
+    // Without this, N children each try to open their own master in
+    // parallel, which (a) hammers the local ssh binary and remote sshd,
+    // and (b) often gets us rate-limited by managed SSH providers. With
+    // the pre-warm, every child hits the `MasterStatus::Alive` fast
+    // path in `start_master` and reuses one socket per ns.
+    //
+    // Pre-warm is bounded to a small connect concurrency (independent
+    // of fleet fanout concurrency) and is best-effort: a per-ns failure
+    // is logged to stderr and the child will surface the real error
+    // when it tries again. Skipped entirely under the mock runner.
+    if force_ns_mode {
+        prewarm_masters(&chosen, &all);
+    }
+
     // Build the per-namespace plan.
     let plan: Vec<NsPlan> = chosen
         .iter()
         .map(|ns| NsPlan {
             namespace: ns.clone(),
-            child_args: build_child_args(&args.verb, &args.args, ns),
-            force_ns: !NAMESPACE_POSITIONAL_VERBS.contains(&args.verb.as_str()),
+            child_args: build_child_args(&args.verb, &inner_args, ns),
+            force_ns: force_ns_mode,
         })
         .collect();
 
+    // S1: collect every `key_passphrase_env` configured for OTHER
+    // namespaces so each child only sees its own credential env var.
+    let foreign_passphrase_envs = passphrase_envs_by_ns(&all);
+
     let abort_on_error = args.abort_on_error;
-    let results = fan_out(&self_exe, plan, concurrency, abort_on_error);
+    let parent_pid = std::process::id();
+    let results = fan_out(
+        &self_exe,
+        plan,
+        concurrency,
+        abort_on_error,
+        parent_pid,
+        &foreign_passphrase_envs,
+    );
 
     let total = results.len();
     let ok = results.iter().filter(|r| r.exit == 0).count();
@@ -158,13 +233,17 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
         emit_human(&args.verb, &results, total, ok, failed);
     }
 
-    if failed == 0 {
-        Ok(ExitKind::Success)
-    } else if ok == 0 && results.iter().all(|r| r.exit == 1) {
-        // All children reported NoMatches.
+    // M3: collapse per-child exit codes into a single fleet exit code
+    // with explicit, documented semantics:
+    //   * any child fails with code != 0 and != 1   -> Error (2)
+    //   * else if every child returned NoMatches    -> NoMatches (1)
+    //   * else (any ok, possibly mixed with 1s)     -> Success (0)
+    if results.iter().any(|r| r.exit > 1) {
+        Ok(ExitKind::Error)
+    } else if total > 0 && results.iter().all(|r| r.exit == 1) {
         Ok(ExitKind::NoMatches)
     } else {
-        Ok(ExitKind::Error)
+        Ok(ExitKind::Success)
     }
 }
 
@@ -185,7 +264,8 @@ pub(crate) struct NsResult {
 
 /// Expand a `--ns` argument to a concrete, deduplicated, sorted list of
 /// configured namespace names. Accepts:
-/// * `@<group>` — looked up in `~/.inspect/groups.toml`
+/// * `@<group>` — looked up in `~/.inspect/groups.toml`. Exclusive form;
+///   may not be combined with comma-listed entries.
 /// * `a,b,c` — comma-separated explicit list (each entry may itself be
 ///   a glob)
 /// * a single glob or literal
@@ -193,6 +273,16 @@ fn expand_ns_pattern(pat: &str, known: &[String]) -> Result<Vec<String>> {
     let trimmed = pat.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("--ns must not be empty"));
+    }
+    // L1: `@group` is exclusive. Mixing into a comma-list is ambiguous;
+    // require the user to either use the group alone or spell members out.
+    let has_group_marker = trimmed.contains('@');
+    let has_comma = trimmed.contains(',');
+    if has_group_marker && (has_comma || !trimmed.starts_with('@')) {
+        return Err(anyhow!(
+            "--ns: '@<group>' is exclusive; mix with a comma list is ambiguous. \
+             Either use '--ns @<group>' alone or spell the members out (e.g. '--ns a,b,c')."
+        ));
     }
     if let Some(name) = trimmed.strip_prefix('@') {
         let file = groups::load()?;
@@ -222,19 +312,247 @@ fn expand_ns_pattern(pat: &str, known: &[String]) -> Result<Vec<String>> {
 }
 
 fn resolve_concurrency(flag: Option<usize>) -> Result<usize> {
-    let n = if let Some(v) = flag {
-        v
+    let (raw, source) = if let Some(v) = flag {
+        (v, "--concurrency")
     } else if let Ok(env) = std::env::var("INSPECT_FLEET_CONCURRENCY") {
-        env.parse::<usize>().map_err(|e| {
+        let parsed = env.parse::<usize>().map_err(|e| {
             anyhow!("INSPECT_FLEET_CONCURRENCY='{env}' is not a positive integer: {e}")
-        })?
+        })?;
+        (parsed, "INSPECT_FLEET_CONCURRENCY")
     } else {
-        DEFAULT_FLEET_CONCURRENCY
+        (DEFAULT_FLEET_CONCURRENCY, "default")
     };
-    if n == 0 {
+    if raw == 0 {
         return Err(anyhow!("fleet concurrency must be >= 1"));
     }
-    Ok(n.min(MAX_FLEET_CONCURRENCY))
+    let clamped = raw.min(MAX_FLEET_CONCURRENCY);
+    if clamped != raw {
+        eprintln!(
+            "warning: fleet concurrency from {source} ({raw}) clamped to hard ceiling of {clamped}"
+        );
+    }
+    Ok(clamped)
+}
+
+/// Best-effort index of the inner verb's selector positional. Returns
+/// the index of the last non-flag-shaped token in `args`. This is only
+/// a heuristic (we don't know each verb's flag schema), so the M2
+/// inner-selector check below treats parse failures as "not a
+/// selector" and silently skips them rather than producing false
+/// positives.
+fn first_positional_index(args: &[String]) -> Option<usize> {
+    args.iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, a)| {
+            if a == "--" || a.starts_with('-') {
+                None
+            } else {
+                Some(i)
+            }
+        })
+}
+
+/// M2: rewrite the inner-verb selector so fleet's namespace pin is
+/// safe.
+///
+/// * Returns `Ok(None)` if the selector should be left as-is.
+/// * Returns `Ok(Some(rewritten))` for bare service-portion tokens
+///   (e.g. `pulse` -> `_/pulse`).
+/// * Returns `Err(...)` for selectors that explicitly target a server
+///   set, since those would be silently overridden by the env pin.
+fn rewrite_inner_selector(raw: &str) -> Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    // Bare host marker: leave alone (resolves to host-level on each ns).
+    if trimmed == "_" {
+        return Ok(None);
+    }
+    // Already in `server/service[:path]` form.
+    if trimmed.contains('/') {
+        // We only allow `_/...` (host-marker server) here; any other
+        // server portion is rejected.
+        if let Some(rest) = trimmed.strip_prefix("_/") {
+            // `_/...` is unambiguous; keep verbatim.
+            let _ = rest; // explicit no-op to document intent
+            return Ok(None);
+        }
+        // Permit a leading regex like `/foo/_` as the SERVICE portion
+        // only when there is no preceding non-empty server segment.
+        // Otherwise reject.
+        return Err(anyhow!(
+            "selector '{raw}' specifies a server portion inside 'fleet', which would be silently overridden. \
+             Drop the server portion (use 'fleet --ns <pattern>' for namespace selection) and pass only the service \
+             portion to the inner verb (e.g. '_' or 'pulse')."
+        ));
+    }
+    // Wildcards / exclusions in a bare token are server atoms by syntax
+    // and have no service-portion meaning under the env pin.
+    if trimmed.contains('*') || trimmed.starts_with('~') || trimmed == "all" {
+        return Err(anyhow!(
+            "selector '{raw}' looks like a server pattern, but 'fleet' has already chosen the namespace set \
+             via '--ns'. Use '--ns' for namespace selection and pass a service portion (e.g. '_' or 'pulse') \
+             as the inner selector."
+        ));
+    }
+    // Bare service-portion token: rewrite as `_/<token>` so the
+    // selector resolver sees the host-marker server (which the env
+    // override will replace with the chosen namespace) plus the user's
+    // service.
+    Ok(Some(format!("_/{trimmed}")))
+}
+
+/// H2: estimate the total number of targets fleet will end up invoking
+/// the inner verb on. Uses each namespace's cached profile when
+/// available; falls back to `1` per namespace.
+fn estimate_total_targets(
+    chosen: &[String],
+    selector: Option<&str>,
+    force_ns_mode: bool,
+) -> usize {
+    if !force_ns_mode {
+        return chosen.len();
+    }
+    let parsed = selector.and_then(|s| parse_selector(s).ok());
+    let mut total = 0usize;
+    for ns in chosen {
+        let profile = load_profile(ns).ok().flatten();
+        total += target_count_for_ns(parsed.as_ref(), profile.as_ref());
+    }
+    total.max(chosen.len())
+}
+
+fn target_count_for_ns(parsed: Option<&Selector>, profile: Option<&Profile>) -> usize {
+    let sel = match parsed {
+        Some(s) => s,
+        None => return 1,
+    };
+    match &sel.service {
+        None | Some(ServiceSpec::Host) => 1,
+        Some(ServiceSpec::All) => profile
+            .map(|p| {
+                p.services
+                    .iter()
+                    .filter(|s| matches!(s.kind, ServiceKind::Container | ServiceKind::Systemd))
+                    .count()
+            })
+            .filter(|n| *n > 0)
+            .unwrap_or(1),
+        Some(ServiceSpec::Atoms(atoms)) => atoms.len().max(1),
+    }
+}
+
+/// S1 helper: build a map `namespace -> {passphrase env names}` from the
+/// resolved namespace list. Children get every other namespace's vars
+/// stripped from their environment before spawn.
+fn passphrase_envs_by_ns(
+    all: &[crate::config::namespace::ResolvedNamespace],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for ns in all {
+        let mut s: BTreeSet<String> = BTreeSet::new();
+        if let Some(v) = ns.config.key_passphrase_env.as_ref() {
+            if !v.is_empty() {
+                s.insert(v.clone());
+            }
+        }
+        out.insert(ns.name.clone(), s);
+    }
+    out
+}
+
+/// Hard cap on simultaneous SSH connect attempts during pre-warm.
+/// Independent of `--concurrency` so a 64-way fleet doesn't trigger
+/// 64 simultaneous fresh sshd handshakes against a managed provider.
+const PREWARM_CONNECT_CONCURRENCY: usize = 4;
+
+/// M5: open one SSH master per chosen namespace BEFORE child fanout so
+/// every child reuses the alive socket via `MasterStatus::Alive`.
+///
+/// * Skipped under `INSPECT_MOCK_REMOTE_FILE` (test harness) or when
+///   the user sets `INSPECT_FLEET_SKIP_PREWARM=1`.
+/// * Bounded to [`PREWARM_CONNECT_CONCURRENCY`] simultaneous connects
+///   regardless of `--concurrency`.
+/// * Best-effort: per-ns failures are reported on stderr and the
+///   matching child will surface the real error when it runs.
+fn prewarm_masters(
+    chosen: &[String],
+    all: &[crate::config::namespace::ResolvedNamespace],
+) {
+    if std::env::var_os("INSPECT_MOCK_REMOTE_FILE").is_some() {
+        return;
+    }
+    if std::env::var_os("INSPECT_FLEET_SKIP_PREWARM").is_some() {
+        return;
+    }
+
+    use crate::ssh::master::{check_socket, socket_path, start_master, AuthSelection, MasterStatus};
+    use crate::ssh::options::SshTarget;
+
+    let by_name: BTreeMap<&str, &crate::config::namespace::ResolvedNamespace> =
+        all.iter().map(|n| (n.name.as_str(), n)).collect();
+
+    let (job_tx, job_rx) = mpsc::channel::<String>();
+    let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+
+    let workers: Vec<_> = (0..PREWARM_CONNECT_CONCURRENCY.min(chosen.len()))
+        .map(|_| {
+            let job_rx = job_rx.clone();
+            // Each worker borrows from the same map snapshot via Arc.
+            let by_name = by_name
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).clone()))
+                .collect::<BTreeMap<String, _>>();
+            thread::spawn(move || loop {
+                let ns = {
+                    let lock = job_rx.lock().unwrap();
+                    match lock.recv() {
+                        Ok(j) => j,
+                        Err(_) => break,
+                    }
+                };
+                let resolved = match by_name.get(&ns) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let target = match SshTarget::from_resolved(resolved) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("fleet: prewarm: ns '{ns}' skipped (target: {e})");
+                        continue;
+                    }
+                };
+                // Already alive? Cheap check, no connect.
+                let sock = socket_path(&ns);
+                if matches!(check_socket(&sock, &target), MasterStatus::Alive) {
+                    continue;
+                }
+                let auth = AuthSelection {
+                    passphrase_env: resolved.config.key_passphrase_env.as_deref(),
+                    allow_interactive: false,
+                    skip_existing_mux_check: false,
+                };
+                let ttl = crate::ssh::ttl::resolve(None)
+                    .map(|(t, _)| t)
+                    .unwrap_or_else(|_| "8h".to_string());
+                if let Err(e) = start_master(&ns, &target, &ttl, auth) {
+                    eprintln!("fleet: prewarm: ns '{ns}' will retry in child (reason: {e})");
+                }
+            })
+        })
+        .collect();
+
+    for ns in chosen {
+        if job_tx.send(ns.clone()).is_err() {
+            break;
+        }
+    }
+    drop(job_tx);
+    for w in workers {
+        let _ = w.join();
+    }
 }
 
 /// Build the argv (excluding the program name) for the child invocation
@@ -255,25 +573,33 @@ fn build_child_args(verb: &str, user_args: &[String], ns: &str) -> Vec<String> {
 }
 
 /// Bounded-concurrency worker pool. Each worker pulls one plan, spawns
-/// the child, captures stdout/stderr, and pushes a result back.
+/// the child, captures stdout/stderr concurrently, and pushes a result
+/// back.
 fn fan_out(
     self_exe: &std::path::Path,
     plan: Vec<NsPlan>,
     concurrency: usize,
     abort_on_error: bool,
+    parent_pid: u32,
+    passphrase_envs: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<NsResult> {
     let total = plan.len();
+    if total == 0 {
+        return Vec::new();
+    }
     let (job_tx, job_rx) = mpsc::channel::<NsPlan>();
     let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
     let (res_tx, res_rx) = mpsc::channel::<NsResult>();
     let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let envs = std::sync::Arc::new(passphrase_envs.clone());
 
-    let workers: Vec<_> = (0..concurrency.min(total).max(1))
+    let workers: Vec<_> = (0..concurrency.min(total))
         .map(|_| {
             let job_rx = job_rx.clone();
             let res_tx = res_tx.clone();
             let abort = abort.clone();
             let exe = self_exe.to_path_buf();
+            let envs = envs.clone();
             thread::spawn(move || loop {
                 if abort.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
@@ -285,7 +611,7 @@ fn fan_out(
                         Err(_) => break,
                     }
                 };
-                let result = run_child(&exe, &job);
+                let result = run_child(&exe, &job, parent_pid, &envs);
                 let exit_code = result.exit;
                 let _ = res_tx.send(result);
                 if abort_on_error && exit_code != 0 {
@@ -312,37 +638,47 @@ fn fan_out(
     out
 }
 
-fn run_child(exe: &std::path::Path, plan: &NsPlan) -> NsResult {
+fn run_child(
+    exe: &std::path::Path,
+    plan: &NsPlan,
+    parent_pid: u32,
+    passphrase_envs: &BTreeMap<String, BTreeSet<String>>,
+) -> NsResult {
     let mut cmd = StdCommand::new(exe);
     cmd.args(&plan.child_args);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     if plan.force_ns {
-        cmd.env("INSPECT_FLEET_FORCE_NS", &plan.namespace);
+        cmd.env(FORCE_NS_VAR, &plan.namespace);
+        cmd.env(FORCE_PARENT_PID_VAR, parent_pid.to_string());
     } else {
-        cmd.env_remove("INSPECT_FLEET_FORCE_NS");
+        cmd.env_remove(FORCE_NS_VAR);
+        cmd.env_remove(FORCE_PARENT_PID_VAR);
     }
-    // Children inherit INSPECT_HOME, INSPECT_MOCK_REMOTE_FILE, etc.
+    // S1: drop foreign-namespace passphrase env vars from the child's
+    // environment. Each child only sees the `key_passphrase_env`
+    // configured for its own namespace (if any).
+    let own = passphrase_envs.get(&plan.namespace);
+    for var in passphrase_envs.values().flatten() {
+        let keep = own.map(|s| s.contains(var)).unwrap_or(false);
+        if !keep {
+            cmd.env_remove(var);
+        }
+    }
     cmd.env("INSPECT_NON_INTERACTIVE", "1");
 
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut s) = child.stdout.take() {
-                let _ = s.read_to_string(&mut stdout);
-            }
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_string(&mut stderr);
-            }
-            let status = child.wait().ok();
-            let exit = status.and_then(|s| s.code()).unwrap_or(2);
+    // H1: `output()` drains both pipes concurrently, avoiding the
+    // deadlock that `read_to_string` on each pipe in sequence can hit
+    // when a child writes >64 KB to stderr before exiting.
+    match cmd.output() {
+        Ok(out) => {
+            let exit = out.status.code().unwrap_or(2);
             NsResult {
                 namespace: plan.namespace.clone(),
                 exit,
-                stdout,
-                stderr,
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             }
         }
         Err(e) => NsResult {
@@ -449,5 +785,67 @@ mod tests {
             MAX_FLEET_CONCURRENCY
         );
         assert!(resolve_concurrency(Some(0)).is_err());
+    }
+
+    #[test]
+    fn expand_pattern_rejects_group_in_comma_list() {
+        let known = vec!["a".to_string(), "b".to_string()];
+        let err = expand_ns_pattern("@grp,a", &known).unwrap_err();
+        assert!(
+            err.to_string().contains("'@<group>' is exclusive"),
+            "expected exclusivity error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_pattern_rejects_group_marker_in_middle() {
+        let known = vec!["a".to_string()];
+        let err = expand_ns_pattern("a,@grp", &known).unwrap_err();
+        assert!(err.to_string().contains("'@<group>' is exclusive"));
+    }
+
+    #[test]
+    fn first_positional_skips_flags_and_values() {
+        let args: Vec<String> = vec![
+            "--json".into(),
+            "--since".into(),
+            "5m".into(),
+            "pulse".into(),
+        ];
+        assert_eq!(first_positional_index(&args), Some(3));
+        let args2: Vec<String> = vec!["--apply".into(), "_".into()];
+        assert_eq!(first_positional_index(&args2), Some(1));
+        let args3: Vec<String> = vec!["--key=val".into(), "_".into()];
+        assert_eq!(first_positional_index(&args3), Some(1));
+        let args4: Vec<String> = vec!["--apply".into(), "--json".into()];
+        assert_eq!(first_positional_index(&args4), None);
+    }
+
+    #[test]
+    fn rewrite_inner_selector_rejects_server_portion() {
+        let err = rewrite_inner_selector("prod-1/pulse").unwrap_err();
+        assert!(
+            err.to_string().contains("silently overridden"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rewrite_inner_selector_rewrites_bare_service() {
+        let r = rewrite_inner_selector("pulse").unwrap();
+        assert_eq!(r, Some("_/pulse".to_string()));
+    }
+
+    #[test]
+    fn rewrite_inner_selector_passes_through_host_marker() {
+        assert_eq!(rewrite_inner_selector("_").unwrap(), None);
+        assert_eq!(rewrite_inner_selector("_/pulse").unwrap(), None);
+    }
+
+    #[test]
+    fn rewrite_inner_selector_rejects_wildcards() {
+        assert!(rewrite_inner_selector("*").is_err());
+        assert!(rewrite_inner_selector("~prod-1").is_err());
+        assert!(rewrite_inner_selector("all").is_err());
     }
 }

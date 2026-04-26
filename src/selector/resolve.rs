@@ -99,20 +99,17 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
 
     // Step 1: filter namespaces.
     //
-    // Phase 11 fleet override: when `INSPECT_FLEET_FORCE_NS` is set, the
-    // fleet orchestrator has already chosen the namespace and the user's
-    // server spec must be ignored. We still enforce that the forced
-    // namespace exists; otherwise selector resolution falls back to
-    // `NoMatches` with the usual diagnostic.
-    let chosen_namespaces = match std::env::var("INSPECT_FLEET_FORCE_NS").ok() {
-        Some(forced) if !forced.is_empty() => {
-            if known_names.iter().any(|n| n == &forced) {
-                vec![forced]
-            } else {
-                Vec::new()
-            }
-        }
-        _ => match_servers(&sel.server, &known_names),
+    // Phase 11 fleet override: when the private env-var pair
+    // `INSPECT_INTERNAL_FLEET_FORCE_NS` + `INSPECT_INTERNAL_FLEET_PARENT_PID`
+    // is set AND the parent-pid value matches our actual parent process
+    // (via `getppid()` on unix), the fleet orchestrator has already
+    // chosen the namespace and the user's server spec must be ignored.
+    // The pid-pairing check ensures a stray exported value in a user
+    // shell can't silently scope every subsequent `inspect` invocation
+    // — without a matching pair we fall through to the user's selector.
+    let chosen_namespaces = match fleet_forced_namespace(&known_names) {
+        Some(ns) => vec![ns],
+        None => match_servers(&sel.server, &known_names),
     };
 
     // Collect "what was available" for diagnostics.
@@ -173,6 +170,49 @@ fn fmt_set(s: &BTreeSet<String>) -> String {
     } else {
         s.iter().cloned().collect::<Vec<_>>().join(", ")
     }
+}
+
+/// Internal env-var pair set by `inspect fleet` to pin selector
+/// resolution to a single namespace. The names are intentionally tagged
+/// `INTERNAL` so a stray export in a user shell is obviously
+/// out-of-band.
+const FLEET_FORCE_NS_VAR: &str = "INSPECT_INTERNAL_FLEET_FORCE_NS";
+const FLEET_FORCE_PARENT_PID_VAR: &str = "INSPECT_INTERNAL_FLEET_PARENT_PID";
+
+/// Resolve the fleet override to a forced namespace, validating both
+/// the env-var pair and the parent-pid pairing. Returns `Some(ns)` only
+/// when every check passes AND the namespace is configured.
+fn fleet_forced_namespace(known: &[String]) -> Option<String> {
+    let forced = std::env::var(FLEET_FORCE_NS_VAR)
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let claimed_pid: u32 = std::env::var(FLEET_FORCE_PARENT_PID_VAR)
+        .ok()?
+        .parse()
+        .ok()?;
+    if !ppid_matches(claimed_pid) {
+        return None;
+    }
+    if known.iter().any(|n| n == &forced) {
+        Some(forced)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn ppid_matches(claimed: u32) -> bool {
+    // Safe: getppid is async-signal-safe and has no preconditions.
+    let actual = unsafe { libc::getppid() };
+    actual >= 0 && (actual as u32) == claimed
+}
+
+#[cfg(not(unix))]
+fn ppid_matches(_claimed: u32) -> bool {
+    // Without a portable parent-pid syscall, fall back to "rename is
+    // sufficient mitigation" — honor the override unconditionally on
+    // non-unix.
+    true
 }
 
 /// Match the server-spec against the configured namespace set.

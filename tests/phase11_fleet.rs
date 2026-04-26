@@ -6,7 +6,8 @@
 //!   * partial-failure semantics (one ns fails, others succeed, exit 2)
 //!   * `--abort-on-error` short-circuits remaining work
 //!   * JSON aggregate output with per-namespace granularity
-//!   * `INSPECT_FLEET_FORCE_NS` env override of the selector
+//!   * `INSPECT_INTERNAL_FLEET_FORCE_NS` env override of the selector
+//!     requires a matching parent-pid pairing (M1 hardening)
 //!   * large-fanout interlock fires on namespace count
 //!   * unsupported inner verbs (`fleet fleet …`) are rejected
 //!
@@ -55,6 +56,8 @@ impl Sandbox {
         c.env("INSPECT_HOME", self.home.path())
             .env("INSPECT_NON_INTERACTIVE", "1")
             .env_remove("INSPECT_FLEET_FORCE_NS")
+            .env_remove("INSPECT_INTERNAL_FLEET_FORCE_NS")
+            .env_remove("INSPECT_INTERNAL_FLEET_PARENT_PID")
             .env_remove("CODESPACES");
         if let Some(m) = &self.mock {
             c.env("INSPECT_MOCK_REMOTE_FILE", m.path());
@@ -192,23 +195,24 @@ fn fleet_json_aggregate_per_namespace() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Partial failure: one ns has no profile → fleet keeps going, exit 2.
+// 3. Partial failure: one ns has no matching service → that child
+//    fails, the other succeeds. Fleet returns Error (exit 2) overall
+//    per bible "fleet continues with the rest" semantics.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fleet_partial_failure_continues() {
     let sb = Sandbox::with_mock(fleet_ps_mock());
     write_servers_toml(sb.home(), &["prod-1", "prod-2"]);
-    // Each ns has a different service; the selector matches only prod-1.
     write_profile(sb.home(), "prod-1", &[("pulse", "luminary/pulse:1", "ok")]);
     write_profile(sb.home(), "prod-2", &[("atlas", "luminary/atlas:1", "ok")]);
 
     let out = sb
         .cmd()
-        .args(["fleet", "--ns", "prod-*", "--json", "ps", "*/pulse"])
+        .args(["fleet", "--ns", "prod-*", "--json", "ps", "pulse"])
         .output()
         .unwrap();
-    // Exit 2 because at least one ns failed (prod-2 has no `pulse`).
+    // Exit 2 because prod-2 errored (no `pulse` service).
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -304,29 +308,48 @@ fn fleet_comma_list_expansion() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. `INSPECT_FLEET_FORCE_NS` overrides the user's selector server part.
+// 6. The fleet override env var requires a matching parent-pid pairing.
 // ---------------------------------------------------------------------------
 //
-// We set the env var directly (bypassing fleet) and run a plain selector
-// verb against a server pattern that doesn't match the forced ns. The
-// forced ns wins because the override is unconditional.
+// M1 hardening: setting `INSPECT_INTERNAL_FLEET_FORCE_NS` alone (e.g.
+// from a stray shell export) MUST NOT silently rescope selector
+// resolution. The selector resolver only honors the override when it
+// is paired with a matching parent-pid env var, which only `inspect
+// fleet` itself can provide. Without the pairing, the user's selector
+// must win.
 
 #[test]
-fn fleet_force_ns_env_overrides_selector_server() {
+fn fleet_force_ns_env_requires_parent_pid_pairing() {
     let sb = Sandbox::with_mock(fleet_ps_mock());
-    write_servers_toml(sb.home(), &["prod-1"]);
+    write_servers_toml(sb.home(), &["prod-1", "arte"]);
     write_profile(sb.home(), "prod-1", &[("pulse", "luminary/pulse:1", "ok")]);
+    write_profile(sb.home(), "arte", &[("pulse", "luminary/pulse:1", "ok")]);
 
+    // Set the override var WITHOUT the matching parent-pid var. The
+    // selector "arte/_" must resolve normally against namespace "arte"
+    // (not get silently rescoped to "prod-1").
     let out = sb
         .cmd()
-        // Selector says "arte/_" but env forces "prod-1".
-        .env("INSPECT_FLEET_FORCE_NS", "prod-1")
-        .args(["ps", "arte/_"])
+        .env("INSPECT_INTERNAL_FLEET_FORCE_NS", "prod-1")
+        .args(["ps", "arte/_", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("pulse"), "expected pulse from prod-1: {stdout}");
+    // Every emitted record must reference the user-asked namespace,
+    // never the stray-env one.
+    assert!(
+        stdout.contains("\"server\":\"arte\""),
+        "expected arte records: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"server\":\"prod-1\""),
+        "stray FORCE_NS env must not rescope selector: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------

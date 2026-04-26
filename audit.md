@@ -1,32 +1,4 @@
-Starting: *Audit Phase 11 fleet orchestrator* (1/6)
 
-Read [](file:///workspaces/inspect/src/commands/fleet.rs#1-1), lines 1 to 200
-
-Read [](file:///workspaces/inspect/src/commands/fleet.rs#200-200), lines 200 to 340
-
-Read [](file:///workspaces/inspect/src/commands/fleet.rs#340-340), lines 340 to 450
-
-Ran terminal command:  cd /workspaces/inspect && grep -n "pub fn\|write\|append\|OpenOptions\|create\|flock\|fs::open\|write_atomic\|rename" src/safety/audit.rs | head -40
-
-Read [](file:///workspaces/inspect/src/safety/audit.rs#90-90), lines 90 to 115
-
-Ran terminal command:  cd /workspaces/inspect && grep -rn "INSPECT_FLEET_FORCE_NS\|INSPECT_NON_INTERACTIVE\|INSPECT_FLEET_CONCURRENCY" src/ | head -30
-
-Ran terminal command:  cd /workspaces/inspect && grep -n "askpass\|passphrase\|secret\|redact\|key_passphrase_env" src/ssh/exec.rs src/ssh/master.rs src/ssh/askpass.rs 2>&1 | head -30
-
-Let me check one more concern — whether the child stdout/stderr capture can deadlock, and check the bible for missed exit-criteria.  
-
-Ran terminal command:  cd /workspaces/inspect && cat src/safety/audit.rs | sed -n '1,60p'
-
-Ran terminal command:  cd /workspaces/inspect && cat src/safety/audit.rs | sed -n '60,100p'
-
-Ran terminal command:  cd /workspaces/inspect && grep -n "rand_u32\|rand::" src/safety/audit.rs | head
-
-Read [](file:///workspaces/inspect/src/safety/audit.rs#170-170), lines 170 to 200
-
-I have enough context. Compiling findings. 
-
-Starting: *Compile findings report* (6/6)
 
 # Phase 11 + Codebase Audit
 
@@ -62,14 +34,14 @@ The selector resolver honors this env var unconditionally (resolve.rs). If a use
 `fleet --ns 'prod-*' status '~prod-1/_'` resolves the user's `~prod-1` exclusion into a `ServerSpec`, but `INSPECT_FLEET_FORCE_NS` discards `sel.server` entirely (resolve.rs). The user thinks they excluded `prod-1`; fleet still ran it. Should at minimum reject server atoms in the inner selector when force-ns is active, or honor the original spec for filtering.
 
 ### M3. Fleet swallows children's `ExitKind::NoMatches` (exit 1) into a pure-1 collapse
-fleet.rs only returns `NoMatches` when **every** child returned exit 1. A mixed run of (ok, ok, no-match) returns `Error` (2). That's defensible, but it means `inspect fleet grep "needle"` over 5 namespaces where 4 found nothing and 1 found a match returns 2, not 0. Bible §10 doesn't fully specify this; worth a deliberate decision.
+fleet.rs only returns `NoMatches` when **every** child returned exit 1. A mixed run of (ok, ok, no-match) returns `Error` (2). That's defensible, but it means `inspect fleet grep "needle"` over 5 namespaces where 4 found nothing and 1 found a match returns 2, not 0. This one should have that any resutlt hat were not erro are returned, and a code 0 (as long as one was not an eror) because there may be pattern of looking at thing that are conditionally there and that erro is actually indicatove and expected. 
 
 ### M4. SSH master prerequisites for fleet are undocumented
 Each fleet child reuses the per-namespace SSH master if one exists (Phase 1 cache), otherwise tries to start one. With `INSPECT_NON_INTERACTIVE=1` (which fleet always sets), any namespace with `key_passphrase_env` unset and no agent forwarding fails outright. **No `inspect fleet connect` exists** to pre-warm masters. Operators have to script `for ns in ...; inspect connect $ns; done` manually.
 **Fix**: add `setup`/`connect` to a recommended pre-flight, or accept `connect` under fleet (currently it's marked positional-only and works, but not advertised).
 
 ### M5. Rate-limit / backpressure on remote masters
-With `INSPECT_FLEET_CONCURRENCY=64` and 64 namespaces all spawning a fresh ssh master simultaneously, we hammer the local OpenSSH binary and remote sshd hard. Bible §14 mentions ControlMaster reuse but no per-host connect rate limit. Phase-1 master start has no exponential backoff. Not a Phase-11 regression but exposed by Phase 11.
+With `INSPECT_FLEET_CONCURRENCY=64` and 64 namespaces all spawning a fresh ssh master simultaneously, we hammer the local OpenSSH binary and remote sshd hard. Bible §14 mentions ControlMaster reuse but no per-host connect rate limit. Phase-1 master start has no exponential backoff. Not a Phase-11 regression but exposed by Phase 11.we need contol matser re use or we will get rate limited all the time, this is critical
 
 ### M6. Audit IDs collide under fleet bursts
 audit.rs uses `nanos.wrapping_mul(...).wrapping_add(pid)` masked to 16 bits. With fleet fanout, distinct PIDs save us, but **within a single child** two appends in the same millisecond collide with probability ~1.5% per pair (16-bit space, birthday bound at √65k ≈ 256). Recipes that perform multiple writes per ns can trigger this. Switch to a counter or pull in `getrandom` (pure-Rust, ~20 LOC).
