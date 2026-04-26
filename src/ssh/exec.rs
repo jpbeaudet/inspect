@@ -58,6 +58,12 @@ pub fn run_remote(
     cmd: &str,
     opts: RunOpts,
 ) -> Result<RemoteOutput> {
+    // Per-host MaxSessions throttle (audit §3.3). Acquired *before*
+    // we spawn ssh so we never overshoot the server-side cap. Released
+    // automatically when `_session` drops at end of function.
+    let _session = super::concurrency::acquire(&target.host)
+        .context("acquiring SSH session slot")?;
+
     let socket = socket_path(namespace);
     let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
 
@@ -89,6 +95,13 @@ pub fn run_remote(
     // error rather than blocking forever.
     let start = std::time::Instant::now();
     loop {
+        // Cancellation (audit §2.2): SIGINT/SIGTERM trips the global
+        // flag; reap the child so we don't leak ssh processes.
+        if crate::exec::cancel::is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("cancelled by signal"));
+        }
         if let Some(status) = child.try_wait().context("waiting on ssh")? {
             let mut stdout = String::new();
             let mut stderr = String::new();
@@ -100,10 +113,23 @@ pub fn run_remote(
                 use std::io::Read;
                 e.read_to_string(&mut stderr).ok();
             }
+            let exit_code = status.code().unwrap_or(-1);
+            // Audit §3.3: turn the cryptic OpenSSH "administratively
+            // prohibited" into a one-line operator-friendly error so
+            // the user knows to either lower fan-out or raise the
+            // server's `MaxSessions`.
+            if exit_code != 0 && super::concurrency::looks_like_max_sessions(&stderr) {
+                return Err(anyhow!(
+                    "SSH MaxSessions hit on '{}': server refused new channel \
+                     (lower INSPECT_MAX_SESSIONS_PER_HOST below the server's \
+                     MaxSessions, or raise the server's limit)",
+                    target.host
+                ));
+            }
             return Ok(RemoteOutput {
                 stdout,
                 stderr,
-                exit_code: status.code().unwrap_or(-1),
+                exit_code,
             });
         }
         if start.elapsed() > timeout {

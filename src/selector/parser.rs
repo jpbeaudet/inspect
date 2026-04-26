@@ -91,10 +91,9 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
             // for `arte/_:/var/log/syslog`. There is no service portion to
             // worry about here, so a top-level colon is unambiguous.
             match server_str.find(':') {
-                Some(_) => {
+                Some(i) => {
                     // Re-split: server is everything before the first ':',
                     // path is everything after, service is implicit `_`.
-                    let i = server_str.find(':').unwrap();
                     let (s, p) = (&server_str[..i], &server_str[i + 1..]);
                     return Ok(Selector {
                         server: parse_server(s)?,

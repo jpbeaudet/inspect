@@ -191,6 +191,13 @@ where
     std::thread::scope(|scope| {
         for _ in 0..parallel {
             scope.spawn(move || loop {
+                // Cancellation (audit §2.2): wake up at every dequeue so
+                // SIGINT lands within one work-item of the user pressing
+                // Ctrl+C. Workers that haven't started yet just exit
+                // without spawning new SSH children.
+                if crate::exec::cancel::is_cancelled() {
+                    return;
+                }
                 let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if idx >= n {
                     return;
@@ -207,7 +214,16 @@ where
     for slot in slots {
         match slot.into_inner().unwrap() {
             Some(r) => out.push(r?),
-            None => return Err(anyhow!("internal: worker dropped slot")),
+            None => {
+                // A worker exited early without filling this slot. The
+                // only legitimate cause is cancellation — propagate it
+                // as a partial-result signal so callers can still emit
+                // a `cancelled` envelope with whatever did complete.
+                if crate::exec::cancel::is_cancelled() {
+                    return Err(anyhow!("cancelled by signal"));
+                }
+                return Err(anyhow!("internal: worker dropped slot"));
+            }
         }
     }
     Ok(out)

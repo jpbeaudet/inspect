@@ -62,6 +62,10 @@ pub fn execute(
 
     let mut out = Vec::new();
     for t in tuples {
+        // Cancellation checkpoint per sub-query (audit §2.2): a
+        // runaway `map` over hundreds of unique tuples would otherwise
+        // ignore Ctrl+C until every fan-out finished.
+        crate::exec::cancel::check()?;
         let rendered = interpolate(sub_src, &t);
         let result = crate::exec::engine::execute_log(ctx, &rendered)
             .with_context(|| format!("`map` sub-query failed for {t:?}"))?;

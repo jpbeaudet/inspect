@@ -27,8 +27,34 @@ use cli::{Cli, Command};
 use error::ExitKind;
 
 fn main() -> ExitCode {
+    // Install SIGINT/SIGTERM handlers as the very first thing — every
+    // long-running loop in the engine and the SSH poller cooperates on
+    // the global cancel flag (see `exec::cancel`).
+    exec::cancel::install_handlers();
+
     let cli = Cli::parse();
     let result = dispatch(cli);
+    // Cancellation (audit §2.2): regardless of which dispatch arm
+    // returned, a tripped flag means SIGINT/SIGTERM arrived. Map to
+    // the conventional shell code 130 (= 128 + SIGINT) so wrappers
+    // and CI runners can detect it.
+    if exec::cancel::is_cancelled() {
+        if let Err(ref err) = result {
+            // Print only if the inner layer hasn't already rendered an
+            // envelope on stdout. We can't tell here, so be terse:
+            // a single line on stderr is the worst case for scripts.
+            let msg = err.to_string();
+            if !msg.contains("cancelled") {
+                eprintln!("inspect: cancelled by signal");
+            }
+        } else {
+            // Success path: the verb finished its work but the user
+            // still pressed Ctrl+C. Honor their intent and return 130
+            // anyway — that's what `git`, `kubectl`, and `ssh` do.
+            // No extra output: the verb already wrote its envelope.
+        }
+        return ExitCode::from(130);
+    }
     match result {
         Ok(kind) => ExitCode::from(kind.code()),
         Err(err) => {

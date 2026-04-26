@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+pub mod cancel;
 pub mod engine;
 pub mod field_filter;
 pub mod format;

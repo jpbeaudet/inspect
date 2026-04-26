@@ -58,15 +58,28 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     let result = match exec::execute(query, opts) {
         Ok(out) => out,
         Err(e) => {
+            // Cancellation (audit §2.2 + §5.4): if Ctrl+C tripped the
+            // global flag, emit an envelope with `summary: "cancelled"`
+            // so script consumers always see a terminator on the
+            // stream — never a truncated, unwrapped record list.
+            let cancelled = exec::cancel::is_cancelled();
             if args.format.is_json() {
                 let env = json!({
                     "schema_version": 1,
-                    "summary": "execution failed",
-                    "data": { "error": { "message": e.to_string() } },
+                    "summary": if cancelled { "cancelled by signal" } else { "execution failed" },
+                    "data": {
+                        "kind": if cancelled { "cancelled" } else { "error" },
+                        "error": { "message": e.to_string() }
+                    },
                     "next": [],
-                    "meta": {}
+                    "meta": { "query": args.query, "cancelled": cancelled }
                 });
                 println!("{env}");
+            } else if cancelled {
+                println!("SUMMARY: cancelled by signal");
+                println!("DATA:");
+                println!("NEXT:");
+                println!("  inspect search '{}'   (re-run when ready)", args.query);
             } else {
                 eprintln!("error: {e}");
                 let mut src = e.source();

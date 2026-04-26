@@ -19,6 +19,10 @@ pub fn apply(
 ) -> Result<Vec<Record>> {
     let mut current = records;
     for op in pipeline {
+        // Cancellation checkpoint between pipeline ops (audit §2.2).
+        // Every stage is a vector pass; checking once per stage gives
+        // sub-second SIGINT response without per-record overhead.
+        crate::exec::cancel::check()?;
         match op {
             PipelineOp::Filter(f) => {
                 current = apply_line_filter(f, current)?;

@@ -8,6 +8,7 @@
 //! All sockets live in `~/.inspect/sockets/<ns>.sock` with mode 0600.
 
 pub mod askpass;
+pub mod concurrency;
 pub mod exec;
 pub mod master;
 pub mod options;

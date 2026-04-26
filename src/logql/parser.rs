@@ -63,7 +63,13 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, want: &Token, what: &str) -> Result<Range<usize>, ParseError> {
         match self.peek() {
             Some(t) if std::mem::discriminant(t) == std::mem::discriminant(want) => {
-                Ok(self.bump().unwrap().span.clone())
+                // Safe: peek() just returned Some matching `want`, so
+                // bump() will return the same token.
+                Ok(self
+                    .bump()
+                    .expect("BUG: peek matched but bump returned None")
+                    .span
+                    .clone())
             }
             _ => Err(ParseError::new(
                 format!("expected {what}, found {}", self.cur_repr()),
@@ -159,7 +165,11 @@ impl<'a> Parser<'a> {
             self.bump(); // consume `or`
             branches.push(self.parse_selector()?);
         }
-        let end = branches.last().unwrap().span.end;
+        let end = branches
+            .last()
+            .expect("BUG: parse_selector_union always pushes at least one branch")
+            .span
+            .end;
         Ok(SelectorUnion {
             branches,
             span: start..end,
@@ -263,7 +273,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_filter(&mut self) -> Result<Filter, ParseError> {
-        let tok = self.bump().unwrap();
+        // Safe: callers only enter parse_filter after peeking one of
+        // PipeEq/Ne/PipeRe/Nre, so bump() must succeed.
+        let tok = self
+            .bump()
+            .expect("BUG: parse_filter entered without a filter token");
         let op = match tok.token {
             Token::PipeEq => FilterOp::Contains,
             Token::Ne => FilterOp::NotContains,
@@ -589,7 +603,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_range_aggregation(&mut self, func: RangeFn) -> Result<RangeAggregation, ParseError> {
-        let head = self.bump().unwrap().span.start;
+        // Safe: parse_metric_query peeked a RangeFn ident before calling.
+        let head = self
+            .bump()
+            .expect("BUG: parse_range_aggregation entered without an ident token")
+            .span
+            .start;
         self.expect(&Token::LParen, "`(`")?;
         let inner = self.parse_log_query()?;
         self.expect(&Token::LBracket, "`[duration]`")?;
@@ -621,7 +640,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_vector_aggregation(&mut self, func: AggFn) -> Result<VectorAggregation, ParseError> {
-        let head = self.bump().unwrap().span.start;
+        // Safe: parse_metric_query peeked an AggFn ident before calling.
+        let head = self
+            .bump()
+            .expect("BUG: parse_vector_aggregation entered without an ident token")
+            .span
+            .start;
         // Optional `by (...)` / `without (...)` *before* the `(`.
         let grouping = self.try_parse_grouping()?;
         self.expect(&Token::LParen, "`(`")?;
