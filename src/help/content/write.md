@@ -30,7 +30,7 @@ SAFETY CONTRACT
                            Skip with --yes-all.
 
 REVERT
-  $ inspect audit ls --since today
+  $ inspect audit ls --limit 20
   $ inspect revert <audit-id>                             # dry-run (reverse diff)
   $ inspect revert <audit-id> --apply                     # restore original
 

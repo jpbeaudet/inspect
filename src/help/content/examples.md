@@ -9,7 +9,7 @@ TRANSLATION GUIDE (you know X — here's inspect)
     $ inspect logs arte/pulse --since 30m
 
   kubectl logs <pod> --since=30m | grep -i error
-    $ inspect logs arte/pulse --since 30m -i "error"
+    $ inspect grep "error" arte/pulse --since 30m -i
 
   ssh box "docker logs pulse --since 30m | grep error"
     $ inspect grep "error" arte/pulse --since 30m
@@ -44,7 +44,7 @@ WORKFLOW EXAMPLES
   $ inspect search 'sum by (service) (count_over_time({server="arte", source="logs"} |= "error" [5m]))'
 
   # Export fleet status as Markdown for a GitHub issue
-  $ inspect fleet status --ns 'prod-*' --md
+  $ inspect fleet --ns 'prod-*' status --md
 
   # Pipe to fzf for interactive service selection
   $ inspect ps arte --format '{{.service}}'

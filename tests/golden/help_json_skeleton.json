@@ -1,0 +1,105 @@
+{
+  "command_envelope_keys": [
+    "aliases",
+    "examples",
+    "flags",
+    "name",
+    "see_also",
+    "see_also_line",
+    "summary"
+  ],
+  "error_codes": [
+    "AuditEntryNotFound",
+    "AuditNoPath",
+    "BadAliasType",
+    "BadLogQL",
+    "BadSelectorGrammar",
+    "CpNeedsRemote",
+    "CpRemoteRemote",
+    "EmptyQuery",
+    "EmptyTargets",
+    "ExecMissingCommand",
+    "InvalidNamespaceName",
+    "MaxSessionsExceeded",
+    "MissingApply",
+    "MutuallyExclusiveFormat",
+    "NamespaceExists",
+    "NamespaceNotConfigured",
+    "NoNamespacesConfigured",
+    "RecipeNotFound",
+    "RequiresPath",
+    "RevertHashMismatch",
+    "SshConnectFailed",
+    "UnknownAlias",
+    "UnknownHelpTopic"
+  ],
+  "flag_envelope_keys": [
+    "description",
+    "long",
+    "name",
+    "positional",
+    "repeated",
+    "required",
+    "short",
+    "takes_value",
+    "value_name"
+  ],
+  "output_formats": [
+    "human",
+    "json",
+    "ndjson",
+    "csv",
+    "tsv",
+    "md",
+    "yaml",
+    "raw",
+    "format"
+  ],
+  "reserved_labels": [
+    "server",
+    "service",
+    "container",
+    "source",
+    "path"
+  ],
+  "schema_version": 1,
+  "source_types": [
+    "logs",
+    "file",
+    "discovery",
+    "metric"
+  ],
+  "top_level_keys": [
+    "binary_name",
+    "binary_version",
+    "commands",
+    "errors",
+    "output_formats",
+    "reserved_labels",
+    "schema_version",
+    "source_types",
+    "topics"
+  ],
+  "topic_envelope_keys": [
+    "examples",
+    "id",
+    "see_also",
+    "summary",
+    "title",
+    "verbs"
+  ],
+  "topic_ids": [
+    "quickstart",
+    "selectors",
+    "aliases",
+    "search",
+    "formats",
+    "write",
+    "safety",
+    "fleet",
+    "recipes",
+    "discovery",
+    "ssh",
+    "examples"
+  ]
+}

@@ -1,10 +1,10 @@
 RECIPES — Multi-step diagnostic and remediation runbooks
 
 EXAMPLES
-  $ inspect recipe deploy-check arte
-  $ inspect recipe disk-audit 'prod-*'
-  $ inspect recipe cycle-atlas arte/atlas                 # dry-run (mutating)
-  $ inspect recipe cycle-atlas arte/atlas --apply         # apply all steps
+  $ inspect recipe deploy-check --sel arte
+  $ inspect recipe disk-audit --sel 'prod-*'
+  $ inspect recipe cycle-atlas --sel arte/atlas           # dry-run (mutating)
+  $ inspect recipe cycle-atlas --sel arte/atlas --apply   # apply all steps
 
 DESCRIPTION
   Recipes are YAML files that sequence multiple inspect commands.

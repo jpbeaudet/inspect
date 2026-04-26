@@ -227,3 +227,105 @@ fn pretty_vs_compact_round_trip_to_same_value() {
     let v2 = run(&["help", "--json"]);
     assert_eq!(v1, v2, "two runs must produce byte-equal JSON");
 }
+
+// =====================================================================
+// HP-7 G8 — checked-in golden snapshot.
+//
+// `tests/golden/help_json_skeleton.json` pins the contractually frozen
+// subset of the `--json` surface: schema version, top-level keys,
+// per-envelope key sets, fixed value lists (reserved_labels,
+// source_types, output_formats), topic ids, and the error code roster.
+//
+// Drift in any of these is a deliberate schema bump:
+//   1. Update the snapshot:
+//        cargo run --quiet -- help --json | python3 …  (see plan §10)
+//   2. Bump `crate::help::json::SCHEMA_VERSION` if it changed shape.
+//   3. Document the diff in CHANGELOG.
+//
+// We deliberately do *not* pin the entire JSON byte stream so adding a
+// new error code or topic body change is a value-level edit rather
+// than a schema bump.
+// =====================================================================
+
+#[test]
+fn json_skeleton_matches_golden() {
+    let v = run(&["help", "--json"]);
+
+    // Reproduce the same skeleton extraction the generator script does.
+    let mut top_keys: Vec<&str> =
+        v.as_object().unwrap().keys().map(String::as_str).collect();
+    top_keys.sort();
+
+    let topics = v["topics"].as_array().unwrap();
+    let topic_ids: Vec<&str> = topics
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    let mut topic_keys: Vec<&str> = topics[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    topic_keys.sort();
+
+    let commands = v["commands"].as_object().unwrap();
+    let first_cmd = commands.values().next().unwrap().as_object().unwrap();
+    let mut cmd_keys: Vec<&str> =
+        first_cmd.keys().map(String::as_str).collect();
+    cmd_keys.sort();
+
+    // Pick the first command with a non-empty `flags` array.
+    let flag_obj = commands
+        .values()
+        .filter_map(|c| c["flags"].as_array())
+        .find(|fs| !fs.is_empty())
+        .and_then(|fs| fs[0].as_object());
+    let mut flag_keys: Vec<&str> = flag_obj
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    flag_keys.sort();
+
+    let mut error_codes: Vec<&str> = v["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["code"].as_str().unwrap())
+        .collect();
+    error_codes.sort();
+
+    let live = serde_json::json!({
+        "command_envelope_keys": cmd_keys,
+        "error_codes": error_codes,
+        "flag_envelope_keys": flag_keys,
+        "output_formats": v["output_formats"],
+        "reserved_labels": v["reserved_labels"],
+        "schema_version": v["schema_version"],
+        "source_types": v["source_types"],
+        "top_level_keys": top_keys,
+        "topic_envelope_keys": topic_keys,
+        "topic_ids": topic_ids,
+    });
+
+    let golden_text = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/help_json_skeleton.json"),
+    )
+    .expect("golden snapshot must exist at tests/golden/help_json_skeleton.json");
+    let golden: serde_json::Value =
+        serde_json::from_str(&golden_text).expect("golden is valid json");
+
+    if live != golden {
+        // Render a compact diff so failing CI tells the maintainer
+        // exactly what drifted, not "values differ".
+        let live_pretty = serde_json::to_string_pretty(&live).unwrap();
+        let gold_pretty = serde_json::to_string_pretty(&golden).unwrap();
+        panic!(
+            "help --json skeleton drift detected.\n\
+             ----- GOLDEN (tests/golden/help_json_skeleton.json) -----\n{gold_pretty}\n\
+             ----- LIVE (cargo run -- help --json) -----\n{live_pretty}\n\
+             If this change is intentional: regenerate the golden via the procedure\n\
+             documented at the top of tests/help_json_snapshot.rs and bump\n\
+             SCHEMA_VERSION when keys/value-lists/envelopes change shape."
+        );
+    }
+}

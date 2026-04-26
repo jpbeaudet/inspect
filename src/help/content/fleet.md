@@ -1,17 +1,17 @@
 FLEET — Multi-server operations
 
 EXAMPLES
-  $ inspect fleet status                                  # all configured servers
-  $ inspect fleet status --ns 'prod-*'                    # wildcard
-  $ inspect fleet status --group production               # named group
-  $ inspect fleet restart pulse --ns 'prod-*' --apply
+  $ inspect fleet --ns '*' status                         # all configured servers
+  $ inspect fleet --ns 'prod-*' status                    # wildcard
+  $ inspect fleet --ns '@production' status               # named group
+  $ inspect fleet --ns 'prod-*' restart pulse --apply
 
 DESCRIPTION
   `inspect search` already handles multi-server via LogQL selectors:
     {server=~"prod-.*", source="logs"} |= "error"
 
   `inspect fleet <verb>` does the same for the other verbs:
-    inspect fleet status --ns 'prod-*'
+    inspect fleet --ns 'prod-*' status
 
 NAMESPACE SELECTION
   --ns <pattern>          glob or comma-list

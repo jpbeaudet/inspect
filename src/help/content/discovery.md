@@ -3,7 +3,7 @@ DISCOVERY — Auto-discovery, profiles, drift detection
 EXAMPLES
   $ inspect setup arte                       # full discovery scan
   $ inspect status arte                      # uses cached profile
-  $ inspect show arte --profile              # print the cached profile
+  $ inspect profile arte                     # print the cached profile
 
 DESCRIPTION
   `inspect setup <ns>` connects to the server, scans everything

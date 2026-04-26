@@ -201,4 +201,215 @@ mod tests {
             );
         }
     }
+
+    // -------------------------------------------------------------
+    // HP-7 G5 — every embedded `$ inspect …` example must parse
+    // cleanly through the live clap definition. This is the single
+    // most powerful "topics can't drift from the CLI" guard: rename
+    // a flag without updating the docs and the test fails with the
+    // exact line that broke.
+    //
+    // Examples that document still-experimental features may opt
+    // out via a trailing `# parse:skip` marker on the same line.
+    // We only honour that marker; everything else is mandatory.
+    // -------------------------------------------------------------
+
+    /// POSIX-ish argv splitter. Handles single quotes (literal),
+    /// double quotes (literal except `\"` and `\\`), and unquoted
+    /// whitespace separation. Returns `None` for malformed input
+    /// (unclosed quote, dangling escape) so the caller can surface
+    /// a clear failure.
+    fn shlex_split(line: &str) -> Option<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut have_token = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_single {
+                if c == '\'' {
+                    in_single = false;
+                } else {
+                    buf.push(c);
+                }
+                continue;
+            }
+            if in_double {
+                if c == '\\' {
+                    match chars.next()? {
+                        e @ ('"' | '\\' | '$' | '`' | '\n') => buf.push(e),
+                        other => {
+                            buf.push('\\');
+                            buf.push(other);
+                        }
+                    }
+                } else if c == '"' {
+                    in_double = false;
+                } else {
+                    buf.push(c);
+                }
+                continue;
+            }
+            match c {
+                '\'' => {
+                    in_single = true;
+                    have_token = true;
+                }
+                '"' => {
+                    in_double = true;
+                    have_token = true;
+                }
+                '\\' => {
+                    let n = chars.next()?;
+                    buf.push(n);
+                    have_token = true;
+                }
+                ws if ws.is_whitespace() => {
+                    if have_token {
+                        out.push(std::mem::take(&mut buf));
+                        have_token = false;
+                    }
+                }
+                other => {
+                    buf.push(other);
+                    have_token = true;
+                }
+            }
+        }
+        if in_single || in_double {
+            return None;
+        }
+        if have_token {
+            out.push(buf);
+        }
+        Some(out)
+    }
+
+    /// Strip a trailing `# …` shell comment from an example line.
+    /// Comments inside quotes are preserved by routing through the
+    /// same quote-aware state machine as `shlex_split`.
+    fn strip_inline_comment(line: &str) -> &str {
+        let mut in_single = false;
+        let mut in_double = false;
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            match c {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '#' if !in_single && !in_double => {
+                    // Comment must be preceded by whitespace or be at
+                    // start; otherwise it's part of an arg (e.g. URL).
+                    let preceded_by_ws =
+                        i == 0 || (bytes[i - 1] as char).is_whitespace();
+                    if preceded_by_ws {
+                        return line[..i].trim_end();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        line.trim_end()
+    }
+
+    /// Extract every `$ inspect …` example line from a topic body.
+    /// Lines ending in `\` (shell continuation) are skipped — they
+    /// are intentionally multi-line and would require a full shell
+    /// parser to validate. Per `# parse:skip` marker is honoured.
+    fn extract_examples(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for raw in body.lines() {
+            let trimmed = raw.trim_start();
+            if !trimmed.starts_with("$ inspect ") {
+                continue;
+            }
+            // Skip shell continuations — we don't try to glue lines.
+            if raw.trim_end().ends_with('\\') {
+                continue;
+            }
+            // Honour explicit opt-out.
+            if raw.contains("# parse:skip") {
+                continue;
+            }
+            // Drop the `$ ` prompt; keep `inspect <verb> …`.
+            let cmd = strip_inline_comment(&trimmed["$ ".len()..]);
+            out.push(cmd.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn every_topic_example_parses_via_clap() {
+        use clap::Parser;
+        let mut failures: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        for t in TOPICS {
+            let body = match t.body {
+                Some(b) => b,
+                None => continue,
+            };
+            for line in extract_examples(body) {
+                total += 1;
+                let argv = match shlex_split(&line) {
+                    Some(v) => v,
+                    None => {
+                        failures.push(format!(
+                            "[{:>10}] shlex split failed: {line}",
+                            t.id
+                        ));
+                        continue;
+                    }
+                };
+                if argv.is_empty() || argv[0] != "inspect" {
+                    failures.push(format!(
+                        "[{:>10}] example does not start with `inspect`: {line}",
+                        t.id
+                    ));
+                    continue;
+                }
+                if let Err(e) = crate::cli::Cli::try_parse_from(&argv) {
+                    // clap's render is verbose; pin the kind so the
+                    // failure message stays one line per broken
+                    // example.
+                    let kind = format!("{:?}", e.kind());
+                    failures.push(format!("[{:>10}] {kind}: {line}", t.id));
+                }
+            }
+        }
+        assert!(
+            total >= 30,
+            "expected ≥ 30 inspect examples across all topics; saw {total}"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {} topic example(s) failed clap parse:\n  {}",
+            failures.len(),
+            total,
+            failures.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn shlex_split_handles_basics() {
+        assert_eq!(
+            shlex_split("inspect grep \"a b\" arte/atlas").unwrap(),
+            vec!["inspect", "grep", "a b", "arte/atlas"]
+        );
+        assert_eq!(
+            shlex_split("inspect search '{foo=\"bar\"} |= \"err\"'").unwrap(),
+            vec!["inspect", "search", "{foo=\"bar\"} |= \"err\""]
+        );
+        assert!(shlex_split("inspect 'unterminated").is_none());
+    }
+
+    #[test]
+    fn strip_inline_comment_keeps_hash_inside_quotes() {
+        assert_eq!(
+            strip_inline_comment("inspect grep '#tag' arte # comment"),
+            "inspect grep '#tag' arte"
+        );
+    }
 }

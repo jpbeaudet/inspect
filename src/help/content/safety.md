@@ -2,7 +2,7 @@ SAFETY — Audit log, snapshots, revert
 
 EXAMPLES
   $ inspect audit ls                                  # list all mutations
-  $ inspect audit ls --since today                    # today's mutations
+  $ inspect audit ls --limit 20                       # recent mutations
   $ inspect audit show <id>                           # one entry with diff summary
   $ inspect audit grep "atlas"                        # search audit entries
   $ inspect revert <audit-id>                         # preview revert (dry-run)
