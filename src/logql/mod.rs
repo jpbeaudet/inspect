@@ -55,3 +55,13 @@ where
     validate::validate(&ast)?;
     Ok(ast)
 }
+
+/// Expand aliases in `input` without parsing. The returned string is
+/// suitable to pass to [`parse`] (which won't see any `@name` tokens)
+/// and to slice with AST spans.
+pub fn expand_aliases<F>(input: &str, alias_resolver: F) -> Result<String, ParseError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    alias_subst::expand(input, &alias_resolver)
+}

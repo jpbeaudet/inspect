@@ -1,16 +1,16 @@
-//! `inspect search '<query>'` — Phase 6 surface (parse + diagnose).
+//! `inspect search '<query>'` — Phase 7 surface.
 //!
-//! Phase 6 ships parsing only. The verb validates the query against the
-//! LogQL grammar (bible §9), expands aliases, prints a structured
-//! preview of the resolved query, and exits. Phase 7 plugs in the
-//! actual execution backends.
+//! Parses the LogQL query, expands aliases, dispatches to medium readers,
+//! runs the pipeline, and emits SUMMARY/DATA/NEXT (human) or a stable
+//! JSON envelope (machine).
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::alias;
 use crate::cli::SearchArgs;
 use crate::error::ExitKind;
+use crate::exec::{self, ExecOutput};
 use crate::logql;
 
 pub fn run(args: SearchArgs) -> Result<ExitKind> {
@@ -21,106 +21,183 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    let parsed = logql::parse_with_aliases(query, |name| {
+    // Parse-only first so we can emit precise diagnostics with carets.
+    if let Err(e) = logql::parse_with_aliases(query, |name| {
         alias::get(name).ok().flatten().map(|e| e.selector)
-    });
-
-    match parsed {
-        Ok(ast) => {
-            if args.json {
-                emit_json(&args, &ast);
-            } else {
-                emit_human(&args, &ast);
-            }
-            Ok(ExitKind::Success)
+    }) {
+        if args.json {
+            let env = json!({
+                "schema_version": 1,
+                "summary": format!("parse error: {}", e.message),
+                "data": {
+                    "error": {
+                        "message": e.message,
+                        "span": [e.span.start, e.span.end],
+                        "hint": e.hint,
+                    }
+                },
+                "next": [],
+                "meta": {}
+            });
+            println!("{env}");
+        } else {
+            eprint!("{}", e.render(query));
         }
+        return Ok(ExitKind::Error);
+    }
+
+    let opts = exec::ExecOpts {
+        since: args.since.clone(),
+        until: args.until.clone(),
+        tail: args.tail,
+        follow: args.follow,
+        record_limit: args.tail.unwrap_or(0),
+        ..Default::default()
+    };
+
+    let result = match exec::execute(query, opts) {
+        Ok(out) => out,
         Err(e) => {
             if args.json {
                 let env = json!({
                     "schema_version": 1,
-                    "summary": format!("parse error: {}", e.message),
-                    "data": {
-                        "error": {
-                            "message": e.message,
-                            "span": [e.span.start, e.span.end],
-                            "hint": e.hint,
-                        }
-                    },
+                    "summary": "execution failed",
+                    "data": { "error": { "message": e.to_string() } },
                     "next": [],
                     "meta": {}
                 });
                 println!("{env}");
             } else {
-                eprint!("{}", e.render(query));
+                eprintln!("error: {e}");
+                let mut src = e.source();
+                while let Some(c) = src {
+                    eprintln!("  caused by: {c}");
+                    src = c.source();
+                }
             }
-            Ok(ExitKind::Error)
+            return Ok(ExitKind::Error);
+        }
+    };
+
+    match result {
+        ExecOutput::Log(r) => {
+            if args.json {
+                emit_log_json(&args, &r.records);
+            } else {
+                emit_log_human(&args, &r.records);
+            }
+            Ok(if r.records.is_empty() {
+                ExitKind::NoMatches
+            } else {
+                ExitKind::Success
+            })
+        }
+        ExecOutput::Metric(samples) => {
+            if args.json {
+                emit_metric_json(&args, &samples);
+            } else {
+                emit_metric_human(&args, &samples);
+            }
+            Ok(if samples.is_empty() {
+                ExitKind::NoMatches
+            } else {
+                ExitKind::Success
+            })
         }
     }
 }
 
-fn emit_human(args: &SearchArgs, ast: &logql::Query) {
-    let kind = if ast.is_metric() { "metric" } else { "log" };
+fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
     println!(
-        "SUMMARY: parsed {} query OK ({} branch(es), {} stage(s))",
-        kind,
-        selector_branch_count(ast),
-        stage_count(ast),
+        "SUMMARY: {} record(s) from `{}`",
+        records.len(),
+        truncate(&args.query, 80)
     );
     println!("DATA:");
-    println!("  query: {}", args.query);
-    if let Some(since) = &args.since {
-        println!("  since: {since}");
-    }
-    if let Some(until) = &args.until {
-        println!("  until: {until}");
-    }
-    if let Some(tail) = args.tail {
-        println!("  tail:  {tail}");
-    }
-    if args.follow {
-        println!("  follow: true");
+    for r in records {
+        let server = r.label("server").unwrap_or("?");
+        let service = r.label("service").unwrap_or("_");
+        let source = r.label("source").unwrap_or("?");
+        match &r.line {
+            Some(l) => println!("  {server}/{service} [{source}] {l}"),
+            None => println!("  {server}/{service} [{source}]"),
+        }
     }
     println!("NEXT:");
-    println!("  inspect search '{}' --json   (machine-readable parse tree)", args.query);
-    println!("  (execution backend lands in Phase 7)");
+    println!("  inspect search '{}' --json   (machine-readable)", args.query);
+    if args.tail.is_none() {
+        println!("  inspect search '{}' --tail 50", args.query);
+    }
 }
 
-fn emit_json(args: &SearchArgs, ast: &logql::Query) {
+fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
+    let data: Vec<Value> = records
+        .iter()
+        .map(|r| {
+            let source = r.label("source").unwrap_or("");
+            let medium = source.split(':').next().unwrap_or("");
+            json!({
+                "_source": source,
+                "_medium": medium,
+                "labels": r.labels,
+                "fields": r.fields,
+                "line": r.line,
+                "ts_ms": r.ts_ms,
+            })
+        })
+        .collect();
     let env = json!({
         "schema_version": 1,
-        "summary": format!(
-            "parsed {} query OK",
-            if ast.is_metric() { "metric" } else { "log" }
-        ),
-        "data": {
-            "kind": if ast.is_metric() { "metric" } else { "log" },
-            "branches": selector_branch_count(ast),
-            "stages": stage_count(ast),
-            "query": args.query,
-        },
-        "next": [
-            { "cmd": "inspect search '...' --since 5m", "rationale": "narrow time window" },
-        ],
+        "summary": format!("{} record(s)", records.len()),
+        "data": { "kind": "log", "records": data },
+        "next": [],
         "meta": {
+            "query": args.query,
             "since": args.since,
             "until": args.until,
             "tail":  args.tail,
             "follow": args.follow,
-            "phase": 6
+            "phase": 7
         }
     });
     println!("{env}");
 }
 
-fn selector_branch_count(q: &logql::Query) -> usize {
-    match q {
-        logql::Query::Log(l) => l.selector.branches.len(),
-        logql::Query::Metric(_) => 1,
+fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
+    println!(
+        "SUMMARY: {} series from `{}`",
+        samples.len(),
+        truncate(&args.query, 80)
+    );
+    println!("DATA:");
+    for s in samples {
+        let labels: String = s
+            .labels
+            .iter()
+            .map(|(k, v)| format!("{k}=\"{v}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {{{labels}}} = {}", s.value);
     }
+    println!("NEXT:");
+    println!("  inspect search '{}' --json   (machine-readable)", args.query);
 }
-fn stage_count(q: &logql::Query) -> usize {
-    match q {
-        logql::Query::Log(l) => l.pipeline.len(),
-        logql::Query::Metric(_) => 0,
+
+fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
+    let env = json!({
+        "schema_version": 1,
+        "summary": format!("{} series", samples.len()),
+        "data": { "kind": "metric", "samples": samples },
+        "next": [],
+        "meta": { "query": args.query, "phase": 7 }
+    });
+    println!("{env}");
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
     }
 }

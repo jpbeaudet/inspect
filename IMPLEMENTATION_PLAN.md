@@ -282,17 +282,80 @@ Scope:
 - `map` stage with Splunk-style `$field$` interpolation
 - Parallel fanout and result merging semantics
 
+Implementation note - execution architecture:
+
+The execution layer lives under `src/exec/` and is wired into the
+existing `RemoteRunner` abstraction (Phase 4) so all readers shell out
+through one swappable interface. That gives us free CLI-level mockability
+via `INSPECT_MOCK_REMOTE_FILE`.
+
+Module layout under `src/exec/`:
+
+- `engine.rs` - top-level entry; alias-expand, parse, dispatch log vs
+  metric, run selector union, apply pipeline, truncate to record limit.
+- `record.rs` - the unified `Record { labels, fields, line, ts_ms }`
+  model. `lookup()` resolves `$field$` and field-filter operands by
+  consulting fields first, then labels.
+- `medium.rs` - parser for the `source=` label; one `Medium` variant
+  per backend, with stable round-tripping and parser/printer tests.
+- `reader/{logs,file,dir,discovery,state,volume,image,network,host}.rs`
+  one backend per medium, each implementing the `Reader` trait. Logs +
+  file readers push line-filters down to remote `grep -F/-E` to reduce
+  bytes-on-the-wire. Discovery is the only reader with no remote round
+  trip (it materializes records from the cached profile).
+- `parsers.rs` - `json`, `logfmt`, `pattern`, `regexp` stage parsers.
+- `format.rs` - `{{.name}}` mini-template renderer for `line_format`
+  and `label_format`.
+- `field_filter.rs` - boolean-tree evaluator for `| status >= 500`,
+  with numeric coercion and regex compare.
+- `pipeline.rs` - dispatcher for the 10 pipeline stages.
+- `map_stage.rs` - `| map { ... }` executor; collects unique-tuple
+  parent records (capped by `map_max_fanout`), interpolates `$name$`
+  with `"`/`\` escaping, runs the sub-query per tuple, concatenates
+  outputs.
+- `metric.rs` - range aggregations (`count_over_time`, `rate`,
+  `bytes_over_time`, `bytes_rate`, `absent_over_time`) and vector
+  aggregations (`sum`, `avg`, `min`, `max`, `count`, `stddev`,
+  `stdvar`, `topk`, `bottomk`) with `by`/`without` grouping. Parsed
+  fields are promoted to labels for grouping purposes (Loki "parsed
+  labels" semantics).
+
+Streaming and ordering:
+
+- Today's executor is **eager fan-out + concatenate**: each selector
+  branch resolves its targets, every reader runs to completion, then
+  results are unioned and pushed through the pipeline. Ordering is
+  branch-major then namespace-major then reader-emission order. There
+  is no global timestamp merge yet.
+- `--follow` parses but does not yet stream incrementally; truly
+  incremental streaming with backpressure is **deferred to Phase 8**,
+  where `Reader` will gain a `read_stream` companion to today's
+  blocking `read`.
+- Safety knobs: `ExecOpts.map_max_fanout` (default 256) caps the
+  unique-tuple set the `map` stage forks across, preventing runaway
+  sub-query fan-out.
+
 Deliverables:
 
-- Reader trait layer and backend implementations
-- `map` executor with safety limits and diagnostics
-- Streaming merger with stable JSON schema
+- Reader trait layer and 9 backend implementations
+- `map` executor with `$field$` interpolation, escaping, and fanout cap
+- Metric executor (range + vector + topk/bottomk + by/without)
+- Stable JSON envelope: `data.kind="log"` with `records[]` carrying
+  `_source`, `_medium`, `labels`, `fields`, `line`, `ts_ms`;
+  `data.kind="metric"` with `samples[]` carrying `labels` + `value`.
+- CLI surface (`commands/search.rs`) wired to the engine, emitting
+  SUMMARY/DATA/NEXT for both modes.
 
 Exit criteria:
 
-- Multi-source `or` queries work across mixed mediums
+- Multi-source `or` queries work across mixed mediums (covered in
+  `tests/phase7_exec.rs::multi_source_or_mixes_logs_and_file`)
 - `map` stage works on unique-label fanout and returns merged outputs
-- Streaming behavior documented, including ordering caveats
+  (`map_stage_runs_subquery_per_unique_field`)
+- `count_over_time`, `topk(by)`, parsed-field filters, and discovery
+  short-circuit all have explicit integration coverage.
+- Streaming behavior documented (above), with the eager-vs-streaming
+  trade-off captured here for Phase 8.
 
 Estimated duration: 2 sprints
 
