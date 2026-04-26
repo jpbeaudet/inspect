@@ -21,6 +21,7 @@ mod redact;
 mod safety;
 mod selector;
 mod ssh;
+mod sys;
 mod verbs;
 
 use cli::{Cli, Command};

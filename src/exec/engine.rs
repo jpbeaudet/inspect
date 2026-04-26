@@ -296,8 +296,28 @@ fn run_branch(
         },
     );
 
+    // Field pitfall §4.1: when fanning out to multiple steps and the
+    // user opts in via `INSPECT_PARTIAL_OK=1`, downgrade individual
+    // step failures (timeouts on one slow host, transient ssh errors)
+    // into stderr warnings so the rest of the fleet still produces
+    // results. Single-step queries keep strict propagation so a
+    // typo'd selector doesn't silently return zero matches.
+    let per_step_results = match per_step_results {
+        Ok(v) => v,
+        Err(e) => {
+            if partial_ok_enabled() && steps.len() > 1 {
+                eprintln!(
+                    "warning: one or more steps failed and were skipped (INSPECT_PARTIAL_OK=1): {e}"
+                );
+                Vec::new()
+            } else {
+                return Err(e);
+            }
+        }
+    };
+
     let mut out = Vec::new();
-    for recs in per_step_results? {
+    for recs in per_step_results {
         for r in recs {
             if let Some(m) = source_matcher {
                 let v = r.label("source").unwrap_or_default();
@@ -314,6 +334,17 @@ fn run_branch(
         }
     }
     Ok(out)
+}
+
+/// Field pitfall §4.1: opt-in soft-error mode. When set, per-step
+/// reader failures inside a multi-step branch become stderr warnings
+/// instead of aborting the whole query. Off by default to preserve
+/// "errors are loud" behaviour for single-host queries and tests.
+fn partial_ok_enabled() -> bool {
+    matches!(
+        std::env::var("INSPECT_PARTIAL_OK").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 fn match_label(m: &LabelMatcher, value: &str) -> bool {

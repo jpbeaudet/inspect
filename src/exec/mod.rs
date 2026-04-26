@@ -68,14 +68,23 @@ impl Default for ExecOpts {
 fn default_max_parallel() -> usize {
     // Operator override always wins; otherwise we cap at 8 which is
     // safe across SSH ControlMaster fanout without saturating sockets.
-    if let Ok(v) = std::env::var("INSPECT_MAX_PARALLEL") {
+    let nominal = if let Ok(v) = std::env::var("INSPECT_MAX_PARALLEL") {
         if let Ok(n) = v.parse::<usize>() {
             if n > 0 {
-                return n;
+                n
+            } else {
+                8
             }
+        } else {
+            8
         }
-    }
-    8
+    } else {
+        8
+    };
+    // Field pitfall §4.2: also clamp by the per-process file-descriptor
+    // budget so a high INSPECT_MAX_PARALLEL on a tight `ulimit -n`
+    // doesn't silently fail with `EMFILE` deep inside ssh.
+    crate::sys::ulimit::clamp_with_warning(nominal, "INSPECT_MAX_PARALLEL")
 }
 
 /// Execution context shared by all stages and sub-queries.

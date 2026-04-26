@@ -27,6 +27,38 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
+
+        // Field pitfall §2.3: refuse early when the service is
+        // configured with a log driver that ships logs out of the
+        // docker daemon's reach. `docker logs` would otherwise return
+        // empty stdout with exit 0, and the operator would think the
+        // service is silent rather than misconfigured for log capture.
+        if let Some(svc_def) = step.service_def() {
+            if let Some(driver) = svc_def.log_driver {
+                if !driver.is_readable_via_docker_logs() {
+                    let msg = format!(
+                        "{}/{}: log driver `{}` is not readable via `docker logs` -- \
+                         logs are shipped to that driver's sink (query it directly: \
+                         e.g. `journalctl`, CloudWatch, your fluentd/splunk/gelf collector)",
+                        step.ns.namespace,
+                        svc_name,
+                        driver.as_str(),
+                    );
+                    if args.format.is_json() {
+                        JsonOut::write(
+                            &Envelope::new(&step.ns.namespace, "logs", "logs")
+                                .with_service(&svc_name)
+                                .put("error", msg.as_str())
+                                .put("log_driver", driver.as_str()),
+                        );
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                    continue;
+                }
+            }
+        }
+
         let cmd = build_logs(step.service_def(), step.service(), &args);
         let opts = if args.follow {
             // Use a long timeout for follow; users will Ctrl-C to stop.

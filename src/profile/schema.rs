@@ -40,6 +40,15 @@ pub struct Profile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 
+    /// Field pitfall §5.3: signed offset between *remote* `date +%s`
+    /// and the local clock at discovery time, in seconds. Positive
+    /// means the remote is ahead of us; negative means it lags.
+    /// Captured once per discovery so operators can see whether
+    /// `--since`/`--until` semantics will surprise them, and so we
+    /// can warn (or eventually adjust) when skew exceeds a threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_offset_secs: Option<i64>,
+
     // ---- user-owned sections (preserved across re-discovery) ---------------
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, Vec<String>>,
@@ -62,6 +71,7 @@ impl Profile {
             images: Vec::new(),
             networks: Vec::new(),
             warnings: Vec::new(),
+            clock_offset_secs: None,
             groups: BTreeMap::new(),
             aliases: BTreeMap::new(),
             local_overrides: None,
@@ -218,7 +228,45 @@ pub enum LogDriver {
     Journald,
     Local,
     Syslog,
+    /// Field pitfall §2.3: drivers that ship logs out-of-process and
+    /// are NOT readable via `docker logs`. We track them as distinct
+    /// variants so `inspect logs` can emit a clear, actionable error
+    /// instead of returning empty output.
+    Fluentd,
+    Awslogs,
+    Gelf,
+    Splunk,
+    None,
     Other,
+}
+
+impl LogDriver {
+    /// Can `docker logs <svc>` read history for this driver?
+    /// `false` for drivers that ship logs to a remote sink (fluentd,
+    /// awslogs, splunk, gelf) and for the `none` driver.
+    pub fn is_readable_via_docker_logs(&self) -> bool {
+        matches!(
+            self,
+            LogDriver::JsonFile | LogDriver::Journald | LogDriver::Local | LogDriver::Syslog
+        )
+    }
+
+    /// Stable, human-friendly identifier (kebab-case, matches the
+    /// docker driver name where possible).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogDriver::JsonFile => "json-file",
+            LogDriver::Journald => "journald",
+            LogDriver::Local => "local",
+            LogDriver::Syslog => "syslog",
+            LogDriver::Fluentd => "fluentd",
+            LogDriver::Awslogs => "awslogs",
+            LogDriver::Gelf => "gelf",
+            LogDriver::Splunk => "splunk",
+            LogDriver::None => "none",
+            LogDriver::Other => "other",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

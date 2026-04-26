@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::probes::{
-    probe_docker_containers, probe_docker_inventory, probe_host_listeners,
-    probe_remote_tooling, probe_systemd_units,
+    probe_clock_offset, probe_docker_containers, probe_docker_inventory,
+    probe_host_listeners, probe_remote_tooling, probe_systemd_units,
 };
 use crate::profile::cache::{ensure_profiles_dir, save_profile};
 use crate::profile::schema::{Profile, RemoteTooling, ServiceKind};
@@ -116,6 +116,14 @@ pub fn discover(
     }
 
     profile.remote_tooling = tooling;
+
+    // 5) Field pitfall §5.3: capture per-host clock offset so
+    // operators can spot NTP failures before they cause silent
+    // `--since` mis-windows. Best-effort: a probe failure leaves
+    // `clock_offset_secs = None` (already the default).
+    let (offset, clock_warnings) = probe_clock_offset(namespace, target);
+    profile.clock_offset_secs = offset;
+    profile.warnings.extend(clock_warnings);
 
     // Persist (atomic, mode 0600). User-owned sections are merged inside.
     save_profile(&profile).context("saving profile")?;

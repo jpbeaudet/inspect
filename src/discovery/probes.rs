@@ -92,7 +92,13 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
     // 1) `docker ps` with TSV-friendly format. We avoid `--format '{{json .}}'`
     //    because some old daemons emit non-stable keys; instead we ask for
     //    explicit fields separated by tabs.
-    let ps_fmt = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}";
+    //
+    //    Field pitfall §6.1: include the `com.docker.compose.service`
+    //    label so we can prefer the operator-facing service name over
+    //    the docker-generated container name (`<project>_<service>_1`,
+    //    `<project>-<service>-1`, etc.). When the label is absent we
+    //    fall back to `{{.Names}}` so non-compose containers still work.
+    let ps_fmt = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Label \"com.docker.compose.service\"}}";
     let ps_cmd = format!("docker ps --no-trunc --format '{ps_fmt}' 2>/dev/null");
     let ps_out = match run_remote(ns, target, &ps_cmd, RunOpts::with_timeout(20)) {
         Ok(o) => o,
@@ -143,27 +149,61 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         }
     };
 
+    // Field pitfall §6.1: when two compose containers from the same
+    // service (replicas) both expose the same compose label, we'd
+    // otherwise emit two services with the same `name`. Deduplicate
+    // by selecting the first occurrence and recording a warning so
+    // the operator knows the second replica is reachable only by
+    // its full container name (we still keep the long name as the
+    // service entry for the second one).
+    let mut seen_compose: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for row in rows {
+        // Field pitfall §6.1: prefer the compose service label when
+        // present, but fall back to the container name. We only swap
+        // when the label is unambiguous within this host (see
+        // `seen_compose` above).
+        let svc_name = match &row.compose_service {
+            Some(label) if !seen_compose.contains(label) => {
+                seen_compose.insert(label.clone());
+                label.clone()
+            }
+            _ => row.name.clone(),
+        };
         // Audit §7.2 / §7.3: warn when a service name collides with a
         // selector reserved char or the host placeholder. The service
         // is still discovered (we don't drop data), but operators get
         // a one-line heads-up so they understand why selectors like
         // `srv,foo` won't match it.
-        if let Some(reason) = problematic_service_name(&row.name) {
+        if let Some(reason) = problematic_service_name(&svc_name) {
             r.warnings.push(format!(
                 "container '{}' on {}: {} -- selectors that target it must use the regex form `/{}$/`",
-                row.name,
+                svc_name,
                 target.host,
                 reason,
-                regex::escape(&row.name),
+                regex::escape(&svc_name),
             ));
         }
         let det = details.get(&row.id);
         let (ports, mounts, log_driver) = det
             .map(|d| (d.ports.clone(), d.mounts.clone(), d.log_driver))
             .unwrap_or_default();
+        // Field pitfall §2.3: warn for known-unsupported drivers at
+        // discovery time so `inspect setup` surfaces the issue once,
+        // not on every `inspect logs` call.
+        if let Some(d) = log_driver {
+            if !d.is_readable_via_docker_logs() {
+                r.warnings.push(format!(
+                    "service '{}' on {}: log driver `{}` is not readable via `docker logs` -- \
+                     `inspect logs` will fail with an actionable error; route logs through the driver's sink instead",
+                    svc_name,
+                    target.host,
+                    d.as_str(),
+                ));
+            }
+        }
         r.services.push(Service {
-            name: row.name,
+            name: svc_name,
             container_id: Some(row.id),
             image: Some(row.image),
             ports,
@@ -177,6 +217,77 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         });
     }
     r
+}
+
+/// Field pitfall §5.3: probe the *signed* offset (in seconds) between
+/// the remote clock and our local clock. Returns `None` when the probe
+/// fails so the caller can keep going (this is a soft warning, not a
+/// fatal error). Result kept on the [`ProbeResult`] via the `services`
+/// channel is awkward, so we expose a dedicated function.
+pub fn probe_clock_offset(ns: &str, target: &SshTarget) -> (Option<i64>, Vec<String>) {
+    // We measure round-trip time so we can subtract the SSH RTT from
+    // the apparent offset. `date +%s` runs in well under a second on
+    // any reasonable host, but ssh setup itself can add 200-800ms on
+    // a fresh connection. Without this correction every freshly-
+    // connected host would look 0.5s ahead.
+    let cmd = "date +%s";
+    let local_before = std::time::SystemTime::now();
+    let out = match run_remote(ns, target, cmd, RunOpts::with_timeout(10)) {
+        Ok(o) if o.ok() => o,
+        Ok(o) => {
+            return (
+                None,
+                vec![format!(
+                    "clock-offset probe (`date +%s`) exited {}: {}",
+                    o.exit_code,
+                    o.stderr.trim()
+                )],
+            );
+        }
+        Err(e) => {
+            return (
+                None,
+                vec![format!("clock-offset probe failed: {e}")],
+            );
+        }
+    };
+    let local_after = std::time::SystemTime::now();
+    // Midpoint of local clock during the remote read.
+    let local_mid = match (
+        local_before.duration_since(std::time::UNIX_EPOCH),
+        local_after.duration_since(std::time::UNIX_EPOCH),
+    ) {
+        (Ok(a), Ok(b)) => (a.as_secs() as i64 + b.as_secs() as i64) / 2,
+        _ => return (None, vec!["local clock is before unix epoch".to_string()]),
+    };
+    let remote = match out.stdout.trim().parse::<i64>() {
+        Ok(n) => n,
+        Err(_) => {
+            return (
+                None,
+                vec![format!(
+                    "clock-offset probe returned non-numeric output: {}",
+                    out.stdout.trim()
+                )],
+            );
+        }
+    };
+    let offset = remote - local_mid;
+    let mut warnings = Vec::new();
+    // 5s threshold is the same one Kubernetes uses to flag NTP-skew
+    // warnings on kubelet; it's small enough to surface real problems
+    // (clock not syncing) and large enough not to cry wolf about
+    // network jitter.
+    if offset.abs() >= 5 {
+        warnings.push(format!(
+            "clock skew detected on {}: remote is {} seconds {} the local clock -- \
+             `--since`/`--until` with absolute timestamps may surprise; check NTP",
+            target.host,
+            offset.abs(),
+            if offset > 0 { "ahead of" } else { "behind" },
+        ));
+    }
+    (Some(offset), warnings)
 }
 
 /// Probe Docker volumes/networks/images. Each is independent and degrades
@@ -314,6 +425,10 @@ pub(crate) struct PsRow {
     pub status: String,
     #[allow(dead_code)]
     pub state: String,
+    /// Field pitfall §6.1: value of the `com.docker.compose.service`
+    /// label, when present. When non-empty this is preferred over
+    /// `name` as the user-facing service identifier.
+    pub compose_service: Option<String>,
 }
 
 pub(crate) fn parse_docker_ps(stdout: &str) -> Vec<PsRow> {
@@ -328,12 +443,21 @@ pub(crate) fn parse_docker_ps(stdout: &str) -> Vec<PsRow> {
         if id.is_empty() || name.is_empty() {
             continue;
         }
+        // The compose-service label column is optional: older daemons
+        // and the pre-§6.1 format don't include it. `cols.get(5)`
+        // gracefully degrades to `None`.
+        let compose_service = cols
+            .get(5)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != "<no value>")
+            .map(|s| s.to_string());
         out.push(PsRow {
             id: id.to_string(),
             name: name.to_string(),
             image: cols[2].trim().to_string(),
             status: cols[3].trim().to_string(),
             state: cols[4].trim().to_string(),
+            compose_service,
         });
     }
     out
@@ -437,6 +561,15 @@ pub(crate) fn parse_docker_inspect(
                 "journald" => Some(LogDriver::Journald),
                 "local" => Some(LogDriver::Local),
                 "syslog" => Some(LogDriver::Syslog),
+                // Field pitfall §2.3: distinguish the unsupported
+                // (read-via-docker) drivers so the `logs` verb can
+                // emit a clear, driver-specific error instead of
+                // returning empty output.
+                "fluentd" => Some(LogDriver::Fluentd),
+                "awslogs" => Some(LogDriver::Awslogs),
+                "gelf" => Some(LogDriver::Gelf),
+                "splunk" => Some(LogDriver::Splunk),
+                "none" => Some(LogDriver::None),
                 _ => Some(LogDriver::Other),
             };
         }
@@ -586,6 +719,51 @@ mod tests {
         assert_eq!(rows[0].name, "nginx");
         assert_eq!(rows[0].image, "nginx:1.27");
         assert_eq!(rows[1].id, "def456");
+        // Field pitfall §6.1: legacy 5-column rows must still parse;
+        // compose_service is None.
+        assert!(rows[0].compose_service.is_none());
+    }
+
+    #[test]
+    fn parse_docker_ps_with_compose_label() {
+        // Field pitfall §6.1: prefer compose label as service name.
+        let s = "abc123\tmyproject_pulse_1\tluminary/pulse:1\tUp\trunning\tpulse\n\
+                 def456\tdb-1\tpostgres:16\tUp\trunning\t<no value>";
+        let rows = parse_docker_ps(s);
+        assert_eq!(rows.len(), 2);
+        // The label is captured when present and non-empty.
+        assert_eq!(rows[0].compose_service.as_deref(), Some("pulse"));
+        // `<no value>` (docker's literal for missing labels) is treated
+        // as absent so the container name remains the fallback.
+        assert!(rows[1].compose_service.is_none());
+    }
+
+    #[test]
+    fn parse_inspect_recognises_unsupported_log_drivers() {
+        // Field pitfall §2.3: distinguish unsupported drivers so the
+        // logs verb can emit a clear, driver-specific error.
+        let cases = [
+            ("fluentd", LogDriver::Fluentd),
+            ("awslogs", LogDriver::Awslogs),
+            ("gelf", LogDriver::Gelf),
+            ("splunk", LogDriver::Splunk),
+            ("none", LogDriver::None),
+        ];
+        for (name, expected) in cases {
+            let s = format!(
+                r#"{{"Id":"x","HostConfig":{{"LogConfig":{{"Type":"{name}"}}}}}}"#
+            );
+            let m = parse_docker_inspect(&s);
+            let d = m.get("x").expect("driver case");
+            assert_eq!(d.log_driver, Some(expected), "driver={name}");
+            assert!(
+                !expected.is_readable_via_docker_logs(),
+                "{name} must be marked unreadable"
+            );
+        }
+        // Sanity: known-good driver still readable.
+        assert!(LogDriver::JsonFile.is_readable_via_docker_logs());
+        assert!(LogDriver::Journald.is_readable_via_docker_logs());
     }
 
     #[test]

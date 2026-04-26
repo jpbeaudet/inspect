@@ -43,8 +43,20 @@ pub struct RunOpts {
 
 impl RunOpts {
     pub fn with_timeout(secs: u64) -> Self {
+        // Field pitfall §4.1: operators on high-latency fleets
+        // (cross-region, weak SSH, sluggish daemons) need the option
+        // to globally raise the per-host timeout without us hand-
+        // editing every call site. `INSPECT_HOST_TIMEOUT_SECS=N` acts
+        // as a *floor*: it never lowers a caller's explicit ask
+        // (e.g. recipe steps that intentionally use a 10s deadline)
+        // but it raises shorter defaults so a `discover` against a
+        // 90-second-handshake host doesn't time out at the default 30s.
+        let final_secs = match std::env::var("INSPECT_HOST_TIMEOUT_SECS") {
+            Ok(v) => v.parse::<u64>().ok().map(|n| n.max(secs)).unwrap_or(secs),
+            Err(_) => secs,
+        };
         Self {
-            timeout: Some(Duration::from_secs(secs)),
+            timeout: Some(Duration::from_secs(final_secs)),
         }
     }
 }

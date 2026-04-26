@@ -331,7 +331,12 @@ fn resolve_concurrency(flag: Option<usize>) -> Result<usize> {
             "warning: fleet concurrency from {source} ({raw}) clamped to hard ceiling of {clamped}"
         );
     }
-    Ok(clamped)
+    // Field pitfall §4.2: clamp again by the per-process file-descriptor
+    // budget. Each child fleet process opens its own SSH master
+    // (typically 4 fds) plus the parent's own pipes for stdout/stderr
+    // (2 fds), so high concurrency on tight ulimits silently EMFILEs.
+    let final_cap = crate::sys::ulimit::clamp_with_warning(clamped, "fleet --concurrency");
+    Ok(final_cap)
 }
 
 /// Best-effort index of the inner verb's selector positional. Returns
