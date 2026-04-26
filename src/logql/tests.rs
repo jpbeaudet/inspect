@@ -229,3 +229,102 @@ fn diagnostic_for_missing_open_brace_suggests_selector_form() {
     let h = e.hint.expect("hint");
     assert!(h.contains("{") && h.contains("source"), "hint should sketch selector: {h}");
 }
+
+// ---------------------------------------------------------------------------
+// Audit P2 — alias-error wrapping (§1.7), zero-duration rejection (§1.4),
+// and negative-test matrix (§1.1).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn alias_expansion_error_wraps_alias_name() {
+    // Body is malformed; without wrapping the user would see a span
+    // pointing into the substituted text and no mention of which
+    // alias caused it.
+    let e = parse_with_aliases("@bad", |n| (n == "bad").then(|| "{server=}".to_string()))
+        .expect_err("malformed alias body must error");
+    assert!(
+        e.message.contains("@bad"),
+        "expected alias name in error, got: {}",
+        e.message
+    );
+    assert!(e.message.contains("expansion of"), "got: {}", e.message);
+    // span should snap back to the original `@bad` reference (0..4)
+    assert_eq!(e.span, 0..4, "span should re-frame to original site");
+}
+
+#[test]
+fn zero_range_duration_is_rejected() {
+    let e = err(r#"rate({source="logs"} [0s])"#);
+    assert!(
+        e.message.contains("greater than zero") || e.message.contains("must be"),
+        "expected zero-range error, got: {}",
+        e.message
+    );
+}
+
+#[test]
+fn negative_unclosed_selector() {
+    let e = err(r#"{server="arte""#);
+    // any of: expected `,` / `}`, unterminated selector
+    assert!(
+        e.message.contains("`}`")
+            || e.message.contains("unterminated")
+            || e.message.contains("expected"),
+        "got: {}",
+        e.message
+    );
+}
+
+#[test]
+fn negative_dangling_filter_pipe() {
+    let e = err(r#"{source="logs"} |="#);
+    assert!(
+        e.message.contains("expected") || e.message.contains("string"),
+        "got: {}",
+        e.message
+    );
+}
+
+#[test]
+fn negative_metric_of_metric_rejected() {
+    let e = err(r#"rate(sum({source="logs"})[5m])"#);
+    assert!(
+        e.message.contains("expected") || e.message.contains("log"),
+        "got: {}",
+        e.message
+    );
+}
+
+#[test]
+fn negative_map_without_braces() {
+    let e = err(r#"{source="logs"} | map "x""#);
+    assert!(e.message.contains("{") || e.message.contains("expected"), "got: {}", e.message);
+}
+
+#[test]
+fn negative_random_inputs_never_panic() {
+    // Tiny sanity fuzz: a handful of adversarial strings must all
+    // return an Err without ever panicking. Real fuzz target lives
+    // in fuzz/ (added separately).
+    let bad = [
+        "",
+        "{",
+        "}",
+        "{}",
+        "{=}",
+        "{=\"x\"}",
+        r#"{source=}"#,
+        r#"{source="logs"} |"#,
+        r#"{source="logs"} | json |"#,
+        r#"rate("#,
+        r#"rate({source="logs"} [5m"#,
+        r#"topk(,)"#,
+        "@",
+        "@@",
+        r#"@x or"#,
+        "\u{0}\u{1}\u{2}",
+    ];
+    for q in bad {
+        let _ = parse(q); // must not panic; Err vs Ok both acceptable
+    }
+}

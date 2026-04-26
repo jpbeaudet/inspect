@@ -134,6 +134,8 @@ pub struct RemoteTooling {
     pub systemctl: bool,
     #[serde(default)]
     pub docker: bool,
+    #[serde(default)]
+    pub podman: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

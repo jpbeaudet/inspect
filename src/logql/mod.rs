@@ -49,11 +49,27 @@ pub fn parse_with_aliases<F>(input: &str, alias_resolver: F) -> Result<Query, Pa
 where
     F: Fn(&str) -> Option<String>,
 {
-    let expanded = alias_subst::expand(input, &alias_resolver)?;
-    let tokens = lexer::tokenize(&expanded)?;
-    let ast = parser::parse_tokens(&tokens, &expanded)?;
-    validate::validate(&ast)?;
+    let (expanded, expansions) = alias_subst::expand_with_map(input, &alias_resolver)?;
+    let frame = |e: ParseError| frame_alias_error(e, &expansions);
+    let tokens = lexer::tokenize(&expanded).map_err(&frame)?;
+    let ast = parser::parse_tokens(&tokens, &expanded).map_err(&frame)?;
+    validate::validate(&ast).map_err(&frame)?;
     Ok(ast)
+}
+
+/// If a downstream error span falls inside an expanded alias body,
+/// re-frame the message as "in expansion of `@name`: …" and snap the
+/// span back to the original `@name` reference. This keeps diagnostics
+/// pointing at code the user actually typed (audit §1.7).
+fn frame_alias_error(mut e: ParseError, expansions: &[alias_subst::Expansion]) -> ParseError {
+    for ex in expansions {
+        if e.span.start >= ex.expanded_span.start && e.span.start < ex.expanded_span.end {
+            e.message = format!("in expansion of `@{}`: {}", ex.name, e.message);
+            e.span = ex.original_span.clone();
+            return e;
+        }
+    }
+    e
 }
 
 /// Expand aliases in `input` without parsing. The returned string is

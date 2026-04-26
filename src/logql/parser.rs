@@ -629,6 +629,17 @@ impl<'a> Parser<'a> {
                 .with_hint("durations look like `30s`, `5m`, `1h`, `2d`, `1w`"));
             }
         };
+        if range_ms == 0 {
+            // Audit §1.4: a zero range collapses every range function
+            // to a divide-by-zero (`rate`) or an empty bucket
+            // (`count_over_time`). Reject up front with a clear hint
+            // rather than producing NaNs at exec time.
+            return Err(ParseError::new(
+                "range duration must be greater than zero",
+                dur_tok.span.clone(),
+            )
+            .with_hint("use a positive duration like `1s`, `5m`, `1h`"));
+        }
         self.expect(&Token::RBracket, "`]`")?;
         let close = self.expect(&Token::RParen, "`)`")?;
         Ok(RangeAggregation {

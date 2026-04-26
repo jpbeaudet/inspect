@@ -17,6 +17,7 @@
 
 use anyhow::Result;
 use serde_json::{Map, Value};
+use unicode_width::UnicodeWidthStr;
 
 use crate::format::template::Template;
 use crate::format::OutputFormat;
@@ -359,11 +360,11 @@ fn render_ascii_table(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
     if headers.is_empty() {
         return Vec::new();
     }
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| display_width(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < widths.len() {
-                widths[i] = widths[i].max(cell.chars().count());
+                widths[i] = widths[i].max(display_width(cell));
             }
         }
     }
@@ -417,11 +418,11 @@ fn render_markdown_table(headers: &[String], rows: &[Vec<String>]) -> Vec<String
 }
 
 fn pad_right(s: &str, width: usize) -> String {
-    let n = s.chars().count();
+    let n = display_width(s);
     if n >= width {
         s.to_string()
     } else {
-        let mut o = String::with_capacity(width);
+        let mut o = String::with_capacity(s.len() + (width - n));
         o.push_str(s);
         for _ in 0..(width - n) {
             o.push(' ');
@@ -430,18 +431,54 @@ fn pad_right(s: &str, width: usize) -> String {
     }
 }
 
+/// Display width in terminal cells, honoring CJK / emoji widths
+/// (audit §5.3). Falls back to char count for control chars.
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Returns true if `s` starts with a character spreadsheet engines
+/// (Excel, LibreOffice, Google Sheets) interpret as the start of a
+/// formula. Per OWASP CSV Injection guidance: `=`, `+`, `-`, `@`,
+/// TAB (`\t`), and CR (`\r`) are all dangerous.
+fn is_formula_prefix(s: &str) -> bool {
+    matches!(
+        s.as_bytes().first(),
+        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r')
+    )
+}
+
 fn csv_escape(s: &str) -> String {
-    let needs = s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
-    if needs {
-        let escaped = s.replace('"', "\"\"");
-        format!("\"{escaped}\"")
+    // Defuse spreadsheet formula injection by prefixing a literal `'`
+    // (audit §5.1). The single quote is the documented OWASP
+    // mitigation and is invisible in cells.
+    let needs_defuse = is_formula_prefix(s);
+    let needs_quote = needs_defuse
+        || s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r');
+    if needs_quote {
+        let mut body = String::with_capacity(s.len() + 3);
+        if needs_defuse {
+            body.push('\'');
+        }
+        body.push_str(&s.replace('"', "\"\""));
+        format!("\"{body}\"")
     } else {
         s.to_string()
     }
 }
 
 fn tsv_escape(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ")
+    // Strip tabs/newlines first so column alignment survives.
+    let cleaned = s.replace(['\t', '\n', '\r'], " ");
+    if is_formula_prefix(&cleaned) {
+        // Same defusing rationale as CSV.
+        format!("'{cleaned}")
+    } else {
+        cleaned
+    }
 }
 
 fn md_escape(s: &str) -> String {
@@ -494,8 +531,47 @@ mod tests {
     }
 
     #[test]
+    fn csv_escape_defuses_formula_prefixes() {
+        // OWASP CSV injection mitigation: spreadsheet apps treat a
+        // leading `=`, `+`, `-`, `@`, TAB, or CR as a formula. We
+        // wrap the cell and prefix it with a literal apostrophe.
+        for prefix in ["=", "+", "-", "@", "\t", "\r"] {
+            let cell = format!("{prefix}cmd|calc");
+            let out = csv_escape(&cell);
+            assert!(
+                out.starts_with("\"'"),
+                "expected formula defusing for {prefix:?}, got {out:?}"
+            );
+        }
+        // safe leading char: not quoted, not prefixed
+        assert_eq!(csv_escape("0=ok"), "0=ok");
+    }
+
+    #[test]
     fn tsv_escape_strips_tabs() {
         assert_eq!(tsv_escape("a\tb"), "a b");
+    }
+
+    #[test]
+    fn tsv_escape_defuses_formula_prefix() {
+        assert_eq!(tsv_escape("=SUM(A1)"), "'=SUM(A1)");
+        assert_eq!(tsv_escape("+1"), "'+1");
+        assert_eq!(tsv_escape("safe"), "safe");
+    }
+
+    #[test]
+    fn ascii_table_aligns_with_unicode_width() {
+        // CJK chars are width-2; emoji is width-2 in most fonts.
+        // chars().count() would give 1, mis-aligning the column.
+        let headers = vec!["name".to_string(), "v".to_string()];
+        let rows = vec![
+            vec!["日本語".to_string(), "1".to_string()],
+            vec!["en".to_string(), "22".to_string()],
+        ];
+        let out = render_ascii_table(&headers, &rows);
+        // header padded to max(width("name"), width("日本語")=6, width("en")=2) = 6
+        assert!(out[0].starts_with("name  "));
+        assert!(out[1].starts_with("日本語"));
     }
 
     #[test]

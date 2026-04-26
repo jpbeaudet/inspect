@@ -34,7 +34,7 @@ pub struct HostListener {
 pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
     // `command -v X >/dev/null 2>&1 && echo X=1 || echo X=0`
     let tools = [
-        "rg", "jq", "journalctl", "sed", "grep", "netstat", "ss", "systemctl", "docker",
+        "rg", "jq", "journalctl", "sed", "grep", "netstat", "ss", "systemctl", "docker", "podman",
     ];
     let parts: Vec<String> = tools
         .iter()
@@ -60,8 +60,18 @@ pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
                     "ss" => t.ss = present,
                     "systemctl" => t.systemctl = present,
                     "docker" => t.docker = present,
+                    "podman" => t.podman = present,
                     _ => {}
                 }
+            }
+            // Audit §6.2: if neither container engine is present,
+            // surface a single actionable line rather than letting the
+            // user wade through nine "X=0" lines.
+            if !t.docker && !t.podman {
+                r.warnings.push(
+                    "no container engine found on host (neither `docker` nor `podman` in PATH)"
+                        .to_string(),
+                );
             }
             r.remote_tooling = Some(t);
         }
@@ -92,8 +102,16 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         }
     };
     if !ps_out.ok() {
-        r.warnings
-            .push(format!("docker ps exited {}: {}", ps_out.exit_code, ps_out.stderr.trim()));
+        let stderr = ps_out.stderr.trim();
+        if let Some(hint) = explain_docker_failure(stderr) {
+            r.warnings.push(format!(
+                "docker ps exited {}: {} -- {}",
+                ps_out.exit_code, stderr, hint
+            ));
+        } else {
+            r.warnings
+                .push(format!("docker ps exited {}: {}", ps_out.exit_code, stderr));
+        }
         return r;
     }
 
@@ -479,6 +497,34 @@ fn extract_process(line: &str) -> Option<String> {
     None
 }
 
+/// Translate common docker CLI failures into a one-line actionable
+/// hint (audit §6.1, §6.2). Returns `None` when we don't recognize the
+/// failure — the raw stderr is still surfaced separately.
+pub(crate) fn explain_docker_failure(stderr: &str) -> Option<&'static str> {
+    let s = stderr.to_ascii_lowercase();
+    if s.contains("permission denied")
+        && (s.contains("docker.sock") || s.contains("docker daemon"))
+    {
+        return Some(
+            "add user to the `docker` group (`sudo usermod -aG docker $USER`, then re-login), \
+             run with `sudo`, or set `DOCKER_HOST` to a socket you can access",
+        );
+    }
+    if s.contains("cannot connect to the docker daemon") {
+        return Some(
+            "the docker daemon is not running on this host -- start it with \
+             `sudo systemctl start docker`, or set `DOCKER_HOST` if it lives elsewhere",
+        );
+    }
+    if s.contains("command not found") || s.contains("docker: not found") {
+        return Some(
+            "the `docker` binary is not in PATH on this host -- if you use podman, \
+             install `podman-docker` or alias `docker=podman`",
+        );
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,5 +588,24 @@ mod tests {
         let r = parse_listener_line(l).unwrap();
         assert_eq!(r.port, 8080);
         assert_eq!(r.process.as_deref(), Some("myapp"));
+    }
+
+    #[test]
+    fn explain_docker_perm_denied() {
+        let s = "Got permission denied while trying to connect to the Docker daemon socket";
+        let h = explain_docker_failure(s).expect("should recognize perm denied");
+        assert!(h.contains("docker") && h.contains("group"));
+    }
+
+    #[test]
+    fn explain_docker_daemon_down() {
+        let s = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?";
+        let h = explain_docker_failure(s).expect("should recognize daemon down");
+        assert!(h.contains("systemctl") || h.contains("DOCKER_HOST"));
+    }
+
+    #[test]
+    fn explain_docker_unknown_returns_none() {
+        assert!(explain_docker_failure("some unrelated stderr").is_none());
     }
 }
