@@ -10,7 +10,7 @@ use crate::cli::SimpleSelectorArgs;
 use crate::error::ExitKind;
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::{Envelope, Renderer};
 use crate::verbs::quote::shquote;
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {

@@ -6,7 +6,7 @@ use crate::cli::SimpleSelectorArgs;
 use crate::error::ExitKind;
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::plan;
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     let (runner, nses, _) = plan(&args.selector)?;

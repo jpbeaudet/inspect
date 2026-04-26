@@ -441,7 +441,7 @@ fn csv_escape(s: &str) -> String {
 }
 
 fn tsv_escape(s: &str) -> String {
-    s.replace('\t', " ").replace('\n', " ").replace('\r', " ")
+    s.replace(['\t', '\n', '\r'], " ")
 }
 
 fn md_escape(s: &str) -> String {

@@ -54,12 +54,14 @@ impl OutputFormat {
     }
 
     /// True for the `--json`/`--jsonl` family.
+    #[allow(dead_code)]
     pub fn is_json(&self) -> bool {
         matches!(self, OutputFormat::Json)
     }
 
     /// True if this format should never emit ANSI color codes regardless
     /// of TTY / NO_COLOR state.
+    #[allow(dead_code)]
     pub fn always_plain(&self) -> bool {
         !matches!(self, OutputFormat::Human)
     }
@@ -169,6 +171,7 @@ impl FormatArgs {
 /// True if the running process should suppress ANSI color codes.
 /// Honors the upstream [`NO_COLOR`](https://no-color.org/) standard,
 /// the `--no-color` flag, and TTY presence.
+#[allow(dead_code)]
 pub fn no_color_active(no_color_flag: bool) -> bool {
     if no_color_flag {
         return true;
@@ -185,6 +188,7 @@ pub fn no_color_active(no_color_flag: bool) -> bool {
 /// Best-effort check whether stdout is attached to a terminal. We avoid
 /// pulling in a new dependency and rely on `isatty(1)` via libc on
 /// unix; on non-unix we return `true` so behavior is unchanged.
+#[allow(dead_code)]
 pub fn is_stdout_tty() -> bool {
     #[cfg(unix)]
     {
