@@ -75,10 +75,14 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)
-                        .put("line", line),
+                        .put("line", crate::format::safe::safe_machine_line(line).as_ref()),
                 );
             } else {
-                println!("{}/{} | {line}", step.ns.namespace, svc);
+                let safe = crate::format::safe::safe_terminal_line(
+                    line,
+                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
+                );
+                println!("{}/{} | {safe}", step.ns.namespace, svc);
             }
         }
     }

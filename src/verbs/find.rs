@@ -15,7 +15,21 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
     let mut total_hits = 0usize;
     for step in iter_steps(&nses, &targets) {
         let path = step.path.as_deref().unwrap_or(".");
-        let mut find_cmd = format!("find {} -type f", shquote(path));
+        // Field pitfall §7.4: defensive caps against symlink loops and
+        // pathological deep trees. `-P` (the default for GNU find but
+        // we make it explicit) means "never follow symlinks", which
+        // is the only thing that can introduce cycles. `-maxdepth`
+        // bounds traversal so a misconfigured mountpoint can't hang
+        // the call. Both can be loosened by the operator via
+        // `INSPECT_FIND_MAXDEPTH` if they really need a deeper scan.
+        let maxdepth: u32 = std::env::var("INSPECT_FIND_MAXDEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let mut find_cmd = format!(
+            "find -P {} -maxdepth {maxdepth} -type f",
+            shquote(path)
+        );
         if let Some(pat) = args.pattern.as_deref() {
             find_cmd.push(' ');
             find_cmd.push_str("-name ");

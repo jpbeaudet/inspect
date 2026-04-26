@@ -57,15 +57,18 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))
                         .with_service(step.service().unwrap_or("_"))
                         .put("path", path)
-                        .put("entry", line),
+                        .put("entry", crate::format::safe::safe_machine_line(line).as_ref()),
                 );
             }
         } else {
             let svc_part = step.service().map(|s| format!("/{s}")).unwrap_or_default();
             println!("# {}{svc_part}:{path}", step.ns.namespace);
-            print!("{}", out.stdout);
-            if !out.stdout.ends_with('\n') {
-                println!();
+            for line in out.stdout.lines() {
+                let safe = crate::format::safe::safe_terminal_line(
+                    line,
+                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
+                );
+                println!("{safe}");
             }
         }
     }

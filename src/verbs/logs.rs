@@ -53,10 +53,14 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "logs", "logs")
                         .with_service(&svc_name)
-                        .put("line", line),
+                        .put("line", crate::format::safe::safe_machine_line(line).as_ref()),
                 );
             } else {
-                println!("{}/{} | {line}", step.ns.namespace, svc_name);
+                let safe = crate::format::safe::safe_terminal_line(
+                    line,
+                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
+                );
+                println!("{}/{} | {safe}", step.ns.namespace, svc_name);
             }
         }
     }
@@ -88,20 +92,60 @@ fn build_logs(
 }
 
 fn build_docker_logs(svc: &str, args: &LogsArgs) -> String {
+    // Field pitfall §2.2: when `docker logs -f` returns early
+    // (typically because the underlying log file was truncated or
+    // rotated), the local stream silently goes quiet. The container
+    // is still running and still producing logs — we just lost the
+    // file handle on the daemon side.
+    //
+    // Fix: wrap follow mode in a server-side shell loop that
+    // re-attaches to `docker logs -f` as long as the container is
+    // still alive. The first iteration honours `--since/--until/
+    // --tail`; subsequent iterations use `--tail 0` so we don't
+    // replay history every time the file rotates.
+    if args.follow {
+        let head = build_docker_logs_once(svc, args, /*reconnect=*/ false);
+        let tail = build_docker_logs_once(svc, args, /*reconnect=*/ true);
+        let svc_q = shquote(svc);
+        // `set -u` guards against typos; the explicit
+        // `docker inspect` check distinguishes "container shut down"
+        // (exit cleanly) from "file rotated" (retry).
+        let inner = format!(
+            "set -u; first=1; while :; do \
+                if [ \"$first\" = 1 ]; then {head}; else {tail}; fi; \
+                first=0; \
+                docker inspect -f x {svc_q} >/dev/null 2>&1 || exit 0; \
+                sleep 1; \
+             done"
+        );
+        return format!("sh -c {}", shquote(&inner));
+    }
+    build_docker_logs_once(svc, args, /*reconnect=*/ false)
+}
+
+/// One invocation of `docker logs`. When `reconnect == true` we omit
+/// `--since`/`--until`/`--tail` and force `--tail 0` so we pick up
+/// only new lines after a follow-mode reconnect.
+fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String {
     let mut s = String::from("docker logs");
     if args.follow {
         s.push_str(" -f");
     }
-    if let Some(since) = &args.since {
-        s.push_str(" --since ");
-        s.push_str(&shquote(since));
-    }
-    if let Some(until) = &args.until {
-        s.push_str(" --until ");
-        s.push_str(&shquote(until));
-    }
-    if let Some(tail) = args.tail {
-        s.push_str(&format!(" --tail {tail}"));
+    if reconnect {
+        // After a rotation we don't want the full history again.
+        s.push_str(" --tail 0");
+    } else {
+        if let Some(since) = &args.since {
+            s.push_str(" --since ");
+            s.push_str(&shquote(since));
+        }
+        if let Some(until) = &args.until {
+            s.push_str(" --until ");
+            s.push_str(&shquote(until));
+        }
+        if let Some(tail) = args.tail {
+            s.push_str(&format!(" --tail {tail}"));
+        }
     }
     s.push(' ');
     s.push_str(&shquote(svc));
@@ -124,4 +168,56 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
         s.push_str(&format!(" -n {tail}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::LogsArgs;
+    use crate::format::FormatArgs;
+
+    fn args(follow: bool) -> LogsArgs {
+        LogsArgs {
+            selector: "x".into(),
+            since: None,
+            until: None,
+            tail: None,
+            follow,
+            format: FormatArgs::default(),
+            follow_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn non_follow_is_a_single_docker_logs() {
+        let s = build_docker_logs("svc", &args(false));
+        assert!(s.starts_with("docker logs"));
+        assert!(!s.contains("while :"));
+    }
+
+    #[test]
+    fn follow_wraps_in_resilient_loop() {
+        // Field pitfall §2.2: follow mode must reconnect after a
+        // file rotation/truncate.
+        let s = build_docker_logs("svc", &args(true));
+        assert!(s.starts_with("sh -c "), "got: {s}");
+        assert!(s.contains("while :"), "missing reconnect loop: {s}");
+        assert!(s.contains("docker inspect"), "missing liveness check: {s}");
+        // Reconnect path must use --tail 0 to avoid replaying history.
+        assert!(s.contains("--tail 0"), "missing post-reconnect tail-0: {s}");
+        // First iteration honours the original docker logs args.
+        assert!(s.contains("docker logs -f"));
+    }
+
+    #[test]
+    fn follow_loop_quotes_service_name_with_special_chars() {
+        // Defence against shell injection via service name (already
+        // discovered + warned in §7.3 of the original audit, but
+        // reverify here since this builder constructs an extra layer
+        // of `sh -c`).
+        let s = build_docker_logs("svc;rm -rf /", &args(true));
+        assert!(!s.contains("rm -rf /;"), "unquoted injection: {s}");
+        // Still must mention the service name literally inside quotes.
+        assert!(s.contains("svc;rm -rf /") || s.contains("'svc;rm -rf /'"));
+    }
 }

@@ -17,6 +17,7 @@ use anyhow::{anyhow, Result};
 use clap::Args;
 
 pub mod render;
+pub mod safe;
 pub mod template;
 
 /// Resolved output format. Carries display state (color, decoration)
