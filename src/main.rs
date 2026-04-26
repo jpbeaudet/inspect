@@ -15,6 +15,7 @@ mod error;
 mod paths;
 mod profile;
 mod redact;
+mod safety;
 mod selector;
 mod ssh;
 mod verbs;
@@ -67,24 +68,24 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Images(args) => verbs::images::run(args),
         Command::Network(args) => verbs::network::run(args),
         Command::Ports(args) => verbs::ports::run(args),
+        Command::Restart(args) => verbs::write::lifecycle::restart(args),
+        Command::Stop(args) => verbs::write::lifecycle::stop(args),
+        Command::Start(args) => verbs::write::lifecycle::start(args),
+        Command::Reload(args) => verbs::write::lifecycle::reload(args),
+        Command::Cp(args) => verbs::write::cp::run(args),
+        Command::Edit(args) => verbs::write::edit::run(args),
+        Command::Rm(args) => verbs::write::rm::run(args),
+        Command::Mkdir(args) => verbs::write::mkdir::run(args),
+        Command::Touch(args) => verbs::write::touch::run(args),
+        Command::Chmod(args) => verbs::write::chmod::run(args),
+        Command::Chown(args) => verbs::write::chown::run(args),
+        Command::Exec(args) => verbs::write::exec::run(args),
+        Command::Audit(args) => commands::audit::run(args),
+        Command::Revert(args) => commands::revert::run(args),
         Command::Why(_)
         | Command::Connectivity(_)
         | Command::Recipe(_)
         | Command::Search(_)
-        | Command::Restart(_)
-        | Command::Stop(_)
-        | Command::Start(_)
-        | Command::Reload(_)
-        | Command::Cp(_)
-        | Command::Edit(_)
-        | Command::Rm(_)
-        | Command::Mkdir(_)
-        | Command::Touch(_)
-        | Command::Chmod(_)
-        | Command::Chown(_)
-        | Command::Exec(_)
-        | Command::Audit(_)
-        | Command::Revert(_)
         | Command::Fleet(_) => commands::placeholders::run(cli.command),
     }
 }

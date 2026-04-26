@@ -99,29 +99,29 @@ pub enum Command {
 
     // ---- Phase 5 write verbs -------------------------------------------------
     /// Restart container(s).
-    Restart(SelectorArgs),
+    Restart(LifecycleArgs),
     /// Stop container(s).
-    Stop(SelectorArgs),
+    Stop(LifecycleArgs),
     /// Start container(s).
-    Start(SelectorArgs),
+    Start(LifecycleArgs),
     /// Reload service(s) (SIGHUP).
-    Reload(SelectorArgs),
+    Reload(LifecycleArgs),
     /// Copy files between local and remote.
-    Cp(SelectorArgs),
+    Cp(CpArgs),
     /// Sed-style content edit.
-    Edit(SelectorArgs),
+    Edit(EditArgs),
     /// Delete file.
-    Rm(SelectorArgs),
+    Rm(PathArgArgs),
     /// Create directory.
-    Mkdir(SelectorArgs),
+    Mkdir(PathArgArgs),
     /// Create empty file.
-    Touch(SelectorArgs),
+    Touch(PathArgArgs),
     /// Change file mode.
-    Chmod(SelectorArgs),
+    Chmod(ChmodArgs),
     /// Change file ownership.
-    Chown(SelectorArgs),
+    Chown(ChownArgs),
     /// Run a command on a target.
-    Exec(SelectorArgs),
+    Exec(ExecArgs),
 
     // ---- Phase 3 alias management --------------------------------------------
     /// Manage selector aliases.
@@ -133,9 +133,9 @@ pub enum Command {
 
     // ---- Phase 5 audit + revert ----------------------------------------------
     /// Inspect or query the local audit log.
-    Audit(SelectorArgs),
+    Audit(AuditArgs),
     /// Revert a previous mutation by audit id.
-    Revert(SelectorArgs),
+    Revert(RevertArgs),
 
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
@@ -508,4 +508,169 @@ pub struct FindArgs {
     pub pattern: Option<String>,
     #[arg(long)]
     pub json: bool,
+}
+
+// ---- Phase 5 write verbs -----------------------------------------------------
+
+/// Shared safety flags for every write verb. Defined inline on each
+/// arg-struct rather than via `#[command(flatten)]` so the help text
+/// stays grouped per verb.
+#[derive(Debug, Args)]
+pub struct LifecycleArgs {
+    /// Selector (server, server/service, ...).
+    pub selector: String,
+    /// Actually perform the mutation. Without this flag, the verb is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the large-fanout interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ExecArgs {
+    /// Selector.
+    pub selector: String,
+    /// Command and arguments after `--`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub cmd: Vec<String>,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Override the per-target timeout (seconds).
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct PathArgArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ChmodArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    /// Octal (e.g. `0644`) or symbolic (`u+x`).
+    pub mode: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ChownArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    /// `user[:group]`.
+    pub owner: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CpArgs {
+    /// Source: local path or `<sel>:<path>`.
+    pub source: String,
+    /// Destination: local path or `<sel>:<path>`.
+    pub dest: String,
+    #[arg(long)]
+    pub apply: bool,
+    /// Show a unified diff in dry-run mode.
+    #[arg(long)]
+    pub diff: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct EditArgs {
+    /// Selector with `:path`.
+    pub target: String,
+    /// Sed substitution expression (e.g. `s/old/new/g`).
+    pub expr: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    #[command(subcommand)]
+    pub command: AuditCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// List recent audit entries (newest first).
+    Ls(AuditLsArgs),
+    /// Show one audit entry in detail.
+    Show(AuditShowArgs),
+    /// Filter audit entries by substring (id/verb/selector/args).
+    Grep(AuditGrepArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuditLsArgs {
+    /// Maximum entries to show.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditShowArgs {
+    pub id: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditGrepArgs {
+    pub pattern: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RevertArgs {
+    /// Audit id (or unique prefix).
+    pub audit_id: String,
+    #[arg(long)]
+    pub apply: bool,
+    /// Override the drift check (current remote != recorded new_hash).
+    #[arg(long)]
+    pub force: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
 }

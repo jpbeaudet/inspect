@@ -26,6 +26,7 @@ pub mod quote;
 pub mod runtime;
 pub mod status;
 pub mod volumes;
+pub mod write;
 
 #[allow(unused_imports)]
 pub use output::{Envelope, JsonOut, Renderer};
