@@ -22,11 +22,7 @@ use crate::logql::ast::LogQuery;
 ///      stream, substitute values and parse + execute the sub-query.
 ///   3. Concatenate the outputs (order matches parent stream order
 ///      of unique tuples).
-pub fn execute(
-    ctx: &ExecCtx<'_>,
-    sub: &LogQuery,
-    parent: Vec<Record>,
-) -> Result<Vec<Record>> {
+pub fn execute(ctx: &ExecCtx<'_>, sub: &LogQuery, parent: Vec<Record>) -> Result<Vec<Record>> {
     // We work off the original sub-query text rather than rebuilding
     // it from the AST: the parser preserves the byte span, and the
     // post-alias-substitution source is on `ctx.source`.
@@ -99,9 +95,7 @@ pub fn collect_field_refs(src: &str) -> Vec<String> {
         }
         if c == b'$' {
             let mut j = i + 1;
-            while j < bytes.len()
-                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             if j < bytes.len() && bytes[j] == b'$' && j > i + 1 {
@@ -130,9 +124,7 @@ pub fn interpolate(src: &str, vals: &BTreeMap<String, String>) -> String {
     while i < bytes.len() {
         if bytes[i] == b'$' {
             let mut j = i + 1;
-            while j < bytes.len()
-                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             if j < bytes.len() && bytes[j] == b'$' && j > i + 1 {

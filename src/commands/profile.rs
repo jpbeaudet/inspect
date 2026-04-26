@@ -21,10 +21,7 @@ pub fn run(args: ProfileArgs) -> anyhow::Result<ExitKind> {
                     ns = json_string(&args.namespace),
                 );
             } else {
-                println!(
-                    "SUMMARY: no cached profile for '{}'",
-                    args.namespace
-                );
+                println!("SUMMARY: no cached profile for '{}'", args.namespace);
                 println!("NEXT:    inspect setup {}", args.namespace);
             }
             return Ok(ExitKind::Error);

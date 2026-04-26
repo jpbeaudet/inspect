@@ -279,7 +279,9 @@ fn resolve_services_for_ns(
                     if matches!(s.kind, ServiceKind::Container | ServiceKind::Systemd) {
                         out.push(ResolvedTarget {
                             namespace: ns.to_string(),
-                            kind: TargetKind::Service { name: s.name.clone() },
+                            kind: TargetKind::Service {
+                                name: s.name.clone(),
+                            },
                             path: path.clone(),
                         });
                     }
@@ -291,12 +293,10 @@ fn resolve_services_for_ns(
             let names: Vec<String> = profile
                 .map(|p| p.services.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
-            let groups: BTreeMap<String, Vec<String>> = profile
-                .map(|p| p.groups.clone())
-                .unwrap_or_default();
-            let pf_aliases: BTreeMap<String, String> = profile
-                .map(|p| p.aliases.clone())
-                .unwrap_or_default();
+            let groups: BTreeMap<String, Vec<String>> =
+                profile.map(|p| p.groups.clone()).unwrap_or_default();
+            let pf_aliases: BTreeMap<String, String> =
+                profile.map(|p| p.aliases.clone()).unwrap_or_default();
 
             let mut included: BTreeSet<String> = BTreeSet::new();
             let mut excluded: BTreeSet<String> = BTreeSet::new();
@@ -367,8 +367,7 @@ fn resolve_services_for_ns(
             if !had_positive {
                 included = names.iter().cloned().collect();
             }
-            let final_names: BTreeSet<String> =
-                included.difference(&excluded).cloned().collect();
+            let final_names: BTreeSet<String> = included.difference(&excluded).cloned().collect();
             Ok(final_names
                 .into_iter()
                 .map(|name| ResolvedTarget {
@@ -387,7 +386,9 @@ fn pattern_matches(pat: &str, name: &str) -> bool {
         return pat == name;
     }
     let re_str = glob_to_regex(pat);
-    Regex::new(&re_str).map(|r| r.is_match(name)).unwrap_or(false)
+    Regex::new(&re_str)
+        .map(|r| r.is_match(name))
+        .unwrap_or(false)
 }
 
 /// Translate a shell-style glob to an anchored regex.
@@ -436,7 +437,11 @@ mod tests {
 
     #[test]
     fn server_match_set_subtraction() {
-        let all = vec!["arte".to_string(), "prod".to_string(), "staging".to_string()];
+        let all = vec![
+            "arte".to_string(),
+            "prod".to_string(),
+            "staging".to_string(),
+        ];
         let spec = ServerSpec::Atoms(vec![ServerAtom::Exclude("staging".to_string())]);
         let mut got = match_servers(&spec, &all);
         got.sort();
@@ -445,7 +450,11 @@ mod tests {
 
     #[test]
     fn server_match_glob() {
-        let all = vec!["prod-1".to_string(), "prod-2".to_string(), "staging".to_string()];
+        let all = vec![
+            "prod-1".to_string(),
+            "prod-2".to_string(),
+            "staging".to_string(),
+        ];
         let spec = ServerSpec::Atoms(vec![ServerAtom::Pattern("prod-*".to_string())]);
         let mut got = match_servers(&spec, &all);
         got.sort();

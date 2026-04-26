@@ -12,6 +12,6 @@ pub mod schema;
 pub use cache::{is_stale, load_profile, profile_path, save_profile, DEFAULT_TTL_DAYS};
 #[allow(unused_imports)]
 pub use schema::{
-    HealthStatus, Image, LogDriver, Mount, Network, Port, Profile, RemoteTooling, Service,
-    Volume, PROFILE_SCHEMA_VERSION,
+    HealthStatus, Image, LogDriver, Mount, Network, Port, Profile, RemoteTooling, Service, Volume,
+    PROFILE_SCHEMA_VERSION,
 };

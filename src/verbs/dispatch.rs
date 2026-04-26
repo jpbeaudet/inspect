@@ -50,7 +50,12 @@ impl<'a> Step<'a> {
     /// Look up the service definition in the cached profile, if any.
     pub fn service_def(&self) -> Option<&'a Service> {
         let name = self.service()?;
-        self.ns.profile.as_ref()?.services.iter().find(|s| s.name == name)
+        self.ns
+            .profile
+            .as_ref()?
+            .services
+            .iter()
+            .find(|s| s.name == name)
     }
 }
 
@@ -90,8 +95,7 @@ pub fn iter_steps<'a>(
     nses: &'a [NsCtx],
     targets: &'a [ResolvedTarget],
 ) -> impl Iterator<Item = Step<'a>> + 'a {
-    let by_name: HashMap<&str, &NsCtx> =
-        nses.iter().map(|n| (n.namespace.as_str(), n)).collect();
+    let by_name: HashMap<&str, &NsCtx> = nses.iter().map(|n| (n.namespace.as_str(), n)).collect();
     targets.iter().filter_map(move |t| {
         by_name.get(t.namespace.as_str()).map(|ns| Step {
             ns,

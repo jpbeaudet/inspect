@@ -111,9 +111,13 @@ fn execute_vector(ctx: &ExecCtx<'_>, v: &VectorAggregation) -> Result<Vec<Metric
         let mut ranked = inner_samples.clone();
         ranked.sort_by(|a, b| {
             if matches!(v.func, AggFn::Topk) {
-                b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal)
+                b.value
+                    .partial_cmp(&a.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             } else {
-                a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal)
+                a.value
+                    .partial_cmp(&b.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         });
         let k = v.param.unwrap_or(0).max(0) as usize;
@@ -146,7 +150,8 @@ fn group_by_all_labels(
                 merged.insert(k.clone(), crate::exec::record::value_as_string(v));
             }
         }
-        let key: Vec<(String, String)> = merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let key: Vec<(String, String)> =
+            merged.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         buckets.entry(key).or_default().push(r);
     }
     buckets
@@ -175,10 +180,7 @@ fn group_samples(
         .collect()
 }
 
-fn filter_labels(
-    labels: &BTreeMap<String, String>,
-    g: &Grouping,
-) -> BTreeMap<String, String> {
+fn filter_labels(labels: &BTreeMap<String, String>, g: &Grouping) -> BTreeMap<String, String> {
     match g.mode {
         GroupingMode::By => labels
             .iter()

@@ -194,10 +194,7 @@ mod tests {
     fn template_format_carries_template_string() {
         let mut a = args();
         a.format = Some("{{.x}}".into());
-        assert_eq!(
-            a.resolve().unwrap(),
-            OutputFormat::Format("{{.x}}".into())
-        );
+        assert_eq!(a.resolve().unwrap(), OutputFormat::Format("{{.x}}".into()));
     }
 
     #[test]

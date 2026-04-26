@@ -85,7 +85,11 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         for name in &walk.order {
             let depth = walk.depth.get(name).copied().unwrap_or(0);
             let st = status_map.get(name).copied().unwrap_or(NodeStatus::Unknown);
-            let mark = if Some(name) == root.as_ref() { "  <- likely root cause" } else { "" };
+            let mark = if Some(name) == root.as_ref() {
+                "  <- likely root cause"
+            } else {
+                ""
+            };
             let indent = "  ".repeat(depth + 1);
             data_lines.push(format!("{indent}{name}: {}{mark}", st.as_str()));
         }
@@ -113,7 +117,10 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             doc.push_next(n);
         }
     } else if emitted > 0 {
-        let server = nses.first().map(|n| n.namespace.as_str()).unwrap_or("<server>");
+        let server = nses
+            .first()
+            .map(|n| n.namespace.as_str())
+            .unwrap_or("<server>");
         for n in why_rules(server, None) {
             doc.push_next(n);
         }
@@ -171,11 +178,7 @@ impl NodeStatus {
     }
 }
 
-fn node_status(
-    profile: &Profile,
-    live: Option<&HashSet<String>>,
-    name: &str,
-) -> NodeStatus {
+fn node_status(profile: &Profile, live: Option<&HashSet<String>>, name: &str) -> NodeStatus {
     let svc: Option<&Service> = profile.services.iter().find(|s| s.name == name);
     let svc = match svc {
         Some(s) => s,
@@ -207,8 +210,11 @@ struct Walk {
 }
 
 fn walk_deps(profile: &Profile, root: &str) -> Walk {
-    let by_name: HashMap<&str, &Service> =
-        profile.services.iter().map(|s| (s.name.as_str(), s)).collect();
+    let by_name: HashMap<&str, &Service> = profile
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s))
+        .collect();
 
     let mut order = Vec::new();
     let mut nodes = BTreeSet::new();
@@ -239,8 +245,15 @@ fn walk_deps(profile: &Profile, root: &str) -> Walk {
         }
     }
 
-    visit(root, 0, &by_name, &mut order, &mut nodes, &mut edges, &mut depth);
-    Walk { order, nodes, edges, depth }
+    visit(
+        root, 0, &by_name, &mut order, &mut nodes, &mut edges, &mut depth,
+    );
+    Walk {
+        order,
+        nodes,
+        edges,
+        depth,
+    }
 }
 
 /// The "deepest failing leaf": pick the failing node whose own
@@ -255,12 +268,9 @@ fn pick_root_cause(walk: &Walk, status: &HashMap<String, NodeStatus>) -> Option<
             continue;
         }
         let deps = walk.edges.get(name).cloned().unwrap_or_default();
-        let any_failing_below = deps.iter().any(|d| {
-            status
-                .get(d)
-                .map(|s2| failing(*s2))
-                .unwrap_or(false)
-        });
+        let any_failing_below = deps
+            .iter()
+            .any(|d| status.get(d).map(|s2| failing(*s2)).unwrap_or(false));
         if any_failing_below {
             continue;
         }

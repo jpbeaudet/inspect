@@ -92,7 +92,11 @@ fn render_nodes(nodes: &[Node], rec: &Value, out: &mut String) -> Result<()> {
         match n {
             Node::Text(s) => out.push_str(s),
             Node::Expr(e) => out.push_str(&eval_expr(e, rec)?),
-            Node::If { cond, then, otherwise } => {
+            Node::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 if eval_cond(cond, rec) {
                     render_nodes(then, rec, out)?;
                 } else {
@@ -154,7 +158,9 @@ fn apply_fn(name: &str, args: &[Arg], v: Value) -> Result<Value> {
         "lower" => Ok(Value::String(s().to_lowercase())),
         "len" => match &v {
             Value::Array(a) => Ok(Value::Number(serde_json::Number::from(a.len() as u64))),
-            Value::String(st) => Ok(Value::Number(serde_json::Number::from(st.chars().count() as u64))),
+            Value::String(st) => Ok(Value::Number(serde_json::Number::from(
+                st.chars().count() as u64
+            ))),
             Value::Null => Ok(Value::Number(serde_json::Number::from(0u64))),
             _ => Ok(Value::Number(serde_json::Number::from(0u64))),
         },
@@ -216,9 +222,7 @@ fn apply_fn(name: &str, args: &[Arg], v: Value) -> Result<Value> {
                 _ => None,
             };
             match secs {
-                Some(then) if now >= then => {
-                    Ok(Value::String(human_duration(now - then)))
-                }
+                Some(then) if now >= then => Ok(Value::String(human_duration(now - then))),
                 _ => Ok(Value::String(s())),
             }
         }
@@ -227,7 +231,9 @@ fn apply_fn(name: &str, args: &[Arg], v: Value) -> Result<Value> {
 }
 
 fn parse_rfc3339_secs(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 fn human_duration(mut secs: i64) -> String {
@@ -291,7 +297,11 @@ impl<'a> Parser<'a> {
                         if !self.consume_action_kw("end") {
                             bail!("template: missing `{{end}}`");
                         }
-                        out.push(Node::If { cond, then, otherwise });
+                        out.push(Node::If {
+                            cond,
+                            then,
+                            otherwise,
+                        });
                     }
                 }
             } else {
@@ -301,9 +311,21 @@ impl<'a> Parser<'a> {
                     if c == '\\' && self.pos + 1 < self.src.len() {
                         let nxt = self.src.as_bytes()[self.pos + 1] as char;
                         match nxt {
-                            'n' => { buf.push('\n'); self.pos += 2; continue; }
-                            't' => { buf.push('\t'); self.pos += 2; continue; }
-                            '\\' => { buf.push('\\'); self.pos += 2; continue; }
+                            'n' => {
+                                buf.push('\n');
+                                self.pos += 2;
+                                continue;
+                            }
+                            't' => {
+                                buf.push('\t');
+                                self.pos += 2;
+                                continue;
+                            }
+                            '\\' => {
+                                buf.push('\\');
+                                self.pos += 2;
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -322,7 +344,12 @@ impl<'a> Parser<'a> {
         // Currently at `{{`.
         self.pos += 2;
         self.skip_ws();
-        if self.starts_with("if") && self.peek_after("if").map(|c| c.is_whitespace()).unwrap_or(false) {
+        if self.starts_with("if")
+            && self
+                .peek_after("if")
+                .map(|c| c.is_whitespace())
+                .unwrap_or(false)
+        {
             self.pos += 2;
             self.skip_ws();
             let cond = self.parse_cond()?;
@@ -427,11 +454,31 @@ impl<'a> Parser<'a> {
             if c == '\\' && self.pos + 1 < self.src.len() {
                 let nxt = self.src.as_bytes()[self.pos + 1] as char;
                 match nxt {
-                    '"' => { out.push('"'); self.pos += 2; continue; }
-                    '\\' => { out.push('\\'); self.pos += 2; continue; }
-                    'n' => { out.push('\n'); self.pos += 2; continue; }
-                    't' => { out.push('\t'); self.pos += 2; continue; }
-                    _ => { out.push(nxt); self.pos += 2; continue; }
+                    '"' => {
+                        out.push('"');
+                        self.pos += 2;
+                        continue;
+                    }
+                    '\\' => {
+                        out.push('\\');
+                        self.pos += 2;
+                        continue;
+                    }
+                    'n' => {
+                        out.push('\n');
+                        self.pos += 2;
+                        continue;
+                    }
+                    't' => {
+                        out.push('\t');
+                        self.pos += 2;
+                        continue;
+                    }
+                    _ => {
+                        out.push(nxt);
+                        self.pos += 2;
+                        continue;
+                    }
                 }
             }
             if c == '"' {
@@ -458,9 +505,7 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_ws(&mut self) {
-        while self.pos < self.src.len()
-            && self.src.as_bytes()[self.pos].is_ascii_whitespace()
-        {
+        while self.pos < self.src.len() && self.src.as_bytes()[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
     }
@@ -548,7 +593,10 @@ mod tests {
     #[test]
     fn pipe_join() {
         assert_eq!(
-            render(r#"{{.ports | join ","}}"#, json!({"ports": ["a", "b", "c"]})),
+            render(
+                r#"{{.ports | join ","}}"#,
+                json!({"ports": ["a", "b", "c"]})
+            ),
             "a,b,c"
         );
     }
@@ -562,7 +610,10 @@ mod tests {
     #[test]
     fn if_eq_branch() {
         let tpl = r#"{{if eq .h "down"}}ALERT: {{.s}}{{end}}"#;
-        assert_eq!(render(tpl, json!({"h": "down", "s": "pulse"})), "ALERT: pulse");
+        assert_eq!(
+            render(tpl, json!({"h": "down", "s": "pulse"})),
+            "ALERT: pulse"
+        );
         assert_eq!(render(tpl, json!({"h": "ok", "s": "pulse"})), "");
     }
 

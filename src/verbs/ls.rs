@@ -30,7 +30,12 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
             ),
             None => format!("{ls_args} -- {}", shquote(path)),
         };
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(30))?;
+        let out = runner.run(
+            &step.ns.namespace,
+            &step.ns.target,
+            &cmd,
+            RunOpts::with_timeout(30),
+        )?;
         if !out.ok() {
             if !args.format.is_json() {
                 eprintln!(
@@ -57,7 +62,10 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))
                         .with_service(step.service().unwrap_or("_"))
                         .put("path", path)
-                        .put("entry", crate::format::safe::safe_machine_line(line).as_ref()),
+                        .put(
+                            "entry",
+                            crate::format::safe::safe_machine_line(line).as_ref(),
+                        ),
                 );
             }
         } else {
@@ -72,5 +80,9 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
             }
         }
     }
-    Ok(if any_ok { ExitKind::Success } else { ExitKind::Error })
+    Ok(if any_ok {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }

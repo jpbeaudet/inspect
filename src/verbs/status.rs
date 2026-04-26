@@ -95,9 +95,8 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         ));
     }
 
-    let summary = format!(
-        "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
-    );
+    let summary =
+        format!("{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown");
     let mut doc = OutputDoc::new(
         summary,
         json!({

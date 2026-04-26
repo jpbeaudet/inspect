@@ -25,7 +25,12 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             continue;
         };
         let cmd = build_cat(step.service(), path);
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(30))?;
+        let out = runner.run(
+            &step.ns.namespace,
+            &step.ns.target,
+            &cmd,
+            RunOpts::with_timeout(30),
+        )?;
         if !out.ok() {
             errored_any = true;
             if args.format.is_json() {
@@ -65,7 +70,11 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        return Ok(if printed_any { ExitKind::Success } else { ExitKind::Error });
+        return Ok(if printed_any {
+            ExitKind::Success
+        } else {
+            ExitKind::Error
+        });
     }
     if !printed_any && errored_any {
         Renderer::new()

@@ -26,24 +26,22 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
-        let mut find_cmd = format!(
-            "find -P {} -maxdepth {maxdepth} -type f",
-            shquote(path)
-        );
+        let mut find_cmd = format!("find -P {} -maxdepth {maxdepth} -type f", shquote(path));
         if let Some(pat) = args.pattern.as_deref() {
             find_cmd.push(' ');
             find_cmd.push_str("-name ");
             find_cmd.push_str(&shquote(pat));
         }
         let cmd = match step.service() {
-            Some(svc) => format!(
-                "docker exec {} sh -c {}",
-                shquote(svc),
-                shquote(&find_cmd)
-            ),
+            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&find_cmd)),
             None => find_cmd,
         };
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(60))?;
+        let out = runner.run(
+            &step.ns.namespace,
+            &step.ns.target,
+            &cmd,
+            RunOpts::with_timeout(60),
+        )?;
         if !out.ok() && out.stdout.is_empty() {
             // find can return non-zero on permission denied while still
             // listing matches; only treat true failures (no stdout) as errors.

@@ -15,10 +15,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     // Mutually exclusive flags — keep the contract honest. clap can
     // express this via `conflicts_with`, but doing it here too gives
     // a stable error message regardless of clap's internal phrasing.
-    let mode_flags = [
-        ("--search", args.search.is_some()),
-        ("--json", args.json),
-    ];
+    let mode_flags = [("--search", args.search.is_some()), ("--json", args.json)];
     let active: Vec<&str> = mode_flags
         .iter()
         .filter_map(|(name, on)| if *on { Some(*name) } else { None })

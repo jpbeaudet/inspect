@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::probes::{
-    probe_clock_offset, probe_docker_containers, probe_docker_inventory,
-    probe_host_listeners, probe_remote_tooling, probe_systemd_units,
+    probe_clock_offset, probe_docker_containers, probe_docker_inventory, probe_host_listeners,
+    probe_remote_tooling, probe_systemd_units,
 };
 use crate::profile::cache::{ensure_profiles_dir, save_profile};
 use crate::profile::schema::{Profile, RemoteTooling, ServiceKind};
@@ -22,11 +22,7 @@ pub struct DiscoverOptions {
 }
 
 /// Run discovery against `target` and write the profile to disk.
-pub fn discover(
-    namespace: &str,
-    target: &SshTarget,
-    opts: DiscoverOptions,
-) -> Result<Profile> {
+pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> Result<Profile> {
     ensure_profiles_dir().map_err(anyhow::Error::from)?;
 
     let mut profile = Profile::empty(namespace, &target.host, &Utc::now().to_rfc3339());

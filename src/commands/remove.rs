@@ -22,7 +22,9 @@ pub fn run(args: RemoveArgs) -> anyhow::Result<ExitKind> {
     let in_env = env_namespaces.contains(&args.namespace);
 
     if !in_file && !in_env {
-        return Err(anyhow!(ConfigError::UnknownNamespace(args.namespace.clone())));
+        return Err(anyhow!(ConfigError::UnknownNamespace(
+            args.namespace.clone()
+        )));
     }
 
     if in_file {

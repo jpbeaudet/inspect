@@ -115,10 +115,13 @@ impl Profile {
             h.update(b"\n");
         }
         let t = &self.remote_tooling;
-        h.update(format!(
+        h.update(
+            format!(
             "rg={} jq={} journalctl={} sed={} grep={} netstat={} ss={} systemctl={} docker={}\n",
             t.rg, t.jq, t.journalctl, t.sed, t.grep, t.netstat, t.ss, t.systemctl, t.docker,
-        ).as_bytes());
+        )
+            .as_bytes(),
+        );
         let bytes = h.finalize();
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
@@ -308,7 +311,11 @@ mod tests {
             name: "pulse".into(),
             container_id: Some("8a3f".into()),
             image: Some("luminary/pulse:1.4.2".into()),
-            ports: vec![Port { host: 8000, container: 8000, proto: "tcp".into() }],
+            ports: vec![Port {
+                host: 8000,
+                container: 8000,
+                proto: "tcp".into(),
+            }],
             health: Some("http://localhost:8000/health".into()),
             health_status: Some(HealthStatus::Ok),
             log_driver: Some(LogDriver::JsonFile),
@@ -323,7 +330,8 @@ mod tests {
         });
         p.remote_tooling.rg = true;
         p.remote_tooling.docker = true;
-        p.groups.insert("storage".into(), vec!["postgres".into(), "redis".into()]);
+        p.groups
+            .insert("storage".into(), vec!["postgres".into(), "redis".into()]);
 
         let s = serde_yaml::to_string(&p).expect("serialize");
         let back: Profile = serde_yaml::from_str(&s).expect("deserialize");

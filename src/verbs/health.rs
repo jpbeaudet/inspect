@@ -70,7 +70,11 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
         rows.push(StatusRow {
             server: step.ns.namespace.clone(),
             service: svc.clone(),
-            status: if result.healthy { "ok".into() } else { "unhealthy".into() },
+            status: if result.healthy {
+                "ok".into()
+            } else {
+                "unhealthy".into()
+            },
         });
         probes_json.push(json!({
             "server": step.ns.namespace,

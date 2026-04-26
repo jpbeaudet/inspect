@@ -20,12 +20,12 @@ use base64::Engine as _;
 
 use crate::cli::CpArgs;
 use crate::error::ExitKind;
+use crate::safety::gate::ConfirmResult;
 use crate::safety::{
     diff::{diff_summary, unified_diff},
     snapshot::sha256_hex,
     AuditEntry, AuditStore, Confirm, SafetyGate, SnapshotStore,
 };
-use crate::safety::gate::ConfirmResult;
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -79,9 +79,8 @@ fn looks_remote(s: &str) -> bool {
 // PUSH
 // ---------------------------------------------------------------------------
 fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
-    let body = std::fs::read(&local).map_err(|e| {
-        anyhow::anyhow!("reading local source '{local}': {e}")
-    })?;
+    let body = std::fs::read(&local)
+        .map_err(|e| anyhow::anyhow!("reading local source '{local}': {e}"))?;
     if body.len() > MAX_FILE_BYTES {
         eprintln!(
             "error: file '{local}' is {} bytes (>{} max for inline transfer); use scp",
@@ -136,15 +135,19 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
 
     if !gate.should_apply() {
         let mut r = Renderer::new();
-        let summary_diffs: Vec<(String, String)> =
-            diffs.iter().map(|(_, o, n)| (o.clone(), n.clone())).collect();
+        let summary_diffs: Vec<(String, String)> = diffs
+            .iter()
+            .map(|(_, o, n)| (o.clone(), n.clone()))
+            .collect();
         r.summary(format!(
             "DRY RUN. Would push {} → {} target(s) [{}]",
             local,
             planned.len(),
             diff_summary(&summary_diffs),
         ));
-        if args.diff || args.format.is_json() /* harmless */ {
+        if args.diff || args.format.is_json()
+        /* harmless */
+        {
             for (lbl, old, new) in &diffs {
                 let block = unified_diff(old, new, lbl, &format!("{lbl} (proposed)"));
                 if !block.is_empty() {
@@ -206,7 +209,12 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         };
 
         let started = Instant::now();
-        let out = runner.run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(60))?;
+        let out = runner.run(
+            &s.ns.namespace,
+            &s.ns.target,
+            &cmd,
+            RunOpts::with_timeout(60),
+        )?;
         let dur = started.elapsed().as_millis() as u64;
 
         let mut entry = AuditEntry::new("cp", &label);
@@ -237,7 +245,11 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         .next("inspect audit ls")
         .next("inspect revert <audit-id> to undo");
     renderer.print();
-    Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +280,12 @@ fn pull(_args: CpArgs, remote_sel: String, local: String) -> Result<ExitKind> {
         Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
         None => inner,
     };
-    let out = runner.run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(60))?;
+    let out = runner.run(
+        &s.ns.namespace,
+        &s.ns.target,
+        &cmd,
+        RunOpts::with_timeout(60),
+    )?;
     if !out.ok() {
         eprintln!(
             "error: pulling '{}' failed (exit {}): {}",
@@ -311,7 +328,12 @@ fn read_remote(
         None => inner,
     };
     let out = runner
-        .run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(20))
+        .run(
+            &s.ns.namespace,
+            &s.ns.target,
+            &cmd,
+            RunOpts::with_timeout(20),
+        )
         .ok()?;
     if out.ok() {
         Some(out.stdout)

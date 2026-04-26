@@ -12,15 +12,15 @@ use crate::exec::record::Record;
 use crate::ssh::options::SshTarget;
 use crate::verbs::runtime::RemoteRunner;
 
-pub mod logs;
-pub mod file;
 pub mod dir;
 pub mod discovery;
+pub mod file;
+pub mod host;
+pub mod image;
+pub mod logs;
+pub mod network;
 pub mod state;
 pub mod volume;
-pub mod image;
-pub mod network;
-pub mod host;
 
 /// Hints the planner can pass down to push filters/time/tail to the
 /// remote command when the medium can honor them.
@@ -70,7 +70,9 @@ pub fn for_medium_arc(m: &Medium) -> std::sync::Arc<dyn Reader + Send + Sync> {
         Medium::Dir(path) => std::sync::Arc::new(dir::DirReader { path: path.clone() }),
         Medium::Discovery => std::sync::Arc::new(discovery::DiscoveryReader),
         Medium::State => std::sync::Arc::new(state::StateReader),
-        Medium::Volume(name) => std::sync::Arc::new(volume::VolumeReader { filter: name.clone() }),
+        Medium::Volume(name) => std::sync::Arc::new(volume::VolumeReader {
+            filter: name.clone(),
+        }),
         Medium::Image => std::sync::Arc::new(image::ImageReader),
         Medium::Network => std::sync::Arc::new(network::NetworkReader),
         Medium::Host(path) => std::sync::Arc::new(host::HostReader { path: path.clone() }),

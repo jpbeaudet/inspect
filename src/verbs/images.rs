@@ -37,17 +37,16 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
             let tag = v.get("Tag").and_then(|x| x.as_str()).unwrap_or("");
             let size = v.get("Size").and_then(|x| x.as_str()).unwrap_or("");
             let repo_tag = format!("{repo}:{tag}");
-            renderer.data_line(format!(
-                    "{ns} | {repo_tag:<48} {size}",
-                    ns = ns.namespace
-                ));
-            renderer.push_row(&Envelope::new(&ns.namespace, "image", "image")
-                        .put("repo_tag", repo_tag.clone())
-                        .put("size", size.to_string())
-                        .put("raw", v));
+            renderer.data_line(format!("{ns} | {repo_tag:<48} {size}", ns = ns.namespace));
+            renderer.push_row(
+                &Envelope::new(&ns.namespace, "image", "image")
+                    .put("repo_tag", repo_tag.clone())
+                    .put("size", size.to_string())
+                    .put("raw", v),
+            );
         }
     }
-            renderer.summary(format!("{count} image(s)"));
+    renderer.summary(format!("{count} image(s)"));
     let __fmt = args.format.resolve()?;
     renderer.dispatch(&__fmt)?;
     Ok(ExitKind::Success)

@@ -37,11 +37,8 @@ mod tests {
 
     #[test]
     fn substitutes_labels_and_fields() {
-        let mut r = Record::new()
-            .with_label("service", "api")
-            .with_line("hi");
-        r.fields
-            .insert("status".into(), serde_json::json!(500));
+        let mut r = Record::new().with_label("service", "api").with_line("hi");
+        r.fields.insert("status".into(), serde_json::json!(500));
         let s = render("{{.service}}: status={{.status}}", &r);
         assert_eq!(s, "api: status=500");
     }

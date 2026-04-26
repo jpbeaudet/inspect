@@ -59,7 +59,12 @@ fn write_servers_toml(home: &std::path::Path, names: &[&str]) {
     }
 }
 
-fn write_profile(home: &std::path::Path, ns: &str, services: &[&str], groups: BTreeMap<&str, Vec<&str>>) {
+fn write_profile(
+    home: &std::path::Path,
+    ns: &str,
+    services: &[&str],
+    groups: BTreeMap<&str, Vec<&str>>,
+) {
     let dir = home.join("profiles");
     std::fs::create_dir_all(&dir).unwrap();
     #[cfg(unix)]
@@ -104,7 +109,14 @@ fn alias_add_list_show_remove_round_trip() {
     let sb = Sandbox::new();
 
     sb.cmd()
-        .args(["alias", "add", "plogs", "arte/pulse", "--description", "pulse on arte"])
+        .args([
+            "alias",
+            "add",
+            "plogs",
+            "arte/pulse",
+            "--description",
+            "pulse on arte",
+        ])
         .assert()
         .success()
         .stdout(contains("@plogs"))
@@ -140,7 +152,10 @@ fn alias_add_list_show_remove_round_trip() {
 #[test]
 fn alias_refuses_overwrite_without_force() {
     let sb = Sandbox::new();
-    sb.cmd().args(["alias", "add", "a", "arte/pulse"]).assert().success();
+    sb.cmd()
+        .args(["alias", "add", "a", "arte/pulse"])
+        .assert()
+        .success();
     sb.cmd()
         .args(["alias", "add", "a", "arte/atlas"])
         .assert()
@@ -190,7 +205,12 @@ fn alias_rejects_unparseable_verb_body() {
 fn resolve_exact_service() {
     let sb = Sandbox::new();
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &["pulse", "atlas", "milvus-1"], BTreeMap::new());
+    write_profile(
+        sb.home(),
+        "arte",
+        &["pulse", "atlas", "milvus-1"],
+        BTreeMap::new(),
+    );
     sb.cmd()
         .args(["resolve", "arte/pulse"])
         .assert()
@@ -202,7 +222,12 @@ fn resolve_exact_service() {
 fn resolve_glob_matches_multiple() {
     let sb = Sandbox::new();
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &["prod-1", "prod-2", "staging"], BTreeMap::new());
+    write_profile(
+        sb.home(),
+        "arte",
+        &["prod-1", "prod-2", "staging"],
+        BTreeMap::new(),
+    );
     sb.cmd()
         .args(["resolve", "arte/prod-*", "--json"])
         .assert()
@@ -215,7 +240,12 @@ fn resolve_glob_matches_multiple() {
 fn resolve_regex_service() {
     let sb = Sandbox::new();
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &["milvus-1", "milvus-2", "pulse"], BTreeMap::new());
+    write_profile(
+        sb.home(),
+        "arte",
+        &["milvus-1", "milvus-2", "pulse"],
+        BTreeMap::new(),
+    );
     sb.cmd()
         .args(["resolve", "arte//milvus-\\d+/", "--json"])
         .assert()
@@ -315,7 +345,10 @@ fn resolve_alias_expansion_works_end_to_end() {
     let sb = Sandbox::new();
     write_servers_toml(sb.home(), &["arte"]);
     write_profile(sb.home(), "arte", &["pulse", "atlas"], BTreeMap::new());
-    sb.cmd().args(["alias", "add", "plogs", "arte/pulse"]).assert().success();
+    sb.cmd()
+        .args(["alias", "add", "plogs", "arte/pulse"])
+        .assert()
+        .success();
     sb.cmd()
         .args(["resolve", "@plogs"])
         .assert()

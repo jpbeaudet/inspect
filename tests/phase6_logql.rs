@@ -273,12 +273,7 @@ fn json_error_envelope_has_error_field() {
 fn alias_substitution_via_inspect_alias() {
     let sb = Sandbox::new();
     sb.cmd()
-        .args([
-            "alias",
-            "add",
-            "plogs",
-            r#"{server="arte", source="logs"}"#,
-        ])
+        .args(["alias", "add", "plogs", r#"{server="arte", source="logs"}"#])
         .assert()
         .success();
     sb.cmd()

@@ -181,11 +181,8 @@ impl<'a> Parser<'a> {
         // here means the alias resolver returned None.
         if let Some(Token::AliasRef(name)) = self.peek() {
             let span = self.cur_span();
-            return Err(ParseError::new(
-                format!("unknown alias `@{name}`"),
-                span,
-            )
-            .with_hint("define it via `inspect alias add` or check the name"));
+            return Err(ParseError::new(format!("unknown alias `@{name}`"), span)
+                .with_hint("define it via `inspect alias add` or check the name"));
         }
         let lbrace = self.expect(&Token::LBrace, "`{` to begin a selector").map_err(|e| {
             e.with_hint("a query starts with a selector, e.g. `{server=\"arte\", source=\"logs\"} |= \"error\"`")
@@ -200,9 +197,13 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let rbrace_span = self.expect(&Token::RBrace, "`}` to close the selector").map_err(|e| {
-            e.with_hint("label matchers are comma-separated, e.g. `{server=\"arte\", source=\"logs\"}`")
-        })?;
+        let rbrace_span = self
+            .expect(&Token::RBrace, "`}` to close the selector")
+            .map_err(|e| {
+                e.with_hint(
+                    "label matchers are comma-separated, e.g. `{server=\"arte\", source=\"logs\"}`",
+                )
+            })?;
         Ok(Selector {
             matchers,
             span: lbrace.start..rbrace_span.end,
@@ -210,9 +211,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_label_matcher(&mut self) -> Result<LabelMatcher, ParseError> {
-        let name_tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected label name", self.cur_span())
-        })?;
+        let name_tok = self
+            .bump()
+            .ok_or_else(|| ParseError::new("expected label name", self.cur_span()))?;
         let name = match &name_tok.token {
             Token::Ident(s) => s.clone(),
             Token::KwOr => "or".into(),
@@ -247,8 +248,11 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         let val_tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected a quoted string value after the match operator", self.cur_span())
-                .with_hint("e.g. `server=\"arte\"`")
+            ParseError::new(
+                "expected a quoted string value after the match operator",
+                self.cur_span(),
+            )
+            .with_hint("e.g. `server=\"arte\"`")
         })?;
         let value = match &val_tok.token {
             Token::String(s) => s.clone(),
@@ -425,10 +429,8 @@ impl<'a> Parser<'a> {
             // Anything else: a parsed-field filter `| <field> <op> <value> [and|or ...]`
             // with the field consumed as `name`.
             other => {
-                let expr = self.parse_field_filter_starting(
-                    other.to_string(),
-                    name_tok.span.clone(),
-                )?;
+                let expr =
+                    self.parse_field_filter_starting(other.to_string(), name_tok.span.clone())?;
                 let end = self.last_end(span_start);
                 Ok(Stage::FieldFilter {
                     expr,
@@ -446,9 +448,9 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_string(&mut self, what: &str) -> Result<String, ParseError> {
-        let tok = self.bump().ok_or_else(|| {
-            ParseError::new(format!("expected {what}"), self.cur_span())
-        })?;
+        let tok = self
+            .bump()
+            .ok_or_else(|| ParseError::new(format!("expected {what}"), self.cur_span()))?;
         match &tok.token {
             Token::String(s) => Ok(s.clone()),
             _ => Err(ParseError::new(
@@ -461,9 +463,9 @@ impl<'a> Parser<'a> {
     fn parse_label_list(&mut self) -> Result<Vec<String>, ParseError> {
         let mut out = Vec::new();
         loop {
-            let tok = self.bump().ok_or_else(|| {
-                ParseError::new("expected label name", self.cur_span())
-            })?;
+            let tok = self
+                .bump()
+                .ok_or_else(|| ParseError::new("expected label name", self.cur_span()))?;
             match &tok.token {
                 Token::Ident(s) => out.push(s.clone()),
                 _ => {
@@ -525,9 +527,9 @@ impl<'a> Parser<'a> {
             return Ok(inner);
         }
         // expect ident as field name
-        let tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected field name", self.cur_span())
-        })?;
+        let tok = self
+            .bump()
+            .ok_or_else(|| ParseError::new("expected field name", self.cur_span()))?;
         let field = match &tok.token {
             Token::Ident(s) => s.clone(),
             _ => {
@@ -535,7 +537,9 @@ impl<'a> Parser<'a> {
                     format!("expected field name, found {}", tok.token.display()),
                     tok.span.clone(),
                 )
-                .with_hint("parsed-field filters look like `| status >= 500` or `| level == \"error\"`"));
+                .with_hint(
+                    "parsed-field filters look like `| status >= 500` or `| level == \"error\"`",
+                ));
             }
         };
         self.parse_field_cmp_with_field(field)
@@ -562,16 +566,19 @@ impl<'a> Parser<'a> {
             }
         };
         self.bump();
-        let val_tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected value", self.cur_span())
-        })?;
+        let val_tok = self
+            .bump()
+            .ok_or_else(|| ParseError::new("expected value", self.cur_span()))?;
         let value = match &val_tok.token {
             Token::String(s) => FieldValue::String(s.clone()),
             Token::Number(n) => FieldValue::Number(*n),
             Token::Integer(n) => FieldValue::Number(*n as f64),
             _ => {
                 return Err(ParseError::new(
-                    format!("expected a string or number value, found {}", val_tok.token.display()),
+                    format!(
+                        "expected a string or number value, found {}",
+                        val_tok.token.display()
+                    ),
                     val_tok.span.clone(),
                 )
                 .with_hint("e.g. `status >= 500` or `level == \"error\"`"));
@@ -681,7 +688,9 @@ impl<'a> Parser<'a> {
                         ),
                         tok.span.clone(),
                     )
-                    .with_hint("e.g. `topk(5, ...)` — the parameter is the number of series to keep"));
+                    .with_hint(
+                        "e.g. `topk(5, ...)` — the parameter is the number of series to keep",
+                    ));
                 }
             }
             self.expect(&Token::Comma, "`,`")?;
@@ -710,9 +719,9 @@ impl<'a> Parser<'a> {
         let mut labels = Vec::new();
         if !matches!(self.peek(), Some(Token::RParen)) {
             loop {
-                let tok = self.bump().ok_or_else(|| {
-                    ParseError::new("expected label name", self.cur_span())
-                })?;
+                let tok = self
+                    .bump()
+                    .ok_or_else(|| ParseError::new("expected label name", self.cur_span()))?;
                 match &tok.token {
                     Token::Ident(s) => labels.push(s.clone()),
                     _ => {

@@ -23,7 +23,10 @@ pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Array(arr))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))?
+        );
         return Ok(ExitKind::Success);
     }
 
@@ -34,7 +37,11 @@ pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
             TargetKind::Service { name } => format!("service={name}"),
             TargetKind::Host => "host".to_string(),
         };
-        let path = t.path.as_deref().map(|p| format!(" path={p}")).unwrap_or_default();
+        let path = t
+            .path
+            .as_deref()
+            .map(|p| format!(" path={p}"))
+            .unwrap_or_default();
         println!("  {} -> {target}{path}", t.namespace);
     }
     println!("NEXT:    point a verb (e.g. logs, status) at the same selector");

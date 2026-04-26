@@ -142,7 +142,10 @@ fn print_human(p: &Profile, status: &str) {
             println!("  - {w}");
         }
     }
-    println!("NEXT:    inspect profile {}    inspect setup {} --check-drift", p.namespace, p.namespace);
+    println!(
+        "NEXT:    inspect profile {}    inspect setup {} --check-drift",
+        p.namespace, p.namespace
+    );
 }
 
 fn print_json(p: &Profile, status: &str) {

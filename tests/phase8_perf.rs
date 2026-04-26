@@ -213,7 +213,11 @@ fn pushdown_stops_at_first_parsing_stage() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let recs = v["data"]["records"].as_array().unwrap();
     assert_eq!(recs.len(), 1);
@@ -240,11 +244,18 @@ fn parallel_or_query_produces_one_record_per_branch() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let recs = v["data"]["records"].as_array().unwrap();
     assert_eq!(recs.len(), 2);
-    let mediums: Vec<&str> = recs.iter().map(|r| r["_medium"].as_str().unwrap()).collect();
+    let mediums: Vec<&str> = recs
+        .iter()
+        .map(|r| r["_medium"].as_str().unwrap())
+        .collect();
     assert!(mediums.contains(&"logs"));
     assert!(mediums.contains(&"file"));
 }
@@ -275,7 +286,11 @@ fn since_until_tail_get_pushed_to_docker_logs() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["data"]["records"].as_array().unwrap().len(), 1);
 }
@@ -289,9 +304,17 @@ fn cold_start_version_under_500ms() {
     // The bible target is <100ms cold; we keep generous headroom in
     // CI to avoid flakes (assert builders have warm fs cache).
     // Run twice and take the second one as "warm".
-    let _ = Command::cargo_bin("inspect").unwrap().arg("--version").output().unwrap();
+    let _ = Command::cargo_bin("inspect")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .unwrap();
     let t = Instant::now();
-    let out = Command::cargo_bin("inspect").unwrap().arg("--version").output().unwrap();
+    let out = Command::cargo_bin("inspect")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .unwrap();
     let dt = t.elapsed();
     assert!(out.status.success());
     assert!(
@@ -318,7 +341,11 @@ fn search_across_five_namespaces_first_results_under_2s() {
         .output()
         .unwrap();
     let dt = t.elapsed();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let n = v["data"]["records"].as_array().unwrap().len();
     assert_eq!(n, 5, "expected one record per namespace");
@@ -349,7 +376,11 @@ fn max_parallel_env_knob_is_honored() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["data"]["records"].as_array().unwrap().len(), 2);
 }

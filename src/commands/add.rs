@@ -19,7 +19,9 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
 
     let exists = servers.namespaces.contains_key(&args.namespace);
     if exists && !args.force {
-        return Err(anyhow!(ConfigError::NamespaceExists(args.namespace.clone())));
+        return Err(anyhow!(ConfigError::NamespaceExists(
+            args.namespace.clone()
+        )));
     }
 
     let host = collect_value("host", args.host.as_deref(), args.non_interactive, false)?
@@ -64,7 +66,10 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
         if exists { "updated" } else { "added" }
     );
     println!("DATA:    host, user, port, key_path stored (passphrases never on disk)");
-    println!("NEXT:    inspect test {} && inspect connect {}", args.namespace, args.namespace);
+    println!(
+        "NEXT:    inspect test {} && inspect connect {}",
+        args.namespace, args.namespace
+    );
     Ok(ExitKind::Success)
 }
 
@@ -117,8 +122,7 @@ fn prompt_optional_u16(label: &str) -> anyhow::Result<Option<u16>> {
     match v {
         None => Ok(None),
         Some(s) => Ok(Some(
-            s.parse::<u16>()
-                .map_err(|_| anyhow!("invalid port: {s}"))?,
+            s.parse::<u16>().map_err(|_| anyhow!("invalid port: {s}"))?,
         )),
     }
 }

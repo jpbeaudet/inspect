@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use super::{push_line_filters_grep, ReadOpts, ReadStep, Reader, lines_to_records};
+use super::{lines_to_records, push_line_filters_grep, ReadOpts, ReadStep, Reader};
 use crate::exec::record::Record;
 use crate::profile::schema::ServiceKind;
 use crate::ssh::exec::RunOpts;
@@ -36,7 +36,10 @@ impl Reader for LogsReader {
 }
 
 fn build_logs_cmd(step: &ReadStep<'_>, opts: &ReadOpts) -> String {
-    let kind = step.service_def.map(|s| s.kind).unwrap_or(ServiceKind::Container);
+    let kind = step
+        .service_def
+        .map(|s| s.kind)
+        .unwrap_or(ServiceKind::Container);
     let name = step.service;
     let mut cmd = match (name, kind) {
         (Some(name), ServiceKind::Systemd) => {
@@ -75,9 +78,7 @@ fn build_logs_cmd(step: &ReadStep<'_>, opts: &ReadOpts) -> String {
         }
         (None, _) => {
             let n = opts.tail.unwrap_or(500);
-            format!(
-                "tail -n {n} /var/log/syslog 2>/dev/null || tail -n {n} /var/log/messages"
-            )
+            format!("tail -n {n} /var/log/syslog 2>/dev/null || tail -n {n} /var/log/messages")
         }
     };
     push_line_filters_grep(&mut cmd, &opts.line_filters);

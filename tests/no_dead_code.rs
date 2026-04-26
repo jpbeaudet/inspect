@@ -1,4 +1,5 @@
-//! Contract test: lock down the dead-code cleanup (DEADCODE_CLEANUP_PLAN §8).
+//! Contract test: lock down the dead-code cleanup
+//! (archives/DEADCODE_CLEANUP_PLAN.md §8).
 //!
 //! Hard gates enforced here:
 //!
@@ -20,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Maximum allowed `#[allow(dead_code)]` sites under `src/`. See the v2
-/// allow-list in `DEADCODE_CLEANUP_PLAN.md` §3.
+/// allow-list in `archives/DEADCODE_CLEANUP_PLAN.md` §3.
 const MAX_DEAD_CODE_ALLOWS: usize = 1;
 
 #[test]
@@ -44,13 +45,26 @@ fn h4_no_module_wide_dead_code_suppressions() {
 fn h3_every_dead_code_allow_carries_v2_sentinel() {
     let mut bare = Vec::new();
     for (path, body) in walk_src() {
-        for (lineno, line) in body.lines().enumerate() {
+        let lines: Vec<&str> = body.lines().collect();
+        for (lineno, line) in lines.iter().enumerate() {
             if !line.contains("#[allow(dead_code)]") {
                 continue;
             }
-            // Must be on the same line: `// v2: <tag>` justifying the keep.
-            if !line.contains("// v2:") {
-                bare.push(format!("{}:{}  {}", path.display(), lineno + 1, line.trim()));
+            // The `// v2: <tag>` sentinel may sit on the same line as the
+            // attribute or on the next non-blank line — rustfmt is free to
+            // split a trailing comment off. Either is fine; absence is not.
+            let same = line.contains("// v2:");
+            let next = lines
+                .get(lineno + 1)
+                .map(|l| l.trim_start().starts_with("// v2:"))
+                .unwrap_or(false);
+            if !(same || next) {
+                bare.push(format!(
+                    "{}:{}  {}",
+                    path.display(),
+                    lineno + 1,
+                    line.trim()
+                ));
             }
         }
     }
@@ -70,14 +84,19 @@ fn h5_dead_code_allow_count_bounded() {
         for (lineno, line) in body.lines().enumerate() {
             if line.contains("#[allow(dead_code)]") {
                 count += 1;
-                sites.push(format!("{}:{}  {}", path.display(), lineno + 1, line.trim()));
+                sites.push(format!(
+                    "{}:{}  {}",
+                    path.display(),
+                    lineno + 1,
+                    line.trim()
+                ));
             }
         }
     }
     assert!(
         count <= MAX_DEAD_CODE_ALLOWS,
         "found {count} `#[allow(dead_code)]` sites (max {MAX_DEAD_CODE_ALLOWS}). \
-         Bumping this requires updating DEADCODE_CLEANUP_PLAN.md and the bible v2 \
+         Bumping this requires updating archives/DEADCODE_CLEANUP_PLAN.md and the bible v2 \
          catalog. Current sites:\n  {}",
         sites.join("\n  "),
     );

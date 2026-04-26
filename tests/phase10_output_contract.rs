@@ -124,7 +124,10 @@ fn svc(name: &'static str, health: &'static str, deps: Vec<&'static str>) -> Svc
 
 fn first_json(stdout: &[u8]) -> Value {
     let s = String::from_utf8_lossy(stdout);
-    let line = s.lines().find(|l| l.trim_start().starts_with('{')).expect("no JSON line");
+    let line = s
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("no JSON line");
     serde_json::from_str(line).expect("invalid JSON")
 }
 
@@ -157,16 +160,24 @@ fn status_emits_envelope_and_correlation_when_unhealthy() {
         { "match": "docker ps", "stdout": "pulse\n", "exit": 0 }
     ]);
     let sb = Sandbox::new(mock, &[svc("pulse", "unhealthy", vec![])]);
-    let out = sb.cmd().args(["status", "arte/*", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["status", "arte/*", "--json"])
+        .output()
+        .unwrap();
     let v = first_json(&out.stdout);
     assert_envelope_shape(&v);
     assert!(v["data"]["services"].is_array());
     assert_eq!(v["data"]["totals"]["unhealthy"], 1);
     // Correlation: an unhealthy service should produce at least one
     // `next` suggestion (e.g. `inspect health` or `inspect why`).
-    let next = v["next"].as_array().expect("next must be present when unhealthy");
+    let next = v["next"]
+        .as_array()
+        .expect("next must be present when unhealthy");
     assert!(!next.is_empty(), "expected correlation rules to fire");
-    assert!(next.iter().any(|n| n["cmd"].as_str().unwrap().contains("inspect")));
+    assert!(next
+        .iter()
+        .any(|n| n["cmd"].as_str().unwrap().contains("inspect")));
 }
 
 #[test]
@@ -175,11 +186,19 @@ fn status_emits_envelope_with_no_correlation_when_healthy() {
         { "match": "docker ps", "stdout": "pulse\n", "exit": 0 }
     ]);
     let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
-    let out = sb.cmd().args(["status", "arte/*", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["status", "arte/*", "--json"])
+        .output()
+        .unwrap();
     let v = first_json(&out.stdout);
     assert_envelope_shape(&v);
     // When everything is healthy, `next` is omitted entirely (or empty).
-    let next_len = v.get("next").and_then(|n| n.as_array()).map(|a| a.len()).unwrap_or(0);
+    let next_len = v
+        .get("next")
+        .and_then(|n| n.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert_eq!(next_len, 0, "no correlation expected when healthy: {v}");
 }
 
@@ -187,7 +206,11 @@ fn status_emits_envelope_with_no_correlation_when_healthy() {
 fn health_emits_envelope() {
     let mock = json!([{ "match": "docker ps", "stdout": "pulse\n", "exit": 0 }]);
     let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
-    let out = sb.cmd().args(["health", "arte/*", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["health", "arte/*", "--json"])
+        .output()
+        .unwrap();
     let v = first_json(&out.stdout);
     assert_envelope_shape(&v);
     assert!(v["data"]["probes"].is_array());
@@ -203,14 +226,19 @@ fn why_emits_envelope_with_root_cause_correlation() {
             svc("pulse", "ok", vec![]), // not in `docker ps` => down
         ],
     );
-    let out = sb.cmd().args(["why", "arte/atlas", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas", "--json"])
+        .output()
+        .unwrap();
     let v = first_json(&out.stdout);
     assert_envelope_shape(&v);
     assert_eq!(v["data"]["services"][0]["root_cause"], "pulse");
     let next = v["next"].as_array().unwrap();
     assert!(!next.is_empty());
     assert!(
-        next.iter().any(|n| n["cmd"].as_str().unwrap().contains("pulse")),
+        next.iter()
+            .any(|n| n["cmd"].as_str().unwrap().contains("pulse")),
         "expected next suggestion to mention root cause: {next:?}"
     );
 }
@@ -225,12 +253,17 @@ fn connectivity_emits_envelope_with_probe_suggestion_when_not_probed() {
             svc("pulse", "ok", vec![]),
         ],
     );
-    let out = sb.cmd().args(["connectivity", "arte/atlas", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["connectivity", "arte/atlas", "--json"])
+        .output()
+        .unwrap();
     let v = first_json(&out.stdout);
     assert_envelope_shape(&v);
     let next = v["next"].as_array().unwrap();
     assert!(
-        next.iter().any(|n| n["cmd"].as_str().unwrap().contains("--probe")),
+        next.iter()
+            .any(|n| n["cmd"].as_str().unwrap().contains("--probe")),
         "expected --probe suggestion: {next:?}"
     );
 }
@@ -337,7 +370,16 @@ fn streaming_verbs_keep_per_record_envelope() {
     let line = lines.next().expect("expected a JSON line from `ps`");
     let v: Value = serde_json::from_str(line).expect("invalid JSON");
     assert_eq!(v["schema_version"], 1);
-    assert!(v.get("_source").is_some(), "per-record envelope missing _source: {v}");
-    assert!(v.get("_medium").is_some(), "per-record envelope missing _medium: {v}");
-    assert!(v.get("server").is_some(), "per-record envelope missing server: {v}");
+    assert!(
+        v.get("_source").is_some(),
+        "per-record envelope missing _source: {v}"
+    );
+    assert!(
+        v.get("_medium").is_some(),
+        "per-record envelope missing _medium: {v}"
+    );
+    assert!(
+        v.get("server").is_some(),
+        "per-record envelope missing server: {v}"
+    );
 }

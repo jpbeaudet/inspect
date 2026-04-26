@@ -59,10 +59,7 @@ pub fn render_full(pretty: bool) -> String {
         w.kv_string("summary", t.summary);
         w.field_array_of_strings("examples", &topic_examples(t.body.unwrap_or("")));
         w.field_array_of_strings("see_also", &topic_see_also(t.body.unwrap_or("")));
-        w.field_array_of_strings(
-            "verbs",
-            &crate::help::topics::verbs_for(t.id),
-        );
+        w.field_array_of_strings("verbs", &crate::help::topics::verbs_for(t.id));
         w.end_object();
     }
     w.end_array();
@@ -86,7 +83,10 @@ pub fn render_full(pretty: bool) -> String {
         w.field_array_of_strings("aliases", &aliases);
         w.field_array_of_strings(
             "examples",
-            &command_examples(sub).iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &command_examples(sub)
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
         );
         w.field_array_of_strings(
             "see_also",
@@ -107,10 +107,7 @@ pub fn render_full(pretty: bool) -> String {
             );
             w.kv_string(
                 "short",
-                &arg
-                    .get_short()
-                    .map(|c| c.to_string())
-                    .unwrap_or_default(),
+                &arg.get_short().map(|c| c.to_string()).unwrap_or_default(),
             );
             w.kv_bool(
                 "takes_value",
@@ -124,23 +121,22 @@ pub fn render_full(pretty: bool) -> String {
             );
             w.kv_bool(
                 "repeated",
-                matches!(arg.get_action(), clap::ArgAction::Append | clap::ArgAction::Count),
+                matches!(
+                    arg.get_action(),
+                    clap::ArgAction::Append | clap::ArgAction::Count
+                ),
             );
             w.kv_bool("required", arg.is_required_set());
             w.kv_bool("positional", arg.is_positional());
             w.kv_string(
                 "value_name",
-                &arg
-                    .get_value_names()
+                &arg.get_value_names()
                     .and_then(|v| v.first().map(|s| s.to_string()))
                     .unwrap_or_default(),
             );
             w.kv_string(
                 "description",
-                &arg
-                    .get_help()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
+                &arg.get_help().map(|s| s.to_string()).unwrap_or_default(),
             );
             w.end_object();
         }
@@ -154,13 +150,12 @@ pub fn render_full(pretty: bool) -> String {
         "reserved_labels",
         &["server", "service", "container", "source", "path"],
     );
-    w.field_array_of_strings(
-        "source_types",
-        &["logs", "file", "discovery", "metric"],
-    );
+    w.field_array_of_strings("source_types", &["logs", "file", "discovery", "metric"]);
     w.field_array_of_strings(
         "output_formats",
-        &["human", "json", "ndjson", "csv", "tsv", "md", "yaml", "raw", "format"],
+        &[
+            "human", "json", "ndjson", "csv", "tsv", "md", "yaml", "raw", "format",
+        ],
     );
 
     // -- errors ----------------------------------------------------------
@@ -257,7 +252,10 @@ fn topic_see_also(body: &str) -> Vec<&str> {
 }
 
 fn command_examples(sub: &clap::Command) -> Vec<String> {
-    let long = sub.get_long_about().map(|s| s.to_string()).unwrap_or_default();
+    let long = sub
+        .get_long_about()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     long.lines()
         .filter_map(|l| {
             let t = l.trim_start();
@@ -539,9 +537,18 @@ mod tests {
     #[test]
     fn reserved_lists_are_present() {
         let v = parse(&render_full(false));
-        assert!(v["reserved_labels"].as_array().unwrap().contains(&serde_json::json!("server")));
-        assert!(v["source_types"].as_array().unwrap().contains(&serde_json::json!("logs")));
-        assert!(v["output_formats"].as_array().unwrap().contains(&serde_json::json!("json")));
+        assert!(v["reserved_labels"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("server")));
+        assert!(v["source_types"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("logs")));
+        assert!(v["output_formats"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("json")));
     }
 
     #[test]

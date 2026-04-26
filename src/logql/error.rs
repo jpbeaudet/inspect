@@ -54,7 +54,11 @@ impl ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} (at {}..{})", self.message, self.span.start, self.span.end)
+        write!(
+            f,
+            "{} (at {}..{})",
+            self.message, self.span.start, self.span.end
+        )
     }
 }
 

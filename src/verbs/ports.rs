@@ -35,7 +35,12 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
                 }
             }
         };
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(15))?;
+        let out = runner.run(
+            &step.ns.namespace,
+            &step.ns.target,
+            &cmd,
+            RunOpts::with_timeout(15),
+        )?;
         if !out.ok() {
             if !args.format.is_json() {
                 eprintln!(
@@ -50,16 +55,18 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
         for line in out.stdout.lines() {
             count += 1;
             renderer.data_line(format!(
-                    "{ns}{svc} | {line}",
-                    ns = step.ns.namespace,
-                    svc = step.service().map(|s| format!("/{s}")).unwrap_or_default()
-                ));
-            renderer.push_row(&Envelope::new(&step.ns.namespace, "network", "ports")
-                        .with_service(step.service().unwrap_or("_"))
-                        .put("line", line));
+                "{ns}{svc} | {line}",
+                ns = step.ns.namespace,
+                svc = step.service().map(|s| format!("/{s}")).unwrap_or_default()
+            ));
+            renderer.push_row(
+                &Envelope::new(&step.ns.namespace, "network", "ports")
+                    .with_service(step.service().unwrap_or("_"))
+                    .put("line", line),
+            );
         }
     }
-            renderer.summary(format!("{count} port-line(s)"));
+    renderer.summary(format!("{count} port-line(s)"));
     let __fmt = args.format.resolve()?;
     renderer.dispatch(&__fmt)?;
     Ok(ExitKind::Success)

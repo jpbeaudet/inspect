@@ -39,10 +39,20 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
         return Ok(ExitKind::Success);
     }
 
-    println!("SUMMARY: namespace '{}' resolved from {}", r.name, describe_source(r.source));
+    println!(
+        "SUMMARY: namespace '{}' resolved from {}",
+        r.name,
+        describe_source(r.source)
+    );
     println!("DATA:");
-    println!("  host:                {}", r.config.host.as_deref().unwrap_or("<unset>"));
-    println!("  user:                {}", r.config.user.as_deref().unwrap_or("<unset>"));
+    println!(
+        "  host:                {}",
+        r.config.host.as_deref().unwrap_or("<unset>")
+    );
+    println!(
+        "  user:                {}",
+        r.config.user.as_deref().unwrap_or("<unset>")
+    );
     println!(
         "  port:                {}",
         r.config

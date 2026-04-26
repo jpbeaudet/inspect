@@ -31,24 +31,34 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
         }
         for line in out.stdout.lines() {
             count += 1;
-            let value: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|_| serde_json::Value::String(line.to_string()));
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|_| serde_json::Value::String(line.to_string()));
             let name = value
                 .get("Names")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let image = value.get("Image").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let status = value.get("Status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let image = value
+                .get("Image")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = value
+                .get("Status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             human.data_line(format!(
-                    "{ns} | {name:<20} {image:<32} {status}",
-                    ns = ns.namespace
-                ));
-            human.push_row(&Envelope::new(&ns.namespace, "state", "state")
-                        .with_service(&name)
-                        .put("image", image)
-                        .put("status", status)
-                        .put("raw", value));
+                "{ns} | {name:<20} {image:<32} {status}",
+                ns = ns.namespace
+            ));
+            human.push_row(
+                &Envelope::new(&ns.namespace, "state", "state")
+                    .with_service(&name)
+                    .put("image", image)
+                    .put("status", status)
+                    .put("raw", value),
+            );
         }
     }
     human.summary(format!("{count} container(s) running"));

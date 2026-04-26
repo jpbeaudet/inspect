@@ -6,8 +6,8 @@ use anyhow::Result;
 
 use crate::cli::PathArgArgs;
 use crate::error::ExitKind;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::safety::gate::ConfirmResult;
+use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -62,7 +62,12 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
             None => inner,
         };
         let started = Instant::now();
-        let out = runner.run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(30))?;
+        let out = runner.run(
+            &s.ns.namespace,
+            &s.ns.target,
+            &cmd,
+            RunOpts::with_timeout(30),
+        )?;
         let label = format!(
             "{}{}:{path}",
             s.ns.namespace,
@@ -89,5 +94,9 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
         .summary(format!("mkdir: {ok} ok, {bad} failed"))
         .next("inspect audit ls");
     renderer.print();
-    Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }

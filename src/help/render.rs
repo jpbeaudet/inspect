@@ -51,10 +51,7 @@ fn resolve_pager() -> Option<(String, Vec<String>)> {
         return Some((bin, args));
     }
     if which("less").is_some() {
-        return Some((
-            "less".into(),
-            vec!["-F".into(), "-R".into(), "-X".into()],
-        ));
+        return Some(("less".into(), vec!["-F".into(), "-R".into(), "-X".into()]));
     }
     if which("more").is_some() {
         return Some(("more".into(), vec![]));

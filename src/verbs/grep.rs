@@ -31,7 +31,12 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let cmd = build_grep_cmd(&step, &args, case_insensitive, step.ns.profile.as_ref());
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(60))?;
+        let out = runner.run(
+            &step.ns.namespace,
+            &step.ns.target,
+            &cmd,
+            RunOpts::with_timeout(60),
+        )?;
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
             if !args.format.is_json() {
@@ -75,7 +80,10 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)
-                        .put("line", crate::format::safe::safe_machine_line(line).as_ref()),
+                        .put(
+                            "line",
+                            crate::format::safe::safe_machine_line(line).as_ref(),
+                        ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(

@@ -41,7 +41,10 @@ pub enum ConfigError {
     NamespaceExists(String),
 
     #[error("missing required field '{field}' for namespace '{namespace}'")]
-    MissingField { namespace: String, field: &'static str },
+    MissingField {
+        namespace: String,
+        field: &'static str,
+    },
 
     #[error("config file '{path}' has unsafe permissions {mode:o}; expected 0600")]
     UnsafePermissions { path: String, mode: u32 },
@@ -326,14 +329,23 @@ mod hp5_tests {
 
     #[test]
     fn topic_for_message_resolves_known_fragments() {
-        assert_eq!(topic_for_message("'arte/x' matched no targets"), Some("selectors"));
-        assert_eq!(topic_for_message("rm requires a :path on selector"), Some("selectors"));
+        assert_eq!(
+            topic_for_message("'arte/x' matched no targets"),
+            Some("selectors")
+        );
+        assert_eq!(
+            topic_for_message("rm requires a :path on selector"),
+            Some("selectors")
+        );
         assert_eq!(topic_for_message("empty query"), Some("search"));
         assert_eq!(
             topic_for_message("no audit entry matches id prefix 'abc'"),
             Some("safety")
         );
-        assert_eq!(topic_for_message("unknown help topic 'foo'"), Some("examples"));
+        assert_eq!(
+            topic_for_message("unknown help topic 'foo'"),
+            Some("examples")
+        );
         assert_eq!(topic_for_message("totally unrelated message"), None);
     }
 }

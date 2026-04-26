@@ -36,7 +36,11 @@ impl Sandbox {
     fn new() -> Self {
         let g = lock();
         let home = tempfile::tempdir().unwrap();
-        Self { _g: g, home, mock: None }
+        Self {
+            _g: g,
+            home,
+            mock: None,
+        }
     }
 
     fn with_mock(mock_responses: Value) -> Self {
@@ -96,11 +100,7 @@ fn write_groups_toml(home: &std::path::Path, body: &str) {
     }
 }
 
-fn write_profile(
-    home: &std::path::Path,
-    ns: &str,
-    services: &[(&str, &str, &str)],
-) {
+fn write_profile(home: &std::path::Path, ns: &str, services: &[(&str, &str, &str)]) {
     let dir = home.join("profiles");
     std::fs::create_dir_all(&dir).unwrap();
     #[cfg(unix)]
@@ -151,12 +151,28 @@ fn fleet_glob_expansion_runs_each_namespace() {
         .args(["fleet", "--ns", "prod-*", "ps", "_"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("SUMMARY: fleet 'ps' over 2 namespace(s): 2 ok, 0 failed"), "got: {stdout}");
-    assert!(stdout.contains("[OK] prod-1"), "missing prod-1 section: {stdout}");
-    assert!(stdout.contains("[OK] prod-2"), "missing prod-2 section: {stdout}");
-    assert!(!stdout.contains("[OK] arte"), "arte should not be in the fleet: {stdout}");
+    assert!(
+        stdout.contains("SUMMARY: fleet 'ps' over 2 namespace(s): 2 ok, 0 failed"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[OK] prod-1"),
+        "missing prod-1 section: {stdout}"
+    );
+    assert!(
+        stdout.contains("[OK] prod-2"),
+        "missing prod-2 section: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[OK] arte"),
+        "arte should not be in the fleet: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +240,10 @@ fn fleet_partial_failure_continues() {
     let v: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     let nses = v["fleet"]["namespaces"].as_array().unwrap();
     assert_eq!(nses.len(), 2);
-    let by_name: std::collections::HashMap<&str, &Value> =
-        nses.iter().map(|n| (n["name"].as_str().unwrap(), n)).collect();
+    let by_name: std::collections::HashMap<&str, &Value> = nses
+        .iter()
+        .map(|n| (n["name"].as_str().unwrap(), n))
+        .collect();
     assert_eq!(by_name["prod-1"]["exit"], 0);
     assert_ne!(by_name["prod-2"]["exit"], 0);
     assert_eq!(v["summary"]["ok"], 1);
@@ -253,7 +271,11 @@ fn fleet_group_resolution() {
         .args(["fleet", "--ns", "@canaries", "--json", "ps", "_"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     let names: Vec<&str> = v["fleet"]["namespaces"]
@@ -276,7 +298,10 @@ fn fleet_unknown_group_errors() {
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("@nope"), "stderr missing group name: {stderr}");
+    assert!(
+        stderr.contains("@nope"),
+        "stderr missing group name: {stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +438,10 @@ fn fleet_large_fanout_interlock_blocks_without_yes_all() {
         .args(["fleet", "--ns", "prod-*", "ps", "_"])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "expected interlock to block 12-ns fanout");
+    assert!(
+        !out.status.success(),
+        "expected interlock to block 12-ns fanout"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--yes-all") || stderr.contains("yes-all"),
@@ -435,7 +463,11 @@ fn fleet_large_fanout_yes_all_proceeds() {
         .args(["fleet", "--ns", "prod-*", "--yes-all", "--json", "ps", "_"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(v["summary"]["total"], 12);

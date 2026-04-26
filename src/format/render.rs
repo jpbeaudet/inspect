@@ -31,11 +31,7 @@ use crate::verbs::output::{NextStep, OutputDoc};
 /// are the pre-rendered DATA lines used in default human output; the
 /// renderer falls back to a generic projection of `doc.data` for
 /// table/csv/etc.
-pub fn render_doc(
-    doc: &OutputDoc,
-    fmt: &OutputFormat,
-    human_lines: &[String],
-) -> Result<()> {
+pub fn render_doc(doc: &OutputDoc, fmt: &OutputFormat, human_lines: &[String]) -> Result<()> {
     match fmt {
         OutputFormat::Human => {
             doc.print_human(human_lines);
@@ -200,7 +196,9 @@ fn render_doc_template(doc: &OutputDoc, tpl: &str) -> Result<()> {
         }
     } else {
         // Apply against the data value itself (or empty object).
-        let v = if doc.data.is_object() { doc.data.clone() } else {
+        let v = if doc.data.is_object() {
+            doc.data.clone()
+        } else {
             Value::Object(Map::new())
         };
         println!("{}", template.render(&v)?);
@@ -259,13 +257,16 @@ fn render_rows_delimited(rows: &[Value], sep: &str) -> Result<()> {
             tsv_escape(s)
         }
     };
-    println!("{}", headers.iter().map(|h| escape(h)).collect::<Vec<_>>().join(sep));
-    for row in &table_rows {
-        let line = row
+    println!(
+        "{}",
+        headers
             .iter()
-            .map(|c| escape(c))
+            .map(|h| escape(h))
             .collect::<Vec<_>>()
-            .join(sep);
+            .join(sep)
+    );
+    for row in &table_rows {
+        let line = row.iter().map(|c| escape(c)).collect::<Vec<_>>().join(sep);
         println!("{line}");
     }
     Ok(())
@@ -403,7 +404,11 @@ fn render_markdown_table(headers: &[String], rows: &[Vec<String>]) -> Vec<String
     ));
     out.push(format!(
         "| {} |",
-        headers.iter().map(|_| "---".to_string()).collect::<Vec<_>>().join(" | ")
+        headers
+            .iter()
+            .map(|_| "---".to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
     ));
     for row in rows {
         out.push(format!(
@@ -453,11 +458,8 @@ fn csv_escape(s: &str) -> String {
     // (audit §5.1). The single quote is the documented OWASP
     // mitigation and is invisible in cells.
     let needs_defuse = is_formula_prefix(s);
-    let needs_quote = needs_defuse
-        || s.contains(',')
-        || s.contains('"')
-        || s.contains('\n')
-        || s.contains('\r');
+    let needs_quote =
+        needs_defuse || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
     if needs_quote {
         let mut body = String::with_capacity(s.len() + 3);
         if needs_defuse {

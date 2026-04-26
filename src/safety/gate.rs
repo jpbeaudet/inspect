@@ -29,8 +29,8 @@ pub struct SafetyGate {
 
 impl SafetyGate {
     pub fn new(apply: bool, yes: bool, yes_all: bool) -> Self {
-        let non_interactive = std::env::var("INSPECT_NON_INTERACTIVE").is_ok()
-            || !io::stdin().is_terminal();
+        let non_interactive =
+            std::env::var("INSPECT_NON_INTERACTIVE").is_ok() || !io::stdin().is_terminal();
         Self {
             apply,
             yes,
@@ -48,12 +48,7 @@ impl SafetyGate {
 
     /// Decide whether to proceed given `policy` and `target_count`. May
     /// emit interactive prompts; honors `--yes` / `--yes-all`.
-    pub fn confirm(
-        &self,
-        policy: Confirm,
-        target_count: usize,
-        prompt: &str,
-    ) -> ConfirmResult {
+    pub fn confirm(&self, policy: Confirm, target_count: usize, prompt: &str) -> ConfirmResult {
         if !self.apply {
             return ConfirmResult::DryRun;
         }
@@ -120,7 +115,10 @@ mod tests {
     fn dry_run_default() {
         let g = SafetyGate::new(false, false, false);
         assert!(!g.should_apply());
-        assert!(matches!(g.confirm(Confirm::Always, 1, "ok?"), ConfirmResult::DryRun));
+        assert!(matches!(
+            g.confirm(Confirm::Always, 1, "ok?"),
+            ConfirmResult::DryRun
+        ));
     }
 
     #[test]
@@ -138,15 +136,24 @@ mod tests {
     fn yes_all_skips_fanout_and_always() {
         let mut g = SafetyGate::new(true, false, true);
         g.non_interactive = true;
-        assert!(matches!(g.confirm(Confirm::LargeFanout, 25, "ok?"), ConfirmResult::Apply));
-        assert!(matches!(g.confirm(Confirm::Always, 1, "ok?"), ConfirmResult::Apply));
+        assert!(matches!(
+            g.confirm(Confirm::LargeFanout, 25, "ok?"),
+            ConfirmResult::Apply
+        ));
+        assert!(matches!(
+            g.confirm(Confirm::Always, 1, "ok?"),
+            ConfirmResult::Apply
+        ));
     }
 
     #[test]
     fn yes_skips_always_but_not_fanout() {
         let mut g = SafetyGate::new(true, true, false);
         g.non_interactive = true;
-        assert!(matches!(g.confirm(Confirm::Always, 1, "ok?"), ConfirmResult::Apply));
+        assert!(matches!(
+            g.confirm(Confirm::Always, 1, "ok?"),
+            ConfirmResult::Apply
+        ));
         match g.confirm(Confirm::LargeFanout, 25, "ok?") {
             ConfirmResult::Aborted(_) => {}
             other => panic!("expected Aborted, got {other:?}"),

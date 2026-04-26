@@ -125,7 +125,12 @@ struct ServiceSpec {
 }
 
 fn svc(name: &'static str, health: &'static str, deps: Vec<&'static str>) -> ServiceSpec {
-    ServiceSpec { name, health, deps, ports: Vec::new() }
+    ServiceSpec {
+        name,
+        health,
+        deps,
+        ports: Vec::new(),
+    }
 }
 
 fn svc_with_port(
@@ -134,7 +139,12 @@ fn svc_with_port(
     deps: Vec<&'static str>,
     ports: Vec<(u16, u16, &'static str)>,
 ) -> ServiceSpec {
-    ServiceSpec { name, health, deps, ports }
+    ServiceSpec {
+        name,
+        health,
+        deps,
+        ports,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -155,7 +165,11 @@ fn why_walks_dependency_chain_and_marks_root_cause() {
             svc("postgres", "unhealthy", vec![]),
         ],
     );
-    let out = sb.cmd().args(["why", "arte/atlas", "--json"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas", "--json"])
+        .output()
+        .unwrap();
     // failing-deps present => exit 2 (ExitKind::Error)
     assert_eq!(out.status.code(), Some(2));
     let line = String::from_utf8(out.stdout).unwrap();
@@ -182,13 +196,27 @@ fn why_marks_missing_container_as_down() {
             svc("pulse", "ok", vec![]),
         ],
     );
-    let out = sb.cmd().args(["why", "arte/atlas", "--json"]).output().unwrap();
-    let v: Value =
-        serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
-            .unwrap();
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas", "--json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_str(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
     let svc = &v["data"]["services"][0];
     assert_eq!(svc["root_cause"], "pulse");
-    let pulse = svc["nodes"].as_array().unwrap().iter().find(|n| n["name"] == "pulse").unwrap();
+    let pulse = svc["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["name"] == "pulse")
+        .unwrap();
     assert_eq!(pulse["status"], "down");
 }
 
@@ -227,11 +255,24 @@ fn connectivity_lists_edges_from_depends_on() {
             svc_with_port("postgres", "ok", vec![], vec![(5432, 5432, "tcp")]),
         ],
     );
-    let out = sb.cmd().args(["connectivity", "arte/atlas", "--json"]).output().unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
-    let v: Value =
-        serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
-            .unwrap();
+    let out = sb
+        .cmd()
+        .args(["connectivity", "arte/atlas", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_str(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
     let edges = v["data"]["services"][0]["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 2);
     let pulse_edge = edges.iter().find(|e| e["to"] == "pulse").unwrap();
@@ -259,9 +300,14 @@ fn connectivity_probe_runs_dev_tcp() {
         .args(["connectivity", "arte/atlas", "--probe", "--json"])
         .output()
         .unwrap();
-    let v: Value =
-        serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
-            .unwrap();
+    let v: Value = serde_json::from_str(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
     let edges = v["data"]["services"][0]["edges"].as_array().unwrap();
     let pulse = edges.iter().find(|e| e["to"] == "pulse").unwrap();
     let pg = edges.iter().find(|e| e["to"] == "postgres").unwrap();
@@ -278,22 +324,24 @@ fn connectivity_probe_runs_dev_tcp() {
 #[test]
 fn recipe_runs_user_yaml_with_sel_substitution() {
     let mock = json!([{ "match": "docker ps", "stdout": "pulse\n", "exit": 0 }]);
-    let sb = Sandbox::new(
-        mock,
-        &[svc("pulse", "ok", vec![])],
-    );
-    sb.write_recipe_file(
-        "smoke",
-        "name: smoke\nsteps:\n  - status $SEL --json\n",
-    );
+    let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
+    sb.write_recipe_file("smoke", "name: smoke\nsteps:\n  - status $SEL --json\n");
     let out = sb
         .cmd()
         .args(["recipe", "smoke", "--sel", "arte", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_str(
-        String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(v["data"]["recipe"], "smoke");
@@ -314,18 +362,23 @@ fn recipe_runs_user_yaml_with_sel_substitution() {
 #[test]
 fn recipe_resolves_builtin_health_everything() {
     let mock = json!([{ "match": "docker ps", "stdout": "pulse\n", "exit": 0 }]);
-    let sb = Sandbox::new(
-        mock,
-        &[svc("pulse", "ok", vec![])],
-    );
+    let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
     let out = sb
         .cmd()
         .args(["recipe", "health-everything", "--sel", "arte", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_str(
-        String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(v["data"]["recipe"], "health-everything");
@@ -335,10 +388,7 @@ fn recipe_resolves_builtin_health_everything() {
 #[test]
 fn mutating_recipe_dry_run_by_default_does_not_append_apply() {
     let mock = json!([{ "match": "docker ps", "stdout": "pulse\n", "exit": 0 }]);
-    let sb = Sandbox::new(
-        mock,
-        &[svc("pulse", "ok", vec![])],
-    );
+    let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
     sb.write_recipe_file(
         "rolling",
         "name: rolling\nmutating: true\nsteps:\n  - restart $SEL/pulse\n",
@@ -349,7 +399,11 @@ fn mutating_recipe_dry_run_by_default_does_not_append_apply() {
         .output()
         .unwrap();
     let v: Value = serde_json::from_str(
-        String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
     )
     .unwrap();
     let argv: Vec<String> = v["data"]["steps"][0]["argv"]
@@ -366,10 +420,7 @@ fn mutating_recipe_dry_run_by_default_does_not_append_apply() {
 #[test]
 fn mutating_recipe_with_apply_appends_apply_to_mutating_steps_only() {
     let mock = json!([{ "match": "docker ps", "stdout": "pulse\n", "exit": 0 }]);
-    let sb = Sandbox::new(
-        mock,
-        &[svc("pulse", "ok", vec![])],
-    );
+    let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
     sb.write_recipe_file(
         "rolling",
         "name: rolling\nmutating: true\nsteps:\n  - status $SEL --json\n  - restart $SEL/pulse\n",
@@ -380,24 +431,48 @@ fn mutating_recipe_with_apply_appends_apply_to_mutating_steps_only() {
         .output()
         .unwrap();
     let v: Value = serde_json::from_str(
-        String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
     )
     .unwrap();
     let step0_argv: Vec<String> = v["data"]["steps"][0]["argv"]
-        .as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
     let step1_argv: Vec<String> = v["data"]["steps"][1]["argv"]
-        .as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
     // status is non-mutating: must NOT receive --apply
-    assert!(!step0_argv.iter().any(|a| a == "--apply"), "step0={:?}", step0_argv);
+    assert!(
+        !step0_argv.iter().any(|a| a == "--apply"),
+        "step0={:?}",
+        step0_argv
+    );
     // restart is mutating: must receive --apply
-    assert!(step1_argv.iter().any(|a| a == "--apply"), "step1={:?}", step1_argv);
+    assert!(
+        step1_argv.iter().any(|a| a == "--apply"),
+        "step1={:?}",
+        step1_argv
+    );
 }
 
 #[test]
 fn unknown_recipe_errors_with_builtin_list() {
     let mock = json!([]);
     let sb = Sandbox::new(mock, &[svc("pulse", "ok", vec![])]);
-    let out = sb.cmd().args(["recipe", "does-not-exist"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["recipe", "does-not-exist"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no recipe named"));

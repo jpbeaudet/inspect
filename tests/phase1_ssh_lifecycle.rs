@@ -126,7 +126,12 @@ fn connect_fails_fast_against_bad_host() {
     clear_inspect_env(&mut cmd);
     cmd.env("INSPECT_HOME", &home)
         .env("INSPECT_SSH_CONNECT_TIMEOUT", "2")
-        .args(["connect", "deadhost", "--non-interactive", "--no-existing-mux"])
+        .args([
+            "connect",
+            "deadhost",
+            "--non-interactive",
+            "--no-existing-mux",
+        ])
         .timeout(std::time::Duration::from_secs(20))
         .assert()
         .failure()
@@ -213,7 +218,7 @@ mod e2e {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-        }
+    }
 
     fn try_start_sshd() -> Option<SshdFixture> {
         // Locate sshd
@@ -231,7 +236,12 @@ mod e2e {
         if !run(
             "ssh-keygen",
             &[
-                "-q", "-t", "ed25519", "-N", "", "-f",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
                 host_key.to_str().unwrap(),
             ],
         ) {
@@ -240,14 +250,18 @@ mod e2e {
         if !run(
             "ssh-keygen",
             &[
-                "-q", "-t", "ed25519", "-N", "", "-f",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
                 user_key.to_str().unwrap(),
             ],
         ) {
             return None;
         }
-        let pub_key =
-            std::fs::read_to_string(format!("{}.pub", user_key.display())).ok()?;
+        let pub_key = std::fs::read_to_string(format!("{}.pub", user_key.display())).ok()?;
         std::fs::write(&auth_keys, pub_key).ok()?;
         #[cfg(unix)]
         {

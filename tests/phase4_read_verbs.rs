@@ -106,7 +106,15 @@ fn ps_renders_running_containers() {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "luminary/pulse:1", "ok"), ("atlas", "luminary/atlas:1", "ok")], false);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[
+            ("pulse", "luminary/pulse:1", "ok"),
+            ("atlas", "luminary/atlas:1", "ok"),
+        ],
+        false,
+    );
     sb.cmd()
         .args(["ps", "arte"])
         .assert()
@@ -123,7 +131,12 @@ fn ps_json_emits_envelopes() {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "luminary/pulse:1", "ok")], false);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("pulse", "luminary/pulse:1", "ok")],
+        false,
+    );
     sb.cmd()
         .args(["ps", "arte", "--json"])
         .assert()
@@ -140,7 +153,12 @@ fn status_rolls_up_health() {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "p:1", "ok"), ("atlas", "a:1", "unhealthy")], false);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("pulse", "p:1", "ok"), ("atlas", "a:1", "unhealthy")],
+        false,
+    );
     sb.cmd()
         .args(["status", "arte/*"])
         .assert()
@@ -158,7 +176,12 @@ fn status_marks_missing_containers_down() {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "p:1", "ok"), ("atlas", "a:1", "ok")], false);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("pulse", "p:1", "ok"), ("atlas", "a:1", "ok")],
+        false,
+    );
     sb.cmd()
         .args(["status", "arte/*"])
         .assert()
@@ -417,9 +440,8 @@ fn health_uses_curl_when_url_present() {
 #[test]
 fn read_verb_no_namespace_errors() {
     let sb = Sandbox::new(json!([]));
-    sb.cmd()
-        .args(["status", "arte"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("no namespaces are configured").or(contains("matched no targets")));
+    sb.cmd().args(["status", "arte"]).assert().failure().stderr(
+        predicates::str::contains("no namespaces are configured")
+            .or(contains("matched no targets")),
+    );
 }

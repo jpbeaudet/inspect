@@ -52,22 +52,25 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
                         Some(false) => {
                             probed_closed += 1;
                             if closed_edge.is_none() {
-                                closed_edge = Some((
-                                    step.ns.namespace.clone(),
-                                    e.from.clone(),
-                                    e.to.clone(),
-                                ));
+                                closed_edge =
+                                    Some((step.ns.namespace.clone(), e.from.clone(), e.to.clone()));
                             }
                         }
                         None => {}
                     }
-                    EdgeProbe { edge: e.clone(), open: p }
+                    EdgeProbe {
+                        edge: e.clone(),
+                        open: p,
+                    }
                 })
                 .collect()
         } else {
             edges
                 .iter()
-                .map(|e| EdgeProbe { edge: e.clone(), open: None })
+                .map(|e| EdgeProbe {
+                    edge: e.clone(),
+                    open: None,
+                })
                 .collect()
         };
 
@@ -99,7 +102,11 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
             data_lines.push("  (no declared dependencies)".to_string());
         }
         for p in &probes {
-            let port = p.edge.port.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            let port = p
+                .edge
+                .port
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into());
             let badge = match p.open {
                 Some(true) => "[open]   ",
                 Some(false) => "[closed] ",
@@ -117,9 +124,7 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
     } else {
         String::new()
     };
-    let summary = format!(
-        "{emitted_services} service(s), {total_edges} edge(s){probe_summary}"
-    );
+    let summary = format!("{emitted_services} service(s), {total_edges} edge(s){probe_summary}");
     let mut doc = OutputDoc::new(
         summary,
         serde_json::json!({
@@ -173,8 +178,11 @@ struct EdgeProbe {
 }
 
 fn collect_edges(profile: &Profile, root: &str) -> Vec<Edge> {
-    let by_name: HashMap<&str, &Service> =
-        profile.services.iter().map(|s| (s.name.as_str(), s)).collect();
+    let by_name: HashMap<&str, &Service> = profile
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s))
+        .collect();
     let svc = match by_name.get(root) {
         Some(s) => *s,
         None => return Vec::new(),
@@ -210,7 +218,9 @@ fn probe_edge(runner: &dyn RemoteRunner, ns: &NsCtx, edge: &Edge) -> Option<bool
             edge.to_host, port
         ))
     );
-    let out = runner.run(&ns.namespace, &ns.target, &cmd, RunOpts::with_timeout(5)).ok()?;
+    let out = runner
+        .run(&ns.namespace, &ns.target, &cmd, RunOpts::with_timeout(5))
+        .ok()?;
     let stdout = out.stdout.trim();
     if stdout.contains("open") {
         Some(true)

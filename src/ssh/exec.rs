@@ -73,8 +73,8 @@ pub fn run_remote(
     // Per-host MaxSessions throttle (audit §3.3). Acquired *before*
     // we spawn ssh so we never overshoot the server-side cap. Released
     // automatically when `_session` drops at end of function.
-    let _session = super::concurrency::acquire(&target.host)
-        .context("acquiring SSH session slot")?;
+    let _session =
+        super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
 
     let socket = socket_path(namespace);
     let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
@@ -86,9 +86,7 @@ pub fn run_remote(
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
     }
-    ssh.arg("-o")
-        .arg("BatchMode=yes")
-        .args(target.base_args());
+    ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
     ssh.arg(&target.host)
         .arg("--")

@@ -37,9 +37,15 @@ pub fn parse_duration(s: &str) -> Result<Duration, DurationError> {
         .map_err(|_| DurationError::NoNumber(s.to_string()))?;
     let secs = match unit_char {
         's' => n,
-        'm' => n.checked_mul(60).ok_or_else(|| DurationError::Overflow(s.to_string()))?,
-        'h' => n.checked_mul(3600).ok_or_else(|| DurationError::Overflow(s.to_string()))?,
-        'd' => n.checked_mul(86400).ok_or_else(|| DurationError::Overflow(s.to_string()))?,
+        'm' => n
+            .checked_mul(60)
+            .ok_or_else(|| DurationError::Overflow(s.to_string()))?,
+        'h' => n
+            .checked_mul(3600)
+            .ok_or_else(|| DurationError::Overflow(s.to_string()))?,
+        'd' => n
+            .checked_mul(86400)
+            .ok_or_else(|| DurationError::Overflow(s.to_string()))?,
         other => return Err(DurationError::BadUnit(s.to_string(), other)),
     };
     Ok(Duration::from_secs(secs))
@@ -69,13 +75,19 @@ mod tests {
         assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2d").unwrap(), Duration::from_secs(2 * 86400));
+        assert_eq!(
+            parse_duration("2d").unwrap(),
+            Duration::from_secs(2 * 86400)
+        );
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
     }
 
     #[test]
     fn bad_unit() {
-        assert!(matches!(parse_duration("1y"), Err(DurationError::BadUnit(_, 'y'))));
+        assert!(matches!(
+            parse_duration("1y"),
+            Err(DurationError::BadUnit(_, 'y'))
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! HP-0 contract guards for the `inspect help` system.
 //!
-//! See `INSPECT_HELP_IMPLEMENTATION_PLAN.md` §8 for the full guard
+//! See `archives/INSPECT_HELP_IMPLEMENTATION_PLAN.md` §8 for the full guard
 //! catalog. HP-0 ships the four guards that exercise the dispatcher,
 //! index page, topic body, and "did you mean" suggestion. HP-1..HP-6
 //! add the remainder (G3..G8).
@@ -185,9 +185,7 @@ fn search_and_semantics_intersect() {
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let both = inspect()
-        .args(["help", "--search", "fleet apply"])
-        .assert();
+    let both = inspect().args(["help", "--search", "fleet apply"]).assert();
     // AND query may legitimately return zero hits if no line mentions
     // both — but if it returns hits, count must not exceed single_n.
     let both_out = both.get_output().stdout.clone();
@@ -400,17 +398,50 @@ fn mutually_exclusive_mode_flags_rejected() {
 /// Mirrors `Command` in `cli.rs`. The `every_verb_listed_here_is_real`
 /// guard below asserts this stays in sync with the binary.
 const TOP_LEVEL_VERBS: &[&str] = &[
-    "add", "list", "remove", "test", "show",
-    "connect", "disconnect", "connections", "disconnect-all",
-    "setup", "discover", "profile",
-    "status", "health", "logs", "grep", "cat", "ls", "find", "ps",
-    "volumes", "images", "network", "ports",
-    "why", "connectivity", "recipe",
+    "add",
+    "list",
+    "remove",
+    "test",
+    "show",
+    "connect",
+    "disconnect",
+    "connections",
+    "disconnect-all",
+    "setup",
+    "discover",
+    "profile",
+    "status",
+    "health",
+    "logs",
+    "grep",
+    "cat",
+    "ls",
+    "find",
+    "ps",
+    "volumes",
+    "images",
+    "network",
+    "ports",
+    "why",
+    "connectivity",
+    "recipe",
     "search",
-    "restart", "stop", "start", "reload",
-    "cp", "edit", "rm", "mkdir", "touch", "chmod", "chown", "exec",
-    "alias", "resolve",
-    "audit", "revert",
+    "restart",
+    "stop",
+    "start",
+    "reload",
+    "cp",
+    "edit",
+    "rm",
+    "mkdir",
+    "touch",
+    "chmod",
+    "chown",
+    "exec",
+    "alias",
+    "resolve",
+    "audit",
+    "revert",
     "fleet",
     "help",
 ];
@@ -421,10 +452,7 @@ const TOP_LEVEL_VERBS: &[&str] = &[
 #[test]
 fn every_verb_listed_here_is_real() {
     for verb in TOP_LEVEL_VERBS {
-        inspect()
-            .args([verb, "--help"])
-            .assert()
-            .success();
+        inspect().args([verb, "--help"]).assert().success();
     }
 }
 
@@ -499,8 +527,7 @@ fn grep_help_ends_with_pinned_see_also_line() {
         .find(|l| !l.trim().is_empty())
         .expect("grep --help has at least one line");
     assert_eq!(
-        last,
-        "See also: inspect help selectors, inspect help formats, inspect help examples",
+        last, "See also: inspect help selectors, inspect help formats, inspect help examples",
         "grep --help footer drifted from the HP-2 contract"
     );
 }
@@ -719,7 +746,8 @@ fn help_emits_no_ansi_under_no_color() {
             .clone();
         let esc_count = out.iter().filter(|&&b| b == 0x1b).count();
         assert_eq!(
-            esc_count, 0,
+            esc_count,
+            0,
             "`inspect {}` emitted {} ANSI ESC byte(s) under NO_COLOR=1",
             surface.join(" "),
             esc_count

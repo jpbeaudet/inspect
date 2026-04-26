@@ -32,7 +32,11 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if closed {
-        println!("SUMMARY: '{}' disconnected (was {})", resolved.name, prior.label());
+        println!(
+            "SUMMARY: '{}' disconnected (was {})",
+            resolved.name,
+            prior.label()
+        );
     } else {
         println!("SUMMARY: '{}' had no inspect-managed master", resolved.name);
     }

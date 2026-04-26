@@ -90,7 +90,9 @@ const DISALLOWED_INNER_VERBS: &[&str] = &[
 
 pub fn run(args: FleetArgs) -> Result<ExitKind> {
     if args.verb.is_empty() {
-        return Err(anyhow!("missing inner verb (e.g. 'inspect fleet status --ns prod-*')"));
+        return Err(anyhow!(
+            "missing inner verb (e.g. 'inspect fleet status --ns prod-*')"
+        ));
     }
     if DISALLOWED_INNER_VERBS.contains(&args.verb.as_str()) {
         return Err(anyhow!(
@@ -225,8 +227,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     let mut plan_iter = plan.into_iter();
     if canary_n > 0 {
         let canary_plan: Vec<NsPlan> = (&mut plan_iter).take(canary_n).collect();
-        let canary_names: Vec<String> =
-            canary_plan.iter().map(|p| p.namespace.clone()).collect();
+        let canary_names: Vec<String> = canary_plan.iter().map(|p| p.namespace.clone()).collect();
         eprintln!(
             "fleet: canary phase: running {} of {} namespace(s) first: {}",
             canary_n,
@@ -241,15 +242,13 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
             parent_pid,
             &foreign_passphrase_envs,
         );
-        let canary_failed: Vec<&NsResult> =
-            canary_results.iter().filter(|r| r.exit != 0).collect();
+        let canary_failed: Vec<&NsResult> = canary_results.iter().filter(|r| r.exit != 0).collect();
         if !canary_failed.is_empty() {
             let names: Vec<String> = canary_failed
                 .iter()
                 .map(|r| format!("{}(exit {})", r.namespace, r.exit))
                 .collect();
-            let remaining: Vec<String> =
-                plan_iter.map(|p| p.namespace).collect();
+            let remaining: Vec<String> = plan_iter.map(|p| p.namespace).collect();
             eprintln!(
                 "fleet: canary failed on {} namespace(s): {}. \
                  Aborting before {} remaining namespace(s): {}",
@@ -414,16 +413,13 @@ fn resolve_concurrency(flag: Option<usize>) -> Result<usize> {
 /// selector" and silently skips them rather than producing false
 /// positives.
 fn first_positional_index(args: &[String]) -> Option<usize> {
-    args.iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, a)| {
-            if a == "--" || a.starts_with('-') {
-                None
-            } else {
-                Some(i)
-            }
-        })
+    args.iter().enumerate().rev().find_map(|(i, a)| {
+        if a == "--" || a.starts_with('-') {
+            None
+        } else {
+            Some(i)
+        }
+    })
 }
 
 /// M2: rewrite the inner-verb selector so fleet's namespace pin is
@@ -480,11 +476,7 @@ fn rewrite_inner_selector(raw: &str) -> Result<Option<String>> {
 /// H2: estimate the total number of targets fleet will end up invoking
 /// the inner verb on. Uses each namespace's cached profile when
 /// available; falls back to `1` per namespace.
-fn estimate_total_targets(
-    chosen: &[String],
-    selector: Option<&str>,
-    force_ns_mode: bool,
-) -> usize {
+fn estimate_total_targets(chosen: &[String], selector: Option<&str>, force_ns_mode: bool) -> usize {
     if !force_ns_mode {
         return chosen.len();
     }
@@ -550,10 +542,7 @@ const PREWARM_CONNECT_CONCURRENCY: usize = 4;
 ///   regardless of `--concurrency`.
 /// * Best-effort: per-ns failures are reported on stderr and the
 ///   matching child will surface the real error when it runs.
-fn prewarm_masters(
-    chosen: &[String],
-    all: &[crate::config::namespace::ResolvedNamespace],
-) {
+fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedNamespace]) {
     if std::env::var_os("INSPECT_MOCK_REMOTE_FILE").is_some() {
         return;
     }
@@ -561,7 +550,9 @@ fn prewarm_masters(
         return;
     }
 
-    use crate::ssh::master::{check_socket, socket_path, start_master, AuthSelection, MasterStatus};
+    use crate::ssh::master::{
+        check_socket, socket_path, start_master, AuthSelection, MasterStatus,
+    };
     use crate::ssh::options::SshTarget;
 
     let by_name: BTreeMap<&str, &crate::config::namespace::ResolvedNamespace> =
@@ -758,15 +749,16 @@ fn run_child(
             namespace: plan.namespace.clone(),
             exit: 2,
             stdout: String::new(),
-            stderr: format!("fleet: failed to spawn child for ns '{}': {e}", plan.namespace),
+            stderr: format!(
+                "fleet: failed to spawn child for ns '{}': {e}",
+                plan.namespace
+            ),
         },
     }
 }
 
 fn emit_human(verb: &str, results: &[NsResult], total: usize, ok: usize, failed: usize) {
-    println!(
-        "SUMMARY: fleet '{verb}' over {total} namespace(s): {ok} ok, {failed} failed"
-    );
+    println!("SUMMARY: fleet '{verb}' over {total} namespace(s): {ok} ok, {failed} failed");
     println!("DATA:");
     for r in results {
         let tag = if r.exit == 0 {
@@ -787,7 +779,9 @@ fn emit_human(verb: &str, results: &[NsResult], total: usize, ok: usize, failed:
         }
     }
     if failed == 0 {
-        println!("NEXT:    inspect fleet {verb} --ns <pattern> --json   # for machine-readable output");
+        println!(
+            "NEXT:    inspect fleet {verb} --ns <pattern> --json   # for machine-readable output"
+        );
     } else {
         println!(
             "NEXT:    inspect show <ns>   # inspect any failing namespace; rerun with --abort-on-error to fail-fast"
@@ -812,7 +806,9 @@ fn emit_json(verb: &str, results: &[NsResult], total: usize, ok: usize, failed: 
         ));
     }
     s.push_str("]},\"summary\":{");
-    s.push_str(&format!("\"total\":{total},\"ok\":{ok},\"failed\":{failed}"));
+    s.push_str(&format!(
+        "\"total\":{total},\"ok\":{ok},\"failed\":{failed}"
+    ));
     s.push_str("}}");
     println!("{s}");
 }
@@ -832,7 +828,11 @@ mod tests {
         let got = build_child_args("setup", &["--force".to_string()], "prod-1");
         assert_eq!(
             got,
-            vec!["setup".to_string(), "prod-1".to_string(), "--force".to_string()]
+            vec![
+                "setup".to_string(),
+                "prod-1".to_string(),
+                "--force".to_string()
+            ]
         );
     }
 
@@ -845,7 +845,11 @@ mod tests {
 
     #[test]
     fn expand_pattern_glob() {
-        let known = vec!["prod-1".to_string(), "prod-2".to_string(), "staging".to_string()];
+        let known = vec![
+            "prod-1".to_string(),
+            "prod-2".to_string(),
+            "staging".to_string(),
+        ];
         let got = expand_ns_pattern("prod-*", &known).unwrap();
         assert_eq!(got, vec!["prod-1".to_string(), "prod-2".to_string()]);
     }

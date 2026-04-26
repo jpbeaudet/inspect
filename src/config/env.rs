@@ -61,7 +61,9 @@ pub fn enumerate_env_namespaces() -> BTreeSet<String> {
         "_KEY_INLINE",
     ];
     for (key, _) in std::env::vars() {
-        let Some(rest) = key.strip_prefix("INSPECT_") else { continue };
+        let Some(rest) = key.strip_prefix("INSPECT_") else {
+            continue;
+        };
         // Match the longest suffix to avoid clipping namespace names like
         // FOO_KEY (which would contain `_KEY`).
         let mut matched: Option<&str> = None;

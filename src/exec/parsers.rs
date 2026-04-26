@@ -185,10 +185,7 @@ pub fn parse_logfmt(rec: &mut Record) {
         }
         // key
         let key_start = i;
-        while i < bytes.len()
-            && !bytes[i].is_ascii_whitespace()
-            && bytes[i] != b'='
-        {
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' {
             i += 1;
         }
         let key = std::str::from_utf8(&bytes[key_start..i])
@@ -199,7 +196,7 @@ pub fn parse_logfmt(rec: &mut Record) {
             continue;
         }
         i += 1; // consume `=`
-        // value
+                // value
         let value = if i < bytes.len() && bytes[i] == b'"' {
             i += 1;
             let v_start = i;
@@ -239,7 +236,9 @@ pub fn parse_logfmt(rec: &mut Record) {
 /// Apply `| pattern "<...>"` Loki-style: any `<name>` placeholder
 /// captures up to the next literal text.
 pub fn parse_pattern(rec: &mut Record, template: &str) -> Result<(), String> {
-    let Some(line) = rec.line.clone() else { return Ok(()) };
+    let Some(line) = rec.line.clone() else {
+        return Ok(());
+    };
     let re = compile_pattern(template)?;
     match re.captures(&line) {
         Some(caps) => {
@@ -293,7 +292,9 @@ fn compile_pattern(template: &str) -> Result<Regex, String> {
 
 /// Apply `| regexp "<...>"`: a real regex with named groups extracted into fields.
 pub fn parse_regexp(rec: &mut Record, pattern: &str) -> Result<(), String> {
-    let Some(line) = rec.line.clone() else { return Ok(()) };
+    let Some(line) = rec.line.clone() else {
+        return Ok(());
+    };
     let re = Regex::new(pattern).map_err(|e| format!("invalid regexp: {e}"))?;
     match re.captures(&line) {
         Some(caps) => {
@@ -347,8 +348,7 @@ mod tests {
 
     #[test]
     fn json_sanitizes_invalid_label_names() {
-        let mut r = Record::new()
-            .with_line(r#"{"2xx-count":5,"response.time":0.3,"ok key":1}"#);
+        let mut r = Record::new().with_line(r#"{"2xx-count":5,"response.time":0.3,"ok key":1}"#);
         parse_json(&mut r);
         // Leading digit → underscore prefix; hyphens/dots/spaces → underscore.
         assert!(r.fields.contains_key("_2xx_count"));

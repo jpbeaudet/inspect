@@ -16,7 +16,11 @@ pub fn run(args: AliasArgs) -> anyhow::Result<ExitKind> {
 fn add(a: crate::cli::AliasAddArgs) -> anyhow::Result<ExitKind> {
     alias::add(&a.name, &a.selector, a.description, a.force)?;
     let kind = alias::classify(&a.selector);
-    println!("SUMMARY: alias '@{}' saved ({}-style)", a.name, kind.label());
+    println!(
+        "SUMMARY: alias '@{}' saved ({}-style)",
+        a.name,
+        kind.label()
+    );
     println!("DATA:    selector = {}", a.selector);
     println!("NEXT:    use '@{}' wherever a selector is accepted", a.name);
     Ok(ExitKind::Success)
@@ -36,7 +40,10 @@ fn list(a: crate::cli::AliasListArgs) -> anyhow::Result<ExitKind> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Array(arr))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))?
+        );
         return Ok(ExitKind::Success);
     }
     if entries.is_empty() {

@@ -22,10 +22,7 @@ impl Reader for DirReader {
         _opts: &ReadOpts,
     ) -> Result<Vec<Record>> {
         // -1 one-per-line, -A include dotfiles, -p append `/` to dirs.
-        let cmd = format!(
-            "ls -1Ap --color=never {} 2>/dev/null",
-            shquote(&self.path)
-        );
+        let cmd = format!("ls -1Ap --color=never {} 2>/dev/null", shquote(&self.path));
         let out = runner.run(step.namespace, step.target, &cmd, RunOpts::with_timeout(30))?;
         if !out.ok() {
             return Ok(Vec::new());
@@ -44,14 +41,14 @@ impl Reader for DirReader {
             r.labels
                 .insert("service".into(), step.service.unwrap_or("_").to_string());
             r.labels.insert("source".into(), src.clone());
-            r.labels
-                .insert("path".into(), format!("{}/{}", self.path.trim_end_matches('/'), name));
+            r.labels.insert(
+                "path".into(),
+                format!("{}/{}", self.path.trim_end_matches('/'), name),
+            );
             r.fields
                 .insert("name".into(), serde_json::Value::String(name.into()));
-            r.fields.insert(
-                "is_dir".into(),
-                serde_json::Value::Bool(is_dir),
-            );
+            r.fields
+                .insert("is_dir".into(), serde_json::Value::Bool(is_dir));
             r.line = Some(name.into());
             recs.push(r);
         }

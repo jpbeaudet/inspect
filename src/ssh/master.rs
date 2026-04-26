@@ -174,8 +174,12 @@ pub fn list_sockets() -> Result<Vec<(String, PathBuf)>> {
     for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
-        let Some(ns) = name.strip_suffix(".sock") else { continue };
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(ns) = name.strip_suffix(".sock") else {
+            continue;
+        };
         out.push((ns.to_string(), path));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -258,8 +262,14 @@ pub fn start_master(
             return Err(anyhow!("passphrase env var '{var}' is empty"));
         }
         let askpass = AskpassScript::new(var)?;
-        run_master(target, ttl, &socket, &askpass.env_vars(), /*batch=*/ false)
-            .with_context(|| format!("ssh master failed using env var '{var}'"))?;
+        run_master(
+            target,
+            ttl,
+            &socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+        )
+        .with_context(|| format!("ssh master failed using env var '{var}'"))?;
         // Best-effort: nothing to zeroize — the secret stays in the user's
         // environment until they unset it. We never copy it.
         let _ = value;
@@ -285,7 +295,13 @@ pub fn start_master(
         std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &secret);
         zeroize_string(&mut secret);
         let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE)?;
-        let result = run_master(target, ttl, &socket, &askpass.env_vars(), /*batch=*/ false);
+        let result = run_master(
+            target,
+            ttl,
+            &socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+        );
         // Always remove the env var afterward, success or failure.
         std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
         result.context("ssh master failed using interactive passphrase")?;
@@ -402,4 +418,3 @@ fn apply_extra_opts(cmd: &mut Command) {
 fn extra_env_pairs() -> Vec<(OsString, OsString)> {
     Vec::new()
 }
-

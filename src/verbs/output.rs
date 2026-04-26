@@ -164,7 +164,10 @@ pub struct NextStep {
 
 impl NextStep {
     pub fn new(cmd: impl Into<String>, rationale: impl Into<String>) -> Self {
-        Self { cmd: cmd.into(), rationale: rationale.into() }
+        Self {
+            cmd: cmd.into(),
+            rationale: rationale.into(),
+        }
     }
 }
 

@@ -28,8 +28,8 @@ use serde_json::json;
 /// Verbs that mutate remote state. Keep in sync with the write-verb
 /// matrix in `src/verbs/write/`.
 const MUTATING_VERBS: &[&str] = &[
-    "restart", "stop", "start", "reload", "cp", "edit", "rm", "mkdir",
-    "touch", "chmod", "chown", "exec",
+    "restart", "stop", "start", "reload", "cp", "edit", "rm", "mkdir", "touch", "chmod", "chown",
+    "exec",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,26 +63,16 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
     for (idx, raw) in doc.steps.iter().enumerate() {
         let mut argv = match shell_split(raw) {
             Ok(v) if !v.is_empty() => v,
-            Ok(_) => {
-                return Err(anyhow!(
-                    "recipe '{}' step #{} is empty",
-                    doc.name,
-                    idx + 1
-                ))
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "recipe '{}' step #{}: {}",
-                    doc.name,
-                    idx + 1,
-                    e
-                ))
-            }
+            Ok(_) => return Err(anyhow!("recipe '{}' step #{} is empty", doc.name, idx + 1)),
+            Err(e) => return Err(anyhow!("recipe '{}' step #{}: {}", doc.name, idx + 1, e)),
         };
         substitute_placeholders(&mut argv, &args);
         if doc.mutating
             && args.apply
-            && argv.first().map(|v| MUTATING_VERBS.contains(&v.as_str())).unwrap_or(false)
+            && argv
+                .first()
+                .map(|v| MUTATING_VERBS.contains(&v.as_str()))
+                .unwrap_or(false)
             && !argv.iter().any(|a| a == "--apply")
         {
             argv.push("--apply".to_string());
@@ -94,7 +84,12 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         } else {
             // Prefix per-step header so users can correlate output to steps.
-            println!("=== step {}/{}: inspect {} ===", idx + 1, doc.steps.len(), argv.join(" "));
+            println!(
+                "=== step {}/{}: inspect {} ===",
+                idx + 1,
+                doc.steps.len(),
+                argv.join(" ")
+            );
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         }
         let output = cmd
@@ -162,7 +157,11 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;
     crate::format::render::render_doc(&doc_out, &fmt, &data_lines)?;
 
-    Ok(if any_failed { ExitKind::Error } else { ExitKind::Success })
+    Ok(if any_failed {
+        ExitKind::Error
+    } else {
+        ExitKind::Success
+    })
 }
 
 struct StepResult {
@@ -184,7 +183,9 @@ fn load_recipe(name_or_path: &str) -> Result<RecipeDoc> {
         return parse_recipe(&body, &p.display().to_string());
     }
     // Built-in resolution: user override first, then built-in pack.
-    let user = paths::inspect_home().join("recipes").join(format!("{name_or_path}.yaml"));
+    let user = paths::inspect_home()
+        .join("recipes")
+        .join(format!("{name_or_path}.yaml"));
     if user.exists() {
         let body = std::fs::read_to_string(&user)
             .with_context(|| format!("reading recipe file '{}'", user.display()))?;
@@ -201,8 +202,8 @@ fn load_recipe(name_or_path: &str) -> Result<RecipeDoc> {
 }
 
 fn parse_recipe(body: &str, source: &str) -> Result<RecipeDoc> {
-    let doc: RecipeDoc = serde_yaml::from_str(body)
-        .with_context(|| format!("parsing recipe at {source}"))?;
+    let doc: RecipeDoc =
+        serde_yaml::from_str(body).with_context(|| format!("parsing recipe at {source}"))?;
     if doc.steps.is_empty() {
         return Err(anyhow!("recipe at {source} has no `steps`"));
     }
@@ -367,7 +368,10 @@ mod tests {
 
     #[test]
     fn shell_split_basic() {
-        assert_eq!(shell_split("status arte/pulse").unwrap(), vec!["status", "arte/pulse"]);
+        assert_eq!(
+            shell_split("status arte/pulse").unwrap(),
+            vec!["status", "arte/pulse"]
+        );
     }
 
     #[test]

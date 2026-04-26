@@ -37,10 +37,7 @@ where
 /// Same as [`expand`] but also returns the list of expansions performed,
 /// so callers can re-frame downstream parse errors that point into an
 /// expanded region (audit §1.7).
-pub fn expand_with_map<F>(
-    input: &str,
-    resolve: &F,
-) -> Result<(String, Vec<Expansion>), ParseError>
+pub fn expand_with_map<F>(input: &str, resolve: &F) -> Result<(String, Vec<Expansion>), ParseError>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -87,11 +84,8 @@ where
             }
             let name = &input[i + 1..j];
             let Some(body) = resolve(name) else {
-                return Err(ParseError::new(
-                    format!("unknown alias `@{name}`"),
-                    i..j,
-                )
-                .with_hint("define it via `inspect alias add` or check the name"));
+                return Err(ParseError::new(format!("unknown alias `@{name}`"), i..j)
+                    .with_hint("define it via `inspect alias add` or check the name"));
             };
             if body.contains('@') && contains_alias_ref_outside_strings(&body) {
                 return Err(ParseError::new(

@@ -317,9 +317,10 @@ mod e2e {
             .success()
             // Either fresh (docker present) or probe-failed (no docker on
             // the dev container) — both are acceptable, but never drifted.
-            .stdout(predicate::str::contains("\"drift\":").and(
-                predicate::str::contains("\"drifted\"").not(),
-            ));
+            .stdout(
+                predicate::str::contains("\"drift\":")
+                    .and(predicate::str::contains("\"drifted\"").not()),
+            );
 
         // Profile command should now find the cache.
         let mut prof = bin();

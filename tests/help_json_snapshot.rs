@@ -79,7 +79,11 @@ fn topic_envelope_keys_are_pinned() {
 fn command_envelope_keys_are_pinned() {
     let v = run(&["help", "--json"]);
     let cmds = v["commands"].as_object().expect("commands is object");
-    assert!(cmds.len() >= 30, "expected ≥30 commands, got {}", cmds.len());
+    assert!(
+        cmds.len() >= 30,
+        "expected ≥30 commands, got {}",
+        cmds.len()
+    );
     let expected = [
         "aliases",
         "examples",
@@ -252,15 +256,11 @@ fn json_skeleton_matches_golden() {
     let v = run(&["help", "--json"]);
 
     // Reproduce the same skeleton extraction the generator script does.
-    let mut top_keys: Vec<&str> =
-        v.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut top_keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     top_keys.sort();
 
     let topics = v["topics"].as_array().unwrap();
-    let topic_ids: Vec<&str> = topics
-        .iter()
-        .map(|t| t["id"].as_str().unwrap())
-        .collect();
+    let topic_ids: Vec<&str> = topics.iter().map(|t| t["id"].as_str().unwrap()).collect();
     let mut topic_keys: Vec<&str> = topics[0]
         .as_object()
         .unwrap()
@@ -271,8 +271,7 @@ fn json_skeleton_matches_golden() {
 
     let commands = v["commands"].as_object().unwrap();
     let first_cmd = commands.values().next().unwrap().as_object().unwrap();
-    let mut cmd_keys: Vec<&str> =
-        first_cmd.keys().map(String::as_str).collect();
+    let mut cmd_keys: Vec<&str> = first_cmd.keys().map(String::as_str).collect();
     cmd_keys.sort();
 
     // Pick the first command with a non-empty `flags` array.
@@ -307,9 +306,10 @@ fn json_skeleton_matches_golden() {
         "topic_ids": topic_ids,
     });
 
-    let golden_text = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/help_json_skeleton.json"),
-    )
+    let golden_text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/help_json_skeleton.json"
+    ))
     .expect("golden snapshot must exist at tests/golden/help_json_skeleton.json");
     let golden: serde_json::Value =
         serde_json::from_str(&golden_text).expect("golden is valid json");

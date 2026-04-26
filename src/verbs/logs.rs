@@ -85,7 +85,10 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "logs", "logs")
                         .with_service(&svc_name)
-                        .put("line", crate::format::safe::safe_machine_line(line).as_ref()),
+                        .put(
+                            "line",
+                            crate::format::safe::safe_machine_line(line).as_ref(),
+                        ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
@@ -118,7 +121,9 @@ fn build_logs(
         (None, _) => {
             // Host-level: tail /var/log/syslog by default.
             let tail = args.tail.unwrap_or(200);
-            format!("tail -n {tail} /var/log/syslog 2>/dev/null || tail -n {tail} /var/log/messages")
+            format!(
+                "tail -n {tail} /var/log/syslog 2>/dev/null || tail -n {tail} /var/log/messages"
+            )
         }
     }
 }

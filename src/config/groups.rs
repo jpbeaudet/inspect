@@ -142,7 +142,14 @@ members = ["prod-1", "staging-canary"]
             "staging".to_string(),
         ];
         let got = expand_members(&["prod-*".to_string(), "arte".to_string()], &known);
-        assert_eq!(got, vec!["arte".to_string(), "prod-1".to_string(), "prod-2".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "arte".to_string(),
+                "prod-1".to_string(),
+                "prod-2".to_string()
+            ]
+        );
     }
 
     #[test]

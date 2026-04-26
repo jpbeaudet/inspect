@@ -119,7 +119,9 @@ pub fn render(hits: &[SearchHit], needle: &str) -> String {
 pub fn index_byte_size() -> usize {
     KEYWORDS
         .iter()
-        .map(|(k, locs)| k.len() + 16 /* slice header */ + locs.len() * 6 /* (u16,u32) */)
+        .map(
+            |(k, locs)| k.len() + 16 /* slice header */ + locs.len() * 6, /* (u16,u32) */
+        )
         .sum::<usize>()
         + TOPIC_IDS.iter().map(|s| s.len() + 16).sum::<usize>()
 }
@@ -164,7 +166,12 @@ mod tests {
     #[test]
     fn keywords_are_sorted_unique() {
         for w in KEYWORDS.windows(2) {
-            assert!(w[0].0 < w[1].0, "keywords must be sorted: {:?} vs {:?}", w[0].0, w[1].0);
+            assert!(
+                w[0].0 < w[1].0,
+                "keywords must be sorted: {:?} vs {:?}",
+                w[0].0,
+                w[1].0
+            );
         }
     }
 
@@ -227,7 +234,10 @@ mod tests {
         assert!(out.contains("match"));
         // The first non-header line must be a topic id, not a body line.
         let body = out.lines().nth(2).unwrap_or_default();
-        assert!(!body.starts_with("  L"), "first content line should be topic header, got {body:?}");
+        assert!(
+            !body.starts_with("  L"),
+            "first content line should be topic header, got {body:?}"
+        );
     }
 
     #[test]

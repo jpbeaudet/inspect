@@ -71,8 +71,7 @@ pub fn execute(query: &str, opts: crate::exec::ExecOpts) -> Result<ExecOutput> {
 /// metric range aggregations to avoid round-tripping the full
 /// alias-expansion + validate pipeline for sub-queries.
 pub(crate) fn execute_log(ctx: &ExecCtx<'_>, src: &str) -> Result<LogResult> {
-    let ast = crate::logql::parse(src)
-        .with_context(|| format!("parsing sub-query `{src}`"))?;
+    let ast = crate::logql::parse(src).with_context(|| format!("parsing sub-query `{src}`"))?;
     let l = match ast {
         Query::Log(l) => l,
         Query::Metric(_) => {
@@ -101,11 +100,10 @@ fn run_log(ctx: &ExecCtx<'_>, l: &LogQuery) -> Result<Vec<Record>> {
     // Run branches in parallel (up to `max_parallel`) — each branch
     // resolves its own targets and reads concurrently across them.
     let branches = &l.selector.branches;
-    let results: Result<Vec<Vec<Record>>> = parallel_map(
-        ctx.opts.max_parallel,
-        branches,
-        |branch| run_branch(ctx, branch, &pushdown_filters),
-    );
+    let results: Result<Vec<Vec<Record>>> =
+        parallel_map(ctx.opts.max_parallel, branches, |branch| {
+            run_branch(ctx, branch, &pushdown_filters)
+        });
     let mut all: Vec<Record> = results?.into_iter().flatten().collect();
 
     all = pipeline::apply(ctx, &l.pipeline, all)?;
@@ -351,8 +349,12 @@ fn match_label(m: &LabelMatcher, value: &str) -> bool {
     match m.op {
         MatchOp::Eq => value == m.value,
         MatchOp::Ne => value != m.value,
-        MatchOp::Re => Regex::new(&m.value).map(|r| r.is_match(value)).unwrap_or(false),
-        MatchOp::Nre => Regex::new(&m.value).map(|r| !r.is_match(value)).unwrap_or(false),
+        MatchOp::Re => Regex::new(&m.value)
+            .map(|r| r.is_match(value))
+            .unwrap_or(false),
+        MatchOp::Nre => Regex::new(&m.value)
+            .map(|r| !r.is_match(value))
+            .unwrap_or(false),
     }
 }
 
@@ -365,7 +367,9 @@ fn source_value(sel: &Selector) -> Result<&str> {
         .matchers
         .iter()
         .find(|m| m.name == "source")
-        .ok_or_else(|| anyhow!("selector has no `source` matcher (validator should have caught this)"))?;
+        .ok_or_else(|| {
+            anyhow!("selector has no `source` matcher (validator should have caught this)")
+        })?;
     Ok(m.value.as_str())
 }
 
@@ -384,7 +388,8 @@ struct BranchStep {
 fn build_plan(sel: &Selector) -> Result<BranchPlan> {
     // Translate the LogQL selector's `server`/`service` matchers into a
     // single textual selector understood by `crate::selector::resolve`.
-    let server_pat = matcher_for(sel, "server").map(|m| matcher_to_selector_atom(m, /*is_server=*/ true));
+    let server_pat =
+        matcher_for(sel, "server").map(|m| matcher_to_selector_atom(m, /*is_server=*/ true));
     let service_pat = matcher_for(sel, "service").map(|m| matcher_to_selector_atom(m, false));
 
     let server_text = server_pat.unwrap_or_else(|| "*".to_string());
@@ -456,5 +461,3 @@ fn matcher_to_selector_atom(m: &LabelMatcher, is_server: bool) -> String {
         MatchOp::Ne | MatchOp::Nre => "*".to_string(),
     }
 }
-
-

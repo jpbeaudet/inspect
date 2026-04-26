@@ -35,7 +35,16 @@ pub struct HostListener {
 pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
     // `command -v X >/dev/null 2>&1 && echo X=1 || echo X=0`
     let tools = [
-        "rg", "jq", "journalctl", "sed", "grep", "netstat", "ss", "systemctl", "docker", "podman",
+        "rg",
+        "jq",
+        "journalctl",
+        "sed",
+        "grep",
+        "netstat",
+        "ss",
+        "systemctl",
+        "docker",
+        "podman",
     ];
     let parts: Vec<String> = tools
         .iter()
@@ -49,7 +58,9 @@ pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
             let mut t = RemoteTooling::default();
             for line in out.stdout.lines() {
                 let line = line.trim();
-                let Some((k, v)) = line.split_once('=') else { continue };
+                let Some((k, v)) = line.split_once('=') else {
+                    continue;
+                };
                 let present = v == "1";
                 match k {
                     "rg" => t.rg = present,
@@ -77,8 +88,11 @@ pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
             r.remote_tooling = Some(t);
         }
         Ok(out) => {
-            r.warnings
-                .push(format!("remote tooling probe exited {}: {}", out.exit_code, out.stderr.trim()));
+            r.warnings.push(format!(
+                "remote tooling probe exited {}: {}",
+                out.exit_code,
+                out.stderr.trim()
+            ));
         }
         Err(e) => r.warnings.push(format!("remote tooling probe failed: {e}")),
     }
@@ -296,10 +310,7 @@ pub fn probe_clock_offset(ns: &str, target: &SshTarget) -> (Option<i64>, Vec<Str
             );
         }
         Err(e) => {
-            return (
-                None,
-                vec![format!("clock-offset probe failed: {e}")],
-            );
+            return (None, vec![format!("clock-offset probe failed: {e}")]);
         }
     };
     let local_after = std::time::SystemTime::now();
@@ -406,10 +417,7 @@ pub fn probe_docker_inventory(ns: &str, target: &SshTarget) -> ProbeResult {
 /// `netstat -tlnp` fallback.
 pub fn probe_host_listeners(ns: &str, target: &SshTarget) -> ProbeResult {
     let mut r = ProbeResult::default();
-    let tries = [
-        "ss -H -tlnp 2>/dev/null",
-        "netstat -tlnp 2>/dev/null",
-    ];
+    let tries = ["ss -H -tlnp 2>/dev/null", "netstat -tlnp 2>/dev/null"];
     for cmd in tries {
         if let Ok(out) = run_remote(ns, target, cmd, RunOpts::with_timeout(10)) {
             if out.ok() && !out.stdout.trim().is_empty() {
@@ -431,8 +439,7 @@ pub fn probe_host_listeners(ns: &str, target: &SshTarget) -> ProbeResult {
 /// `host_listener`-flavored entries; we keep the probe cheap.
 pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
     let mut r = ProbeResult::default();
-    let cmd =
-        "systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null";
+    let cmd = "systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null";
     let out = match run_remote(ns, target, cmd, RunOpts::with_timeout(15)) {
         Ok(o) => o,
         Err(_) => return r,
@@ -596,7 +603,9 @@ fn log_size_warnings(
     // Collect (svc_name, path) for every container with a log path.
     let mut paths: Vec<(String, String)> = Vec::new();
     for row in rows {
-        let Some(d) = details.get(&row.id) else { continue };
+        let Some(d) = details.get(&row.id) else {
+            continue;
+        };
         let Some(p) = &d.log_path else { continue };
         // Only json-file is sized this way; journald/local store
         // elsewhere and have their own retention.
@@ -623,8 +632,10 @@ fn log_size_warnings(
         // want to spam every operator running as a non-root user.
         _ => return,
     };
-    let by_path: std::collections::HashMap<&str, &str> =
-        paths.iter().map(|(s, p)| (p.as_str(), s.as_str())).collect();
+    let by_path: std::collections::HashMap<&str, &str> = paths
+        .iter()
+        .map(|(s, p)| (p.as_str(), s.as_str()))
+        .collect();
     for line in out.stdout.lines() {
         let mut it = line.splitn(2, '\t');
         let size_s = match it.next() {
@@ -747,7 +758,9 @@ pub(crate) fn parse_docker_inspect(
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         let id = v
             .get("Id")
             .and_then(|x| x.as_str())
@@ -884,7 +897,9 @@ pub(crate) fn parse_listener_line(line: &str) -> Option<HostListener> {
     }
     let toks: Vec<&str> = line.split_whitespace().collect();
     // Find a `*:port` or `addr:port` token.
-    let bind = toks.iter().find(|t| t.contains(':') && !t.contains("users:"))?;
+    let bind = toks
+        .iter()
+        .find(|t| t.contains(':') && !t.contains("users:"))?;
     let port_str = bind.rsplit(':').next()?;
     let port: u16 = port_str.parse().ok()?;
 
@@ -936,9 +951,7 @@ fn extract_process(line: &str) -> Option<String> {
 ///     glob metas, whitespace).
 pub(crate) fn problematic_service_name(name: &str) -> Option<String> {
     if name == "_" {
-        return Some(
-            "name `_` collides with the reserved host-level placeholder".to_string(),
-        );
+        return Some("name `_` collides with the reserved host-level placeholder".to_string());
     }
     const RESERVED: &[char] = &[',', '/', ':', '*', '~', '[', ']', '{', '}', ' ', '\t'];
     let bad: Vec<char> = name.chars().filter(|c| RESERVED.contains(c)).collect();
@@ -961,8 +974,7 @@ pub(crate) fn problematic_service_name(name: &str) -> Option<String> {
 /// failure — the raw stderr is still surfaced separately.
 pub(crate) fn explain_docker_failure(stderr: &str) -> Option<&'static str> {
     let s = stderr.to_ascii_lowercase();
-    if s.contains("permission denied")
-        && (s.contains("docker.sock") || s.contains("docker daemon"))
+    if s.contains("permission denied") && (s.contains("docker.sock") || s.contains("docker daemon"))
     {
         return Some(
             "add user to the `docker` group (`sudo usermod -aG docker $USER`, then re-login), \
@@ -1017,7 +1029,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_inspect_recognises_unsupported_log_drivers() {        // Field pitfall §2.3: distinguish unsupported drivers so the
+    fn parse_inspect_recognises_unsupported_log_drivers() {
+        // Field pitfall §2.3: distinguish unsupported drivers so the
         // logs verb can emit a clear, driver-specific error.
         let cases = [
             ("fluentd", LogDriver::Fluentd),
@@ -1027,9 +1040,7 @@ mod tests {
             ("none", LogDriver::None),
         ];
         for (name, expected) in cases {
-            let s = format!(
-                r#"{{"Id":"x","HostConfig":{{"LogConfig":{{"Type":"{name}"}}}}}}"#
-            );
+            let s = format!(r#"{{"Id":"x","HostConfig":{{"LogConfig":{{"Type":"{name}"}}}}}}"#);
             let m = parse_docker_inspect(&s);
             let d = m.get("x").expect("driver case");
             assert_eq!(d.log_driver, Some(expected), "driver={name}");

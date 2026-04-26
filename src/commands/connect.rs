@@ -74,6 +74,9 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     } else {
         println!("  socket: (delegated to user's existing ControlMaster)");
     }
-    println!("NEXT:    inspect connections    inspect disconnect {}", resolved.name);
+    println!(
+        "NEXT:    inspect connections    inspect disconnect {}",
+        resolved.name
+    );
     Ok(ExitKind::Success)
 }

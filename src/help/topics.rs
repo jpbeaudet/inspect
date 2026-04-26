@@ -20,7 +20,7 @@ pub struct Topic {
     pub body: Option<&'static str>,
 }
 
-/// The canonical topic order — must match [`INSPECT_HELP_BIBLE.md`] §2.1.
+/// The canonical topic order — must match [`archives/INSPECT_HELP_BIBLE.md`] §2.1.
 /// The index page renders topics in this exact order.
 pub const TOPICS: &[Topic] = &[
     Topic {
@@ -134,68 +134,60 @@ pub fn verbose_body(id: &str) -> Option<&'static str> {
 /// listed; the test suite guards that invariant.
 pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     // Read verbs — the selector + format + worked-examples cluster.
-    ("status",          &["selectors", "formats", "examples"]),
-    ("health",          &["selectors", "formats", "examples"]),
-    ("logs",            &["selectors", "formats", "examples"]),
-    ("grep",            &["selectors", "formats", "examples"]),
-    ("cat",             &["selectors", "formats", "examples"]),
-    ("ls",              &["selectors", "formats", "examples"]),
-    ("find",            &["selectors", "formats", "examples"]),
-    ("ps",              &["selectors", "formats", "examples"]),
-    ("volumes",         &["selectors", "formats", "examples"]),
-    ("images",          &["selectors", "formats", "examples"]),
-    ("network",         &["selectors", "formats", "examples"]),
-    ("ports",           &["selectors", "formats", "examples"]),
-    ("resolve",         &["selectors", "aliases", "examples"]),
-
+    ("status", &["selectors", "formats", "examples"]),
+    ("health", &["selectors", "formats", "examples"]),
+    ("logs", &["selectors", "formats", "examples"]),
+    ("grep", &["selectors", "formats", "examples"]),
+    ("cat", &["selectors", "formats", "examples"]),
+    ("ls", &["selectors", "formats", "examples"]),
+    ("find", &["selectors", "formats", "examples"]),
+    ("ps", &["selectors", "formats", "examples"]),
+    ("volumes", &["selectors", "formats", "examples"]),
+    ("images", &["selectors", "formats", "examples"]),
+    ("network", &["selectors", "formats", "examples"]),
+    ("ports", &["selectors", "formats", "examples"]),
+    ("resolve", &["selectors", "aliases", "examples"]),
     // Search.
-    ("search",          &["search", "selectors", "aliases", "formats"]),
-
+    ("search", &["search", "selectors", "aliases", "formats"]),
     // Write verbs — every one carries the safety + fleet cross-link.
-    ("restart",         &["write", "safety", "fleet"]),
-    ("stop",            &["write", "safety", "fleet"]),
-    ("start",           &["write", "safety", "fleet"]),
-    ("reload",          &["write", "safety", "fleet"]),
-    ("cp",              &["write", "safety", "fleet"]),
-    ("edit",            &["write", "safety", "fleet"]),
-    ("rm",              &["write", "safety", "fleet"]),
-    ("mkdir",           &["write", "safety", "fleet"]),
-    ("touch",           &["write", "safety", "fleet"]),
-    ("chmod",           &["write", "safety", "fleet"]),
-    ("chown",           &["write", "safety", "fleet"]),
-    ("exec",            &["write", "safety", "fleet"]),
-
+    ("restart", &["write", "safety", "fleet"]),
+    ("stop", &["write", "safety", "fleet"]),
+    ("start", &["write", "safety", "fleet"]),
+    ("reload", &["write", "safety", "fleet"]),
+    ("cp", &["write", "safety", "fleet"]),
+    ("edit", &["write", "safety", "fleet"]),
+    ("rm", &["write", "safety", "fleet"]),
+    ("mkdir", &["write", "safety", "fleet"]),
+    ("touch", &["write", "safety", "fleet"]),
+    ("chmod", &["write", "safety", "fleet"]),
+    ("chown", &["write", "safety", "fleet"]),
+    ("exec", &["write", "safety", "fleet"]),
     // Audit + revert — the safety pair.
-    ("audit",           &["safety", "write"]),
-    ("revert",          &["safety", "write"]),
-
+    ("audit", &["safety", "write"]),
+    ("revert", &["safety", "write"]),
     // Fleet orchestrator.
-    ("fleet",           &["fleet", "write", "selectors"]),
-
+    ("fleet", &["fleet", "write", "selectors"]),
     // Diagnostic recipes.
-    ("why",             &["recipes", "examples"]),
-    ("connectivity",    &["recipes", "examples"]),
-    ("recipe",          &["recipes", "examples"]),
-
+    ("why", &["recipes", "examples"]),
+    ("connectivity", &["recipes", "examples"]),
+    ("recipe", &["recipes", "examples"]),
     // Setup / discovery / ssh lifecycle.
-    ("add",             &["discovery", "ssh", "quickstart"]),
-    ("list",            &["discovery", "ssh", "quickstart"]),
-    ("remove",          &["discovery", "ssh", "quickstart"]),
-    ("show",            &["discovery", "ssh", "quickstart"]),
-    ("test",            &["discovery", "ssh", "quickstart"]),
-    ("setup",           &["discovery", "ssh", "quickstart"]),
-    ("discover",        &["discovery", "ssh", "quickstart"]),
-    ("profile",         &["discovery", "ssh", "quickstart"]),
-    ("connect",         &["ssh", "discovery", "quickstart"]),
-    ("disconnect",      &["ssh", "discovery"]),
-    ("connections",     &["ssh", "discovery"]),
-    ("disconnect-all",  &["ssh", "discovery"]),
-
+    ("add", &["discovery", "ssh", "quickstart"]),
+    ("list", &["discovery", "ssh", "quickstart"]),
+    ("remove", &["discovery", "ssh", "quickstart"]),
+    ("show", &["discovery", "ssh", "quickstart"]),
+    ("test", &["discovery", "ssh", "quickstart"]),
+    ("setup", &["discovery", "ssh", "quickstart"]),
+    ("discover", &["discovery", "ssh", "quickstart"]),
+    ("profile", &["discovery", "ssh", "quickstart"]),
+    ("connect", &["ssh", "discovery", "quickstart"]),
+    ("disconnect", &["ssh", "discovery"]),
+    ("connections", &["ssh", "discovery"]),
+    ("disconnect-all", &["ssh", "discovery"]),
     // Aliases.
-    ("alias",           &["aliases", "selectors", "search"]),
-
+    ("alias", &["aliases", "selectors", "search"]),
     // Help is a verb too: it cross-links the user back to the index.
-    ("help",            &["quickstart", "examples"]),
+    ("help", &["quickstart", "examples"]),
 ];
 
 /// Look up the topics linked to a verb. Returns the empty slice if the
@@ -234,10 +226,7 @@ pub fn see_also_line(verb: &str) -> String {
     if topics.is_empty() {
         return String::new();
     }
-    let parts: Vec<String> = topics
-        .iter()
-        .map(|t| format!("inspect help {t}"))
-        .collect();
+    let parts: Vec<String> = topics.iter().map(|t| format!("inspect help {t}")).collect();
     format!("See also: {}", parts.join(", "))
 }
 
@@ -258,9 +247,7 @@ pub(crate) fn edit_distance(a: &str, b: &str, max: usize) -> usize {
         let mut row_min = curr[0];
         for (j, cb) in b.iter().enumerate() {
             let cost = if ca.eq_ignore_ascii_case(cb) { 0 } else { 1 };
-            curr[j + 1] = (curr[j] + 1)
-                .min(prev[j + 1] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
             row_min = row_min.min(curr[j + 1]);
         }
         if row_min > max {

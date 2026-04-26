@@ -26,7 +26,8 @@ pub enum SelectorParseError {
         "alias '@{name}' expansion would loop or chain (alias '{target}' references another alias); \
          alias chaining is not supported in v1"
     )]
-    #[allow(dead_code)] // v2: parameterized-aliases — variant is constructed once chained alias resolution lands.
+    #[allow(dead_code)]
+    // v2: parameterized-aliases — variant is constructed once chained alias resolution lands.
     AliasChain { name: String, target: String },
 
     #[error("server portion of selector '{0}' is empty")]
@@ -71,11 +72,10 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
     // the FIRST colon that is OUTSIDE any regex `/.../` for service/path.
 
     // 1) server/service split: first slash from the start.
-    let (server_str, after_slash): (&str, Option<&str>) =
-        match trimmed.find('/') {
-            Some(i) => (&trimmed[..i], Some(&trimmed[i + 1..])),
-            None => (trimmed, None),
-        };
+    let (server_str, after_slash): (&str, Option<&str>) = match trimmed.find('/') {
+        Some(i) => (&trimmed[..i], Some(&trimmed[i + 1..])),
+        None => (trimmed, None),
+    };
     if server_str.is_empty() {
         return Err(SelectorParseError::EmptyServer(trimmed.to_string()));
     }
@@ -187,7 +187,9 @@ fn parse_service(s: &str) -> Result<ServiceSpec, SelectorParseError> {
         let body = rest
             .strip_suffix('/')
             .ok_or_else(|| SelectorParseError::UnterminatedRegex(s.to_string()))?;
-        return Ok(ServiceSpec::Atoms(vec![ServiceAtom::Regex(body.to_string())]));
+        return Ok(ServiceSpec::Atoms(vec![ServiceAtom::Regex(
+            body.to_string(),
+        )]));
     }
     let mut atoms = Vec::new();
     for raw in s.split(',') {

@@ -98,16 +98,40 @@ impl FilterOp {
 pub enum Stage {
     Json,
     Logfmt,
-    Pattern { template: String, span: Span },
-    Regexp { pattern: String, span: Span },
-    LineFormat { template: String, span: Span },
-    LabelFormat { assignments: Vec<LabelAssign>, span: Span },
-    Drop { labels: Vec<String>, span: Span },
-    Keep { labels: Vec<String>, span: Span },
+    Pattern {
+        template: String,
+        span: Span,
+    },
+    Regexp {
+        pattern: String,
+        span: Span,
+    },
+    LineFormat {
+        template: String,
+        span: Span,
+    },
+    LabelFormat {
+        assignments: Vec<LabelAssign>,
+        span: Span,
+    },
+    Drop {
+        labels: Vec<String>,
+        span: Span,
+    },
+    Keep {
+        labels: Vec<String>,
+        span: Span,
+    },
     /// `| <field> <op> <value>` parsed-field filter, may be a boolean tree.
-    FieldFilter { expr: FieldExpr, span: Span },
+    FieldFilter {
+        expr: FieldExpr,
+        span: Span,
+    },
     /// `| map { <log_query> }`
-    Map { sub: Box<LogQuery>, span: Span },
+    Map {
+        sub: Box<LogQuery>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

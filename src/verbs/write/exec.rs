@@ -9,8 +9,8 @@ use anyhow::Result;
 
 use crate::cli::ExecArgs;
 use crate::error::ExitKind;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::safety::gate::ConfirmResult;
+use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -48,10 +48,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     }
     if !gate.should_apply() {
         let mut r = Renderer::new();
-        r.summary(format!(
-            "DRY RUN. Would exec on {} target(s):",
-            steps.len()
-        ));
+        r.summary(format!("DRY RUN. Would exec on {} target(s):", steps.len()));
         for s in &steps {
             let svc = s.service().map(|x| format!("/{x}")).unwrap_or_default();
             r.data_line(format!("{}{svc}: {user_cmd}", s.ns.namespace));
@@ -140,7 +137,11 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         .summary(format!("exec: {ok} ok, {bad} failed"))
         .next("inspect audit ls");
     renderer.print();
-    Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 /// Field pitfall §3.2: detect docker's runtime-spec error for "no

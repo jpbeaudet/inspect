@@ -269,7 +269,15 @@ fn exec_apply_runs_command() {
     let sb = Sandbox::new(mock);
     standard_setup(&sb);
     sb.cmd()
-        .args(["exec", "arte/pulse", "--apply", "--allow-exec", "--", "echo", "hi"])
+        .args([
+            "exec",
+            "arte/pulse",
+            "--apply",
+            "--allow-exec",
+            "--",
+            "echo",
+            "hi",
+        ])
         .assert()
         .success();
 }
@@ -330,7 +338,12 @@ fn edit_apply_writes_and_audits() {
     let sb = Sandbox::new(mock);
     standard_setup(&sb);
     sb.cmd()
-        .args(["edit", "arte/pulse:/etc/app.conf", "s/info/debug/", "--apply"])
+        .args([
+            "edit",
+            "arte/pulse:/etc/app.conf",
+            "s/info/debug/",
+            "--apply",
+        ])
         .assert()
         .success()
         .stdout(contains("edited"));

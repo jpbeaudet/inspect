@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use crate::cli::{AuditArgs, AuditCommand};
 use crate::error::ExitKind;
-use crate::safety::{AuditStore, SnapshotStore};
 use crate::safety::snapshot::sha256_hex;
+use crate::safety::{AuditStore, SnapshotStore};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 
 pub fn run(args: AuditArgs) -> Result<ExitKind> {
@@ -19,7 +19,11 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     }
 }
 
-fn list(entries: &[crate::safety::AuditEntry], json: bool, limit: Option<usize>) -> Result<ExitKind> {
+fn list(
+    entries: &[crate::safety::AuditEntry],
+    json: bool,
+    limit: Option<usize>,
+) -> Result<ExitKind> {
     let n = entries.len();
     // Newest first.
     let mut sorted: Vec<_> = entries.iter().collect();
@@ -54,7 +58,11 @@ fn list(entries: &[crate::safety::AuditEntry], json: bool, limit: Option<usize>)
             e.ts.format("%Y-%m-%d %H:%M:%S"),
             e.verb,
             e.selector,
-            if e.diff_summary.is_empty() { "" } else { &e.diff_summary },
+            if e.diff_summary.is_empty() {
+                ""
+            } else {
+                &e.diff_summary
+            },
         ));
     }
     r.next("inspect audit show <id>");

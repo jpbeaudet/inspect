@@ -11,9 +11,7 @@
 
 use std::time::Duration;
 
-use crate::profile::cache::{
-    clear_drift_marker, load_profile, write_drift_marker,
-};
+use crate::profile::cache::{clear_drift_marker, load_profile, write_drift_marker};
 use crate::profile::schema::Profile;
 use crate::ssh::{run_remote, RunOpts, SshTarget};
 
@@ -96,4 +94,3 @@ fn baseline_fingerprint(p: &Profile) -> String {
     let bytes = h.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-

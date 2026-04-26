@@ -24,7 +24,10 @@ impl Reader for StateReader {
         step: &ReadStep<'_>,
         _opts: &ReadOpts,
     ) -> Result<Vec<Record>> {
-        let kind = step.service_def.map(|s| s.kind).unwrap_or(ServiceKind::Container);
+        let kind = step
+            .service_def
+            .map(|s| s.kind)
+            .unwrap_or(ServiceKind::Container);
         let name = step.service.unwrap_or("_");
 
         let (cmd, parser): (String, StateLineParser) = match (name, kind) {

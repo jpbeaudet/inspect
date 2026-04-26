@@ -62,11 +62,7 @@ fn write_servers_toml(home: &std::path::Path, names: &[&str]) {
     }
 }
 
-fn write_profile(
-    home: &std::path::Path,
-    ns: &str,
-    services: &[(&str, &str, &str)],
-) {
+fn write_profile(home: &std::path::Path, ns: &str, services: &[(&str, &str, &str)]) {
     let dir = home.join("profiles");
     std::fs::create_dir_all(&dir).unwrap();
     #[cfg(unix)]
@@ -98,7 +94,14 @@ fn ps_sandbox() -> Sandbox {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "luminary/pulse:1", "ok"), ("atlas", "luminary/atlas:1", "ok")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[
+            ("pulse", "luminary/pulse:1", "ok"),
+            ("atlas", "luminary/atlas:1", "ok"),
+        ],
+    );
     sb
 }
 
@@ -109,7 +112,11 @@ fn ps_sandbox() -> Sandbox {
 #[test]
 fn json_and_csv_are_mutually_exclusive() {
     let sb = ps_sandbox();
-    let out = sb.cmd().args(["ps", "arte", "--json", "--csv"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["ps", "arte", "--json", "--csv"])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "expected non-zero exit");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--json"), "stderr missing --json: {stderr}");
@@ -157,10 +164,19 @@ fn csv_emits_header_and_rows_no_envelope() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(!stdout.contains("SUMMARY:"), "csv must suppress SUMMARY: {stdout}");
-    assert!(!stdout.contains("NEXT:"), "csv must suppress NEXT: {stdout}");
+    assert!(
+        !stdout.contains("SUMMARY:"),
+        "csv must suppress SUMMARY: {stdout}"
+    );
+    assert!(
+        !stdout.contains("NEXT:"),
+        "csv must suppress NEXT: {stdout}"
+    );
     let header = lines.first().expect("csv must have a header");
-    assert!(header.starts_with("_source,_medium,server,service"), "header order: {header}");
+    assert!(
+        header.starts_with("_source,_medium,server,service"),
+        "header order: {header}"
+    );
     let body = lines[1..].join("\n");
     assert!(body.contains("pulse"), "csv missing pulse: {stdout}");
     assert!(body.contains("atlas"), "csv missing atlas: {stdout}");
@@ -177,7 +193,10 @@ fn csv_quotes_fields_with_commas() {
     write_profile(sb.home(), "arte", &[("pulse", "a", "ok")]);
     let out = sb.cmd().args(["ps", "arte", "--csv"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("\"Up 3h, healthy\""), "comma not quoted: {stdout}");
+    assert!(
+        stdout.contains("\"Up 3h, healthy\""),
+        "comma not quoted: {stdout}"
+    );
 }
 
 #[test]
@@ -187,7 +206,10 @@ fn tsv_uses_tabs_no_quoting() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let header = stdout.lines().next().unwrap();
     assert!(header.contains('\t'), "tsv header has no tabs: {header:?}");
-    assert!(!header.contains(','), "tsv must not contain commas in header: {header:?}");
+    assert!(
+        !header.contains(','),
+        "tsv must not contain commas in header: {header:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +222,10 @@ fn yaml_emits_summary_comment_and_documents() {
     let out = sb.cmd().args(["ps", "arte", "--yaml"]).output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("# summary:"), "yaml must lead with comment: {stdout}");
+    assert!(
+        stdout.starts_with("# summary:"),
+        "yaml must lead with comment: {stdout}"
+    );
     assert!(stdout.contains("pulse"), "yaml missing pulse: {stdout}");
     // serde_yaml produces a list when the input is an array.
     assert!(stdout.contains("- "), "yaml list marker missing: {stdout}");
@@ -215,7 +240,10 @@ fn md_emits_pipe_table() {
     let sb = ps_sandbox();
     let out = sb.cmd().args(["ps", "arte", "--md"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("SUMMARY:"), "md must keep SUMMARY: {stdout}");
+    assert!(
+        stdout.contains("SUMMARY:"),
+        "md must keep SUMMARY: {stdout}"
+    );
     assert!(stdout.contains("| _source"), "md table header: {stdout}");
     assert!(stdout.contains("| --- |"), "md separator row: {stdout}");
     assert!(stdout.contains("pulse"), "md missing pulse: {stdout}");
@@ -233,8 +261,14 @@ fn table_is_plain_ascii_with_envelope() {
     assert!(stdout.contains("SUMMARY:"));
     assert!(stdout.contains("pulse"));
     // No box-drawing or ANSI escapes.
-    assert!(!stdout.contains("\u{2500}"), "must not contain box-drawing: {stdout}");
-    assert!(!stdout.contains('\x1b'), "must not contain ANSI escapes: {stdout}");
+    assert!(
+        !stdout.contains("\u{2500}"),
+        "must not contain box-drawing: {stdout}"
+    );
+    assert!(
+        !stdout.contains('\x1b'),
+        "must not contain ANSI escapes: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +320,10 @@ fn format_template_conditional() {
     assert!(stdout.contains("HOT: pulse"), "conditional miss: {stdout}");
     // The atlas row evaluates to empty.
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.iter().any(|l| l.is_empty()), "atlas should produce empty line: {stdout}");
+    assert!(
+        lines.iter().any(|l| l.is_empty()),
+        "atlas should produce empty line: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +335,14 @@ fn raw_strips_envelope_and_emits_scalars() {
     let sb = ps_sandbox();
     let out = sb.cmd().args(["ps", "arte", "--raw"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("SUMMARY:"), "raw must suppress SUMMARY: {stdout}");
-    assert!(!stdout.contains("NEXT:"), "raw must suppress NEXT: {stdout}");
+    assert!(
+        !stdout.contains("SUMMARY:"),
+        "raw must suppress SUMMARY: {stdout}"
+    );
+    assert!(
+        !stdout.contains("NEXT:"),
+        "raw must suppress NEXT: {stdout}"
+    );
     // Raw should pick the most meaningful scalar — service name takes
     // priority once present, so we should see both names.
     assert!(stdout.contains("pulse"), "raw missing pulse: {stdout}");
@@ -336,7 +379,11 @@ fn json_remains_line_delimited_envelopes() {
 #[test]
 fn no_color_flag_is_accepted_globally() {
     let sb = ps_sandbox();
-    let out = sb.cmd().args(["ps", "arte", "--no-color"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["ps", "arte", "--no-color"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("pulse"));
@@ -353,14 +400,28 @@ fn status_csv_emits_services_table() {
     ]);
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("pulse", "p:1", "ok"), ("atlas", "a:1", "unhealthy")]);
-    let out = sb.cmd().args(["status", "arte/*", "--csv"]).output().unwrap();
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("pulse", "p:1", "ok"), ("atlas", "a:1", "unhealthy")],
+    );
+    let out = sb
+        .cmd()
+        .args(["status", "arte/*", "--csv"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("SUMMARY:"), "csv must suppress envelope: {stdout}");
+    assert!(
+        !stdout.contains("SUMMARY:"),
+        "csv must suppress envelope: {stdout}"
+    );
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     let header = lines.first().expect("csv must have a header");
-    assert!(header.contains("name") || header.contains("service"), "header: {header}");
+    assert!(
+        header.contains("name") || header.contains("service"),
+        "header: {header}"
+    );
     let body = lines[1..].join("\n");
     assert!(body.contains("pulse"));
     assert!(body.contains("atlas"));
@@ -374,7 +435,11 @@ fn status_yaml_keeps_summary_as_comment() {
     let sb = Sandbox::new(mock);
     write_servers_toml(sb.home(), &["arte"]);
     write_profile(sb.home(), "arte", &[("pulse", "p:1", "ok")]);
-    let out = sb.cmd().args(["status", "arte/*", "--yaml"]).output().unwrap();
+    let out = sb
+        .cmd()
+        .args(["status", "arte/*", "--yaml"])
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("# summary:"), "yaml lead-in: {stdout}");
     assert!(stdout.contains("pulse"));

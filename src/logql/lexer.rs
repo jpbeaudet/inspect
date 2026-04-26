@@ -7,27 +7,27 @@ use super::error::ParseError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // structural
-    LBrace,    // {
-    RBrace,    // }
-    LParen,    // (
-    RParen,    // )
-    LBracket,  // [
-    RBracket,  // ]
+    LBrace,   // {
+    RBrace,   // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
     Comma,
-    Pipe,      // bare `|` (introduces a stage)
+    Pipe, // bare `|` (introduces a stage)
     // label/field comparison ops (also reused inside selectors)
-    Eq,        // =
-    Ne,        // !=
-    Re,        // =~
-    Nre,       // !~
-    EqEq,      // ==
-    Gt,        // >
-    Ge,        // >=
-    Lt,        // <
-    Le,        // <=
+    Eq,   // =
+    Ne,   // !=
+    Re,   // =~
+    Nre,  // !~
+    EqEq, // ==
+    Gt,   // >
+    Ge,   // >=
+    Lt,   // <
+    Le,   // <=
     // line filter ops
-    PipeEq,    // |=
-    PipeRe,    // |~
+    PipeEq, // |=
+    PipeRe, // |~
     // values
     String(String),
     Ident(String),
@@ -107,13 +107,41 @@ pub fn tokenize(src: &str) -> Result<Vec<Spanned>, ParseError> {
         let start = i;
         // single + multi-char punctuation
         match c {
-            b'{' => { out.push(spanned(Token::LBrace, start..start + 1)); i += 1; continue; }
-            b'}' => { out.push(spanned(Token::RBrace, start..start + 1)); i += 1; continue; }
-            b'(' => { out.push(spanned(Token::LParen, start..start + 1)); i += 1; continue; }
-            b')' => { out.push(spanned(Token::RParen, start..start + 1)); i += 1; continue; }
-            b'[' => { out.push(spanned(Token::LBracket, start..start + 1)); i += 1; continue; }
-            b']' => { out.push(spanned(Token::RBracket, start..start + 1)); i += 1; continue; }
-            b',' => { out.push(spanned(Token::Comma, start..start + 1)); i += 1; continue; }
+            b'{' => {
+                out.push(spanned(Token::LBrace, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b'}' => {
+                out.push(spanned(Token::RBrace, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                out.push(spanned(Token::LParen, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b')' => {
+                out.push(spanned(Token::RParen, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                out.push(spanned(Token::LBracket, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b']' => {
+                out.push(spanned(Token::RBracket, start..start + 1));
+                i += 1;
+                continue;
+            }
+            b',' => {
+                out.push(spanned(Token::Comma, start..start + 1));
+                i += 1;
+                continue;
+            }
             b'=' => {
                 if peek(bytes, i + 1) == Some(b'~') {
                     out.push(spanned(Token::Re, start..start + 2));
@@ -273,9 +301,8 @@ fn lex_string(b: &[u8], start: usize) -> Result<(String, usize), ParseError> {
         match b[i] {
             b'"' => {
                 // Whole literal is escape-free → cheap slice.
-                let s = std::str::from_utf8(&b[body_start..i]).map_err(|_| {
-                    ParseError::new("string contains invalid UTF-8", body_start..i)
-                })?;
+                let s = std::str::from_utf8(&b[body_start..i])
+                    .map_err(|_| ParseError::new("string contains invalid UTF-8", body_start..i))?;
                 return Ok((s.to_string(), i + 1));
             }
             b'\\' => break, // fall through to slow path
@@ -292,19 +319,15 @@ fn lex_string(b: &[u8], start: usize) -> Result<(String, usize), ParseError> {
     // Slow path: copy the escape-free prefix in one shot, then process
     // escapes byte-by-byte.
     let mut out = String::with_capacity((b.len() - body_start).min(64));
-    let prefix = std::str::from_utf8(&b[body_start..i]).map_err(|_| {
-        ParseError::new("string contains invalid UTF-8", body_start..i)
-    })?;
+    let prefix = std::str::from_utf8(&b[body_start..i])
+        .map_err(|_| ParseError::new("string contains invalid UTF-8", body_start..i))?;
     out.push_str(prefix);
     while i < b.len() {
         match b[i] {
             b'"' => return Ok((out, i + 1)),
             b'\\' => {
                 if i + 1 >= b.len() {
-                    return Err(ParseError::new(
-                        "unterminated escape sequence",
-                        i..i + 1,
-                    ));
+                    return Err(ParseError::new("unterminated escape sequence", i..i + 1));
                 }
                 match b[i + 1] {
                     b'"' => out.push('"'),
@@ -328,9 +351,8 @@ fn lex_string(b: &[u8], start: usize) -> Result<(String, usize), ParseError> {
                 while i < b.len() && b[i] != b'"' && b[i] != b'\\' {
                     i += 1;
                 }
-                let run = std::str::from_utf8(&b[run_start..i]).map_err(|_| {
-                    ParseError::new("string contains invalid UTF-8", run_start..i)
-                })?;
+                let run = std::str::from_utf8(&b[run_start..i])
+                    .map_err(|_| ParseError::new("string contains invalid UTF-8", run_start..i))?;
                 out.push_str(run);
             }
         }

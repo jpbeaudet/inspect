@@ -1,6 +1,6 @@
 //! `inspect help` system.
 //!
-//! See `INSPECT_HELP_BIBLE.md` and `INSPECT_HELP_IMPLEMENTATION_PLAN.md`.
+//! See `archives/INSPECT_HELP_BIBLE.md` and `archives/INSPECT_HELP_IMPLEMENTATION_PLAN.md`.
 //!
 //! HP-0 ships:
 //! * the topic registry (with one fully authored topic, `quickstart`),
@@ -12,10 +12,10 @@
 //! the JSON contract, the verbose sidecars, and the per-verb cross
 //! links.
 
+pub mod json;
 pub mod render;
 pub mod search;
 pub mod topics;
-pub mod json;
 
 pub use topics::{find, suggest, verbose_body, Topic, TOPICS};
 
@@ -110,7 +110,7 @@ pub fn topic_page(t: &Topic) -> String {
     s.push_str(t.summary);
     s.push_str("\n\n");
     s.push_str("This topic is reserved in the help registry but its body has\n");
-    s.push_str("not yet been authored. See INSPECT_HELP_BIBLE.md §3 for the\n");
+    s.push_str("not yet been authored. See archives/INSPECT_HELP_BIBLE.md §3 for the\n");
     s.push_str("intended content; HP-1 ships the prose.\n\n");
     s.push_str("SEE ALSO\n");
     s.push_str("  inspect help              the topic and command index\n");
@@ -175,7 +175,9 @@ mod tests {
     #[test]
     fn index_lists_command_groups() {
         let page = index_page();
-        for marker in ["Read:", "Write:", "Diag:", "Search:", "Fleet:", "Setup:", "Alias:", "Audit:"] {
+        for marker in [
+            "Read:", "Write:", "Diag:", "Search:", "Fleet:", "Setup:", "Alias:", "Audit:",
+        ] {
             assert!(page.contains(marker), "index missing group {marker:?}");
         }
     }
@@ -302,8 +304,7 @@ mod tests {
                 '#' if !in_single && !in_double => {
                     // Comment must be preceded by whitespace or be at
                     // start; otherwise it's part of an arg (e.g. URL).
-                    let preceded_by_ws =
-                        i == 0 || (bytes[i - 1] as char).is_whitespace();
+                    let preceded_by_ws = i == 0 || (bytes[i - 1] as char).is_whitespace();
                     if preceded_by_ws {
                         return line[..i].trim_end();
                     }
@@ -356,10 +357,7 @@ mod tests {
                 let argv = match shlex_split(&line) {
                     Some(v) => v,
                     None => {
-                        failures.push(format!(
-                            "[{:>10}] shlex split failed: {line}",
-                            t.id
-                        ));
+                        failures.push(format!("[{:>10}] shlex split failed: {line}", t.id));
                         continue;
                     }
                 };

@@ -26,8 +26,7 @@ impl SnapshotStore {
         let _ = set_dir_mode_0700(&audit);
         let dir = snapshots_dir();
         if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let _ = set_dir_mode_0700(&dir);
         Ok(Self { dir })

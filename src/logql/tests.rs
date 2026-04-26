@@ -29,10 +29,7 @@ fn json_stage_then_field_filter() {
     let q = ok(r#"{server="arte", source="logs"} | json | status >= 500"#);
     let Query::Log(l) = q else { unreachable!() };
     assert_eq!(l.pipeline.len(), 2);
-    assert!(matches!(
-        l.pipeline[0],
-        PipelineOp::Stage(Stage::Json)
-    ));
+    assert!(matches!(l.pipeline[0], PipelineOp::Stage(Stage::Json)));
     assert!(matches!(
         l.pipeline[1],
         PipelineOp::Stage(Stage::FieldFilter { .. })
@@ -47,9 +44,8 @@ fn count_over_time_metric() {
 
 #[test]
 fn topk_with_grouping() {
-    let q = ok(
-        r#"topk(5, sum by (service) (rate({server="arte", source="logs"} |= "error" [1h])))"#,
-    );
+    let q =
+        ok(r#"topk(5, sum by (service) (rate({server="arte", source="logs"} |= "error" [1h])))"#);
     let Query::Metric(MetricQuery::Vector(v)) = q else {
         panic!("expected vector aggregation")
     };
@@ -109,8 +105,14 @@ fn label_format_and_drop() {
         r#"{server="arte", source="logs"} | json | label_format svc="{{.service}}" | drop tmp, debug"#,
     );
     let Query::Log(l) = q else { unreachable!() };
-    assert!(matches!(l.pipeline[1], PipelineOp::Stage(Stage::LabelFormat { .. })));
-    assert!(matches!(l.pipeline[2], PipelineOp::Stage(Stage::Drop { .. })));
+    assert!(matches!(
+        l.pipeline[1],
+        PipelineOp::Stage(Stage::LabelFormat { .. })
+    ));
+    assert!(matches!(
+        l.pipeline[2],
+        PipelineOp::Stage(Stage::Drop { .. })
+    ));
 }
 
 #[test]
@@ -197,7 +199,11 @@ fn diagnostic_uses_friendly_token_names_not_debug() {
     // not the debug form `RBrace`.
     let e = err(r#"{server=}"#);
     assert!(e.message.contains("`}`"), "got: {}", e.message);
-    assert!(!e.message.contains("RBrace"), "leaked Debug repr: {}", e.message);
+    assert!(
+        !e.message.contains("RBrace"),
+        "leaked Debug repr: {}",
+        e.message
+    );
 }
 
 #[test]
@@ -205,14 +211,20 @@ fn diagnostic_includes_actionable_hint() {
     let e = err(r#"{server=}"#);
     assert!(e.hint.is_some(), "expected a hint, got none");
     let h = e.hint.unwrap();
-    assert!(h.contains("double-quoted") || h.contains("\""), "hint not actionable: {h}");
+    assert!(
+        h.contains("double-quoted") || h.contains("\""),
+        "hint not actionable: {h}"
+    );
 }
 
 #[test]
 fn diagnostic_for_bad_duration_suggests_format() {
     let e = err(r#"count_over_time({source="logs"}[5xx])"#);
     let h = e.hint.expect("expected a hint");
-    assert!(h.contains("5m") || h.contains("30s"), "hint should suggest duration format: {h}");
+    assert!(
+        h.contains("5m") || h.contains("30s"),
+        "hint should suggest duration format: {h}"
+    );
 }
 
 #[test]
@@ -227,7 +239,10 @@ fn diagnostic_for_topk_non_integer_suggests_form() {
 fn diagnostic_for_missing_open_brace_suggests_selector_form() {
     let e = err(r#"foobar"#);
     let h = e.hint.expect("hint");
-    assert!(h.contains("{") && h.contains("source"), "hint should sketch selector: {h}");
+    assert!(
+        h.contains("{") && h.contains("source"),
+        "hint should sketch selector: {h}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +313,11 @@ fn negative_metric_of_metric_rejected() {
 #[test]
 fn negative_map_without_braces() {
     let e = err(r#"{source="logs"} | map "x""#);
-    assert!(e.message.contains("{") || e.message.contains("expected"), "got: {}", e.message);
+    assert!(
+        e.message.contains("{") || e.message.contains("expected"),
+        "got: {}",
+        e.message
+    );
 }
 
 #[test]

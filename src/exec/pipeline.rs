@@ -64,11 +64,7 @@ fn apply_line_filter(f: &Filter, recs: Vec<Record>) -> Result<Vec<Record>> {
         .collect())
 }
 
-fn apply_stage(
-    ctx: &ExecCtx<'_>,
-    stage: &Stage,
-    mut recs: Vec<Record>,
-) -> Result<Vec<Record>> {
+fn apply_stage(ctx: &ExecCtx<'_>, stage: &Stage, mut recs: Vec<Record>) -> Result<Vec<Record>> {
     match stage {
         Stage::Json => {
             for r in &mut recs {

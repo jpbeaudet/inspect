@@ -61,7 +61,9 @@ pub enum AliasError {
     #[error("alias '@{0}' is not defined; run 'inspect alias list' to see available aliases")]
     Unknown(String),
 
-    #[error("alias '@{name}' references another alias ('@{target}'); chaining is not supported in v1")]
+    #[error(
+        "alias '@{name}' references another alias ('@{target}'); chaining is not supported in v1"
+    )]
     Chain { name: String, target: String },
 
     #[error("alias name '{0}' is invalid: must be [a-z0-9][a-z0-9_-]{{0,62}}")]
@@ -140,20 +142,19 @@ pub fn save(file: &AliasFile) -> Result<(), AliasError> {
         source: e,
     })?;
     use std::io::Write;
-    tmp.write_all(body.as_bytes()).map_err(|e| ConfigError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    tmp.flush().map_err(|e| ConfigError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    tmp.as_file()
-        .sync_all()
+    tmp.write_all(body.as_bytes())
         .map_err(|e| ConfigError::Io {
             path: path.display().to_string(),
             source: e,
         })?;
+    tmp.flush().map_err(|e| ConfigError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    tmp.as_file().sync_all().map_err(|e| ConfigError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
     let tp = tmp.into_temp_path();
     tp.persist(&path).map_err(|e| ConfigError::Io {
         path: path.display().to_string(),
@@ -164,7 +165,12 @@ pub fn save(file: &AliasFile) -> Result<(), AliasError> {
 }
 
 /// Add or replace an alias.
-pub fn add(name: &str, body: &str, description: Option<String>, force: bool) -> Result<(), AliasError> {
+pub fn add(
+    name: &str,
+    body: &str,
+    description: Option<String>,
+    force: bool,
+) -> Result<(), AliasError> {
     validate_alias_name(name)?;
     if body.trim().is_empty() {
         return Err(AliasError::BadBody {
@@ -227,10 +233,7 @@ pub fn get(name: &str) -> Result<Option<AliasEntry>, AliasError> {
 
 /// List aliases sorted by name.
 pub fn list() -> Result<Vec<(String, AliasEntry)>, AliasError> {
-    Ok(load()?
-        .aliases
-        .into_iter()
-        .collect::<Vec<_>>())
+    Ok(load()?.aliases.into_iter().collect::<Vec<_>>())
 }
 
 /// Expand a `@name` token into its body, enforcing the no-chain rule. If

@@ -18,12 +18,12 @@ use base64::Engine as _;
 
 use crate::cli::EditArgs;
 use crate::error::ExitKind;
+use crate::safety::gate::ConfirmResult;
 use crate::safety::{
     diff::{diff_summary, unified_diff},
     snapshot::sha256_hex,
     AuditEntry, AuditStore, Confirm, SafetyGate, SnapshotStore,
 };
-use crate::safety::gate::ConfirmResult;
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -109,8 +109,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Success);
     }
 
-    if let ConfirmResult::Aborted(why) =
-        gate.confirm(Confirm::LargeFanout, work.len(), "Continue?")
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, work.len(), "Continue?")
     {
         eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
@@ -173,7 +172,11 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         .next("inspect audit ls")
         .next("inspect revert <audit-id> to undo");
     renderer.print();
-    Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 struct EditWork {
@@ -247,7 +250,12 @@ fn read_remote(
         None => inner,
     };
     let out = runner
-        .run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(20))
+        .run(
+            &s.ns.namespace,
+            &s.ns.target,
+            &cmd,
+            RunOpts::with_timeout(20),
+        )
         .ok()?;
     if out.ok() {
         Some(out.stdout)

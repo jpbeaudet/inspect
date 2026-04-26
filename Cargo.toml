@@ -6,8 +6,12 @@ rust-version = "1.75"
 description = "Operational debugging CLI for cross-server search and safe hot-fix application"
 license = "Apache-2.0"
 repository = "https://github.com/jpbeaudet/inspect"
+homepage = "https://github.com/jpbeaudet/inspect"
+documentation = "https://github.com/jpbeaudet/inspect"
 readme = "README.md"
-publish = false
+keywords = ["ssh", "docker", "ops", "logs", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["archives/*", "target/*", "tests/*", ".github/*"]
 
 [[bin]]
 name = "inspect"

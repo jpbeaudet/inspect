@@ -90,9 +90,7 @@ pub fn save_profile(profile: &Profile) -> Result<PathBuf> {
     tmp.write_all(yaml.as_bytes())
         .context("writing profile bytes")?;
     tmp.flush().context("flushing profile")?;
-    tmp.as_file()
-        .sync_all()
-        .context("fsync profile tempfile")?;
+    tmp.as_file().sync_all().context("fsync profile tempfile")?;
     let tmp_path = tmp.into_temp_path();
     tmp_path
         .persist(&path)
@@ -105,12 +103,18 @@ pub fn save_profile(profile: &Profile) -> Result<PathBuf> {
 pub fn merge_local_edits(mut incoming: Profile, prev: &Profile) -> Profile {
     if !prev.groups.is_empty() {
         for (k, v) in &prev.groups {
-            incoming.groups.entry(k.clone()).or_insert_with(|| v.clone());
+            incoming
+                .groups
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
     }
     if !prev.aliases.is_empty() {
         for (k, v) in &prev.aliases {
-            incoming.aliases.entry(k.clone()).or_insert_with(|| v.clone());
+            incoming
+                .aliases
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
     }
     if incoming.local_overrides.is_none() {

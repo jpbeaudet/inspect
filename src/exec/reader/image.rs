@@ -17,7 +17,8 @@ impl Reader for ImageReader {
         step: &ReadStep<'_>,
         _opts: &ReadOpts,
     ) -> Result<Vec<Record>> {
-        let cmd = "docker images --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedSince}}'";
+        let cmd =
+            "docker images --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedSince}}'";
         let out = runner.run(step.namespace, step.target, cmd, RunOpts::with_timeout(15))?;
         if !out.ok() {
             return Ok(Vec::new());

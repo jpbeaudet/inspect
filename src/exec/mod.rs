@@ -12,7 +12,6 @@
 //! Phase 8 enhancement (no protocol break — readers will gain
 //! `read_stream`).
 
-
 pub mod cancel;
 pub mod engine;
 pub mod field_filter;
@@ -25,9 +24,9 @@ pub mod pipeline;
 pub mod reader;
 pub mod record;
 
-pub use engine::{execute, ExecOutput};
 #[allow(unused_imports)]
 pub use engine::LogResult;
+pub use engine::{execute, ExecOutput};
 pub use record::Record;
 
 use crate::verbs::runtime::RemoteRunner;

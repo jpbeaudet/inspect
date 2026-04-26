@@ -146,7 +146,10 @@ fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
         }
     }
     println!("NEXT:");
-    println!("  inspect search '{}' --json   (machine-readable)", args.query);
+    println!(
+        "  inspect search '{}' --json   (machine-readable)",
+        args.query
+    );
     if args.tail.is_none() {
         println!("  inspect search '{}' --tail 50", args.query);
     }
@@ -195,13 +198,11 @@ fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
     let server_hint = records
         .iter()
         .find_map(|r| r.label("server").map(|s| s.to_string()));
-    let next: Vec<Value> = crate::verbs::correlation::search_rules(
-        server_hint.as_deref(),
-        &services,
-    )
-    .into_iter()
-    .map(|n| json!({"cmd": n.cmd, "rationale": n.rationale}))
-    .collect();
+    let next: Vec<Value> =
+        crate::verbs::correlation::search_rules(server_hint.as_deref(), &services)
+            .into_iter()
+            .map(|n| json!({"cmd": n.cmd, "rationale": n.rationale}))
+            .collect();
     let env = json!({
         "schema_version": 1,
         "summary": format!("{} record(s)", records.len()),
@@ -236,7 +237,10 @@ fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) 
         println!("  {{{labels}}} = {}", s.value);
     }
     println!("NEXT:");
-    println!("  inspect search '{}' --json   (machine-readable)", args.query);
+    println!(
+        "  inspect search '{}' --json   (machine-readable)",
+        args.query
+    );
 }
 
 fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {

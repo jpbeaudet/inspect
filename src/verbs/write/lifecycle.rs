@@ -11,8 +11,8 @@ use anyhow::Result;
 use crate::cli::LifecycleArgs;
 use crate::error::ExitKind;
 use crate::profile::schema::ServiceKind;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::safety::gate::ConfirmResult;
+use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan, Step};
 use crate::verbs::output::Renderer;
@@ -78,11 +78,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
             steps.len()
         ));
         for s in &steps {
-            r.data_line(format!(
-                "{}/{}",
-                s.ns.namespace,
-                s.service().unwrap_or("?")
-            ));
+            r.data_line(format!("{}/{}", s.ns.namespace, s.service().unwrap_or("?")));
         }
         r.next("Re-run with --apply to execute".to_string());
         r.print();
@@ -104,10 +100,18 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
 
     for s in &steps {
         let svc = s.service().unwrap_or("?");
-        let kind = s.service_def().map(|d| d.kind).unwrap_or(ServiceKind::Container);
+        let kind = s
+            .service_def()
+            .map(|d| d.kind)
+            .unwrap_or(ServiceKind::Container);
         let cmd = build_cmd(act, svc, kind);
         let started = Instant::now();
-        let out = runner.run(&s.ns.namespace, &s.ns.target, &cmd, RunOpts::with_timeout(60))?;
+        let out = runner.run(
+            &s.ns.namespace,
+            &s.ns.target,
+            &cmd,
+            RunOpts::with_timeout(60),
+        )?;
         let dur = started.elapsed().as_millis() as u64;
 
         let mut entry = AuditEntry::new(act.as_str(), &format!("{}/{svc}", s.ns.namespace));
@@ -117,11 +121,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
 
         if out.ok() {
             ok += 1;
-            renderer.data_line(format!(
-                "{}/{svc}: {}",
-                s.ns.namespace,
-                act.past_tense()
-            ));
+            renderer.data_line(format!("{}/{svc}: {}", s.ns.namespace, act.past_tense()));
         } else {
             bad += 1;
             renderer.data_line(format!(
@@ -141,7 +141,11 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         .next("inspect audit ls");
     renderer.print();
 
-    Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 fn build_cmd(act: Action, svc: &str, kind: ServiceKind) -> String {

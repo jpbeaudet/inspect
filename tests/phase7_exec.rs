@@ -130,7 +130,10 @@ fn multi_source_or_mixes_logs_and_file() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let recs = v["data"]["records"].as_array().expect("records");
     assert_eq!(recs.len(), 2, "expected one record per branch: {recs:?}");
-    let mediums: Vec<&str> = recs.iter().map(|r| r["_medium"].as_str().unwrap()).collect();
+    let mediums: Vec<&str> = recs
+        .iter()
+        .map(|r| r["_medium"].as_str().unwrap())
+        .collect();
     assert!(mediums.contains(&"logs"));
     assert!(mediums.contains(&"file"));
 }
@@ -236,7 +239,11 @@ fn count_over_time_returns_metric_samples() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["data"]["kind"], "metric");
     let samples = v["data"]["samples"].as_array().expect("samples");
@@ -265,10 +272,18 @@ fn topk_truncates_to_param() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let samples = v["data"]["samples"].as_array().expect("samples");
-    assert_eq!(samples.len(), 2, "topk(2) must return 2 series; got {samples:?}");
+    assert_eq!(
+        samples.len(),
+        2,
+        "topk(2) must return 2 series; got {samples:?}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -306,19 +321,23 @@ fn discovery_source_returns_profile_services_without_remote_call() {
     let sb = Sandbox::new(mock);
     let out = sb
         .cmd()
-        .args([
-            "search",
-            r#"{server="arte", source="discovery"}"#,
-            "--json",
-        ])
+        .args(["search", r#"{server="arte", source="discovery"}"#, "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let recs = v["data"]["records"].as_array().expect("records");
     let names: Vec<&str> = recs
         .iter()
-        .filter_map(|r| r["fields"]["name"].as_str().or_else(|| r["labels"]["service"].as_str()))
+        .filter_map(|r| {
+            r["fields"]["name"]
+                .as_str()
+                .or_else(|| r["labels"]["service"].as_str())
+        })
         .collect();
     assert!(names.contains(&"pulse"), "missing pulse: {recs:?}");
     assert!(names.contains(&"atlas"), "missing atlas: {recs:?}");

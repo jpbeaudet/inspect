@@ -48,11 +48,7 @@ pub struct AuditEntry {
 impl AuditEntry {
     pub fn new(verb: &str, selector: &str) -> Self {
         let ts = Utc::now();
-        let id = format!(
-            "{}-{:04x}",
-            ts.timestamp_millis(),
-            (rand_u32() & 0xffff)
-        );
+        let id = format!("{}-{:04x}", ts.timestamp_millis(), (rand_u32() & 0xffff));
         Self {
             schema_version: 1,
             id,
@@ -83,8 +79,7 @@ impl AuditStore {
         let _ = ensure_home();
         let dir = audit_dir();
         if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let _ = set_dir_mode_0700(&dir);
         Ok(Self { dir })
@@ -111,10 +106,7 @@ impl AuditStore {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| {
-                    p.is_file()
-                        && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
-                })
+                .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
                 .collect(),
             Err(_) => return Ok(vec![]),
         };
@@ -200,8 +192,7 @@ fn append_locked(path: &Path, line: &str) -> Result<()> {
     let mut buf = String::with_capacity(line.len() + 1);
     buf.push_str(line);
     buf.push('\n');
-    f.write_all(buf.as_bytes())
-        .context("writing audit entry")?;
+    f.write_all(buf.as_bytes()).context("writing audit entry")?;
     f.flush().context("flushing audit entry")?;
 
     #[cfg(unix)]
