@@ -1,10 +1,11 @@
-//! `inspect audit ls|show|grep` (bible §8.2).
+//! `inspect audit ls|show|grep|verify` (bible §8.2).
 
 use anyhow::Result;
 
 use crate::cli::{AuditArgs, AuditCommand};
 use crate::error::ExitKind;
-use crate::safety::AuditStore;
+use crate::safety::{AuditStore, SnapshotStore};
+use crate::safety::snapshot::sha256_hex;
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 
 pub fn run(args: AuditArgs) -> Result<ExitKind> {
@@ -14,6 +15,7 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
         AuditCommand::Ls(o) => list(&entries, o.format.is_json(), Some(o.limit)),
         AuditCommand::Show(o) => show(&entries, &o.id, o.format.is_json()),
         AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.format.is_json()),
+        AuditCommand::Verify(o) => verify(&entries, o.format.is_json()),
     }
 }
 
@@ -145,5 +147,110 @@ fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<
         ExitKind::Success
     } else {
         ExitKind::NoMatches
+    })
+}
+
+/// Field pitfall §3.4: best-effort integrity check.
+///
+/// Walks every audit entry and confirms:
+///   1. each entry's referenced `snapshot` file exists, and
+///   2. the file's on-disk sha256 matches the `previous_hash` recorded
+///      in the entry (modulo the optional `sha256:` prefix).
+///
+/// Honest scope: this catches accidental loss/truncation of snapshot
+/// files and silent on-disk corruption. It does **not** prove the
+/// JSONL log itself was not rewritten — a privileged local user can
+/// always edit `~/.inspect/audit/*.jsonl` and recompute matching
+/// snapshots. For tamper-evidence, forward audit entries to an
+/// append-only sink (syslog, journald, or a remote collector).
+fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind> {
+    let snaps = SnapshotStore::open()?;
+    let mut checked = 0usize;
+    let mut missing: Vec<(String, String)> = Vec::new(); // (id, snapshot path)
+    let mut mismatched: Vec<(String, String)> = Vec::new(); // (id, expected hash)
+    for e in entries {
+        let Some(snap_path_str) = e.snapshot.as_ref() else {
+            continue;
+        };
+        let Some(prev_hash) = e.previous_hash.as_ref() else {
+            continue;
+        };
+        checked += 1;
+        let expected = prev_hash.strip_prefix("sha256:").unwrap_or(prev_hash);
+        // Resolve via the store's canonical path so we tolerate audit
+        // logs copied between hosts where the absolute snapshot path
+        // recorded in `e.snapshot` no longer exists locally.
+        let resolved = snaps.path_for(expected);
+        let path = if resolved.exists() {
+            resolved
+        } else {
+            std::path::PathBuf::from(snap_path_str)
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                missing.push((e.id.clone(), path.display().to_string()));
+                continue;
+            }
+        };
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            mismatched.push((e.id.clone(), expected.to_string()));
+        }
+    }
+
+    let bad = missing.len() + mismatched.len();
+    if json {
+        JsonOut::write(
+            &Envelope::new("local", "audit", "audit.verify")
+                .put("entries_total", entries.len())
+                .put("entries_with_snapshot", checked)
+                .put("missing_count", missing.len())
+                .put("mismatched_count", mismatched.len())
+                .put(
+                    "missing_ids",
+                    missing.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                )
+                .put(
+                    "mismatched_ids",
+                    mismatched
+                        .iter()
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .put("ok", bad == 0),
+        );
+        return Ok(if bad == 0 {
+            ExitKind::Success
+        } else {
+            ExitKind::Error
+        });
+    }
+
+    let mut r = Renderer::new();
+    r.summary(format!(
+        "audit verify: {} entries, {checked} with snapshots, {} missing, {} mismatched",
+        entries.len(),
+        missing.len(),
+        mismatched.len()
+    ));
+    for (id, p) in &missing {
+        r.data_line(format!("MISSING  {id}  snapshot not on disk: {p}"));
+    }
+    for (id, expected) in &mismatched {
+        r.data_line(format!(
+            "MISMATCH {id}  on-disk content sha256 != recorded {expected}"
+        ));
+    }
+    if bad == 0 {
+        r.data_line("ok: every referenced snapshot is present and hashes match");
+    }
+    r.next("note: this checks snapshot integrity, not JSONL-log tampering");
+    r.next("forward audit entries to an append-only sink for tamper-evidence");
+    r.print();
+    Ok(if bad == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
     })
 }

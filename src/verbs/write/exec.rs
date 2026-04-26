@@ -30,7 +30,22 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    // Field pitfall §3.2: `exec` is the only write verb whose payload
+    // is opaque user-supplied shell — `--apply` alone is not a strong
+    // enough signal. Require `--allow-exec` as a second confirmation
+    // when the operator actually intends to run the command. Tighten
+    // the large-fanout interlock from the default 10 down to 3 so a
+    // typo cannot shell out across more than a couple of hosts before
+    // the prompt fires.
+    let mut gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    gate.fanout_threshold = exec_fanout_threshold();
+    if gate.should_apply() && !args.allow_exec {
+        eprintln!(
+            "error: `inspect exec` is opaque, free-form remote shell. \
+             Pass `--allow-exec` in addition to `--apply` to confirm intent."
+        );
+        return Ok(ExitKind::Error);
+    }
     if !gate.should_apply() {
         let mut r = Renderer::new();
         r.summary(format!(
@@ -41,7 +56,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             let svc = s.service().map(|x| format!("/{x}")).unwrap_or_default();
             r.data_line(format!("{}{svc}: {user_cmd}", s.ns.namespace));
         }
-        r.next("Re-run with --apply to execute");
+        r.next("Re-run with --apply --allow-exec to execute");
         r.print();
         return Ok(ExitKind::Success);
     }
@@ -128,7 +143,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
 }
 
-/// Field pitfall §7.3: detect docker's runtime-spec error for "no
+/// Field pitfall §3.2: detect docker's runtime-spec error for "no
 /// shell in image". Three observed phrasings across docker 20.x-25.x
 /// (and the equivalent containerd/CRI message).
 pub(crate) fn looks_like_no_shell(stderr: &str) -> bool {
@@ -137,6 +152,23 @@ pub(crate) fn looks_like_no_shell(stderr: &str) -> bool {
         || s.contains("exec: \"sh\":")
         || (s.contains("OCI runtime exec failed") && s.contains("sh"))
         || s.contains("starting container process caused: exec: \"sh\"")
+}
+
+/// Field pitfall §3.2: large-fanout interlock threshold for `exec`.
+/// Defaults to 3 (vs. the 10 used by predictable verbs) so a stray
+/// glob in the selector cannot silently shell out across the fleet.
+/// Operators who genuinely need a higher cap can raise it via
+/// `INSPECT_EXEC_FANOUT_THRESHOLD=<n>`; pass `--yes-all` to skip the
+/// prompt entirely once the threshold fires.
+fn exec_fanout_threshold() -> usize {
+    if let Ok(s) = std::env::var("INSPECT_EXEC_FANOUT_THRESHOLD") {
+        if let Ok(n) = s.parse::<usize>() {
+            if n >= 1 {
+                return n;
+            }
+        }
+    }
+    3
 }
 
 #[cfg(test)]

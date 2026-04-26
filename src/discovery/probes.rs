@@ -82,7 +82,52 @@ pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
         }
         Err(e) => r.warnings.push(format!("remote tooling probe failed: {e}")),
     }
+    // Field pitfall §1.1: surface a one-line warning when the remote's
+    // sshd `MaxSessions` is below our local per-host concurrency cap.
+    // Ignore failures silently — `sshd -T` typically requires root and
+    // `/etc/ssh/sshd_config` may be unreadable; the goal is to *help
+    // when we can*, not block discovery when we can't.
+    if let Some(w) = probe_max_sessions(ns, target) {
+        r.warnings.push(w);
+    }
     r
+}
+
+/// Field pitfall §1.1: best-effort detection of the remote sshd's
+/// `MaxSessions`. Returns a warning string when the remote setting is
+/// lower than `INSPECT_MAX_SESSIONS_PER_HOST`. Returns `None` when the
+/// setting could not be read or it is at least as large as our cap.
+fn probe_max_sessions(ns: &str, target: &SshTarget) -> Option<String> {
+    let local_cap = std::env::var("INSPECT_MAX_SESSIONS_PER_HOST")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(8);
+    // `sshd -T` is the source of truth but normally requires root;
+    // `awk` over `/etc/ssh/sshd_config` is the unprivileged fallback.
+    // Either way the output is a single integer or empty.
+    let cmd = "(sshd -T 2>/dev/null | awk '/^maxsessions /{print $2; exit}') \
+               || (awk '/^[[:space:]]*MaxSessions[[:space:]]+/{print $2; exit}' \
+                       /etc/ssh/sshd_config 2>/dev/null) \
+               || true";
+    let out = run_remote(ns, target, cmd, RunOpts::with_timeout(5)).ok()?;
+    if !out.ok() {
+        return None;
+    }
+    let raw = out.stdout.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let remote: u32 = raw.parse().ok()?;
+    // OpenSSH's compiled-in default is 10; treat anything ≥ our cap as fine.
+    if remote >= local_cap {
+        return None;
+    }
+    Some(format!(
+        "remote sshd MaxSessions={remote} is below the local per-host cap of {local_cap}; \
+         `inspect` may queue or fail with `administratively prohibited`. \
+         Either lower `INSPECT_MAX_SESSIONS_PER_HOST` (currently {local_cap}) \
+         or raise `MaxSessions` on the remote sshd_config to at least {local_cap}."
+    ))
 }
 
 /// Probe Docker container inventory. Uses `docker ps` with a stable format

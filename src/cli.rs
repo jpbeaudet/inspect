@@ -245,6 +245,12 @@ pub struct FleetArgs {
     /// Stop after the first failing namespace instead of continuing.
     #[arg(long)]
     pub abort_on_error: bool,
+    /// Field pitfall §4.3: run the first N namespaces as a canary
+    /// before fanning out to the rest. Any failure during the canary
+    /// phase aborts the run with a clear error and does not touch the
+    /// remaining namespaces.
+    #[arg(long, value_name = "N")]
+    pub canary: Option<usize>,
     /// Inner verb to run (e.g. `status`, `restart`, `setup`).
     pub verb: String,
     /// Remaining args forwarded to the inner verb.
@@ -612,6 +618,12 @@ pub struct ExecArgs {
     pub cmd: Vec<String>,
     #[arg(long)]
     pub apply: bool,
+    /// Field pitfall §3.2: `exec` runs free-form code on the remote and
+    /// is not symmetric with the predictable write verbs. Require this
+    /// extra flag in addition to `--apply` so a misclick or muscle-
+    /// memory `--apply` cannot silently shell out across the fleet.
+    #[arg(long)]
+    pub allow_exec: bool,
     #[arg(short = 'y', long)]
     pub yes: bool,
     #[arg(long)]
@@ -708,6 +720,15 @@ pub enum AuditCommand {
     Show(AuditShowArgs),
     /// Filter audit entries by substring (id/verb/selector/args).
     Grep(AuditGrepArgs),
+    /// Field pitfall §3.4: best-effort integrity check of the local
+    /// audit log. Verifies every JSONL line parses, every referenced
+    /// snapshot file exists, and every snapshot's on-disk sha256
+    /// matches the `previous_hash` recorded in the entry. This is
+    /// **tamper detection, not tamper prevention** — a privileged
+    /// local user can still rewrite the log; for stronger guarantees
+    /// forward audit entries to an append-only log sink (syslog,
+    /// journald, or a remote collector).
+    Verify(AuditVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -729,6 +750,12 @@ pub struct AuditShowArgs {
 #[derive(Debug, Args)]
 pub struct AuditGrepArgs {
     pub pattern: String,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditVerifyArgs {
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

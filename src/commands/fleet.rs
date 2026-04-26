@@ -214,14 +214,82 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
 
     let abort_on_error = args.abort_on_error;
     let parent_pid = std::process::id();
-    let results = fan_out(
-        &self_exe,
-        plan,
-        concurrency,
-        abort_on_error,
-        parent_pid,
-        &foreign_passphrase_envs,
-    );
+
+    // Field pitfall §4.3: optional canary phase. Run the first N
+    // namespaces (in the same sorted order as `chosen`) with
+    // abort-on-error forced, then proceed to the remainder only if
+    // every canary returned exit 0. Selectors with --canary > total
+    // collapse to "run everything as canary".
+    let mut results: Vec<NsResult> = Vec::with_capacity(plan.len());
+    let canary_n = args.canary.unwrap_or(0).min(plan.len());
+    let mut plan_iter = plan.into_iter();
+    if canary_n > 0 {
+        let canary_plan: Vec<NsPlan> = (&mut plan_iter).take(canary_n).collect();
+        let canary_names: Vec<String> =
+            canary_plan.iter().map(|p| p.namespace.clone()).collect();
+        eprintln!(
+            "fleet: canary phase: running {} of {} namespace(s) first: {}",
+            canary_n,
+            canary_n + plan_iter.len(),
+            canary_names.join(", ")
+        );
+        let canary_results = fan_out(
+            &self_exe,
+            canary_plan,
+            concurrency,
+            true, // canary always aborts on first failure
+            parent_pid,
+            &foreign_passphrase_envs,
+        );
+        let canary_failed: Vec<&NsResult> =
+            canary_results.iter().filter(|r| r.exit != 0).collect();
+        if !canary_failed.is_empty() {
+            let names: Vec<String> = canary_failed
+                .iter()
+                .map(|r| format!("{}(exit {})", r.namespace, r.exit))
+                .collect();
+            let remaining: Vec<String> =
+                plan_iter.map(|p| p.namespace).collect();
+            eprintln!(
+                "fleet: canary failed on {} namespace(s): {}. \
+                 Aborting before {} remaining namespace(s): {}",
+                canary_failed.len(),
+                names.join(", "),
+                remaining.len(),
+                if remaining.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    remaining.join(", ")
+                }
+            );
+            results.extend(canary_results);
+            // Skip rest of fleet; emit and return as failure.
+            let total = results.len();
+            let ok = results.iter().filter(|r| r.exit == 0).count();
+            let failed = total - ok;
+            if args.json {
+                emit_json(&args.verb, &results, total, ok, failed);
+            } else {
+                emit_human(&args.verb, &results, total, ok, failed);
+            }
+            return Ok(ExitKind::Error);
+        }
+        results.extend(canary_results);
+    }
+
+    let rest_plan: Vec<NsPlan> = plan_iter.collect();
+    if !rest_plan.is_empty() {
+        let rest_results = fan_out(
+            &self_exe,
+            rest_plan,
+            concurrency,
+            abort_on_error,
+            parent_pid,
+            &foreign_passphrase_envs,
+        );
+        results.extend(rest_results);
+    }
+    results.sort_by(|a, b| a.namespace.cmp(&b.namespace));
 
     let total = results.len();
     let ok = results.iter().filter(|r| r.exit == 0).count();

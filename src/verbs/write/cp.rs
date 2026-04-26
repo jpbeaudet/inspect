@@ -32,6 +32,21 @@ use crate::verbs::output::Renderer;
 use crate::verbs::quote::shquote;
 
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+/// Field pitfall §1.4: a single bulk transfer through the multiplexed
+/// SSH master temporarily monopolises the channel and starves any
+/// concurrent interactive verbs against the same host. The warning
+/// fires above this size; the operator can tune via
+/// `INSPECT_CP_WARN_BYTES=<n>` (0 disables).
+const DEFAULT_LARGE_FILE_WARN_BYTES: usize = 1024 * 1024;
+
+fn large_file_warn_threshold() -> usize {
+    if let Ok(s) = std::env::var("INSPECT_CP_WARN_BYTES") {
+        if let Ok(n) = s.parse::<usize>() {
+            return n;
+        }
+    }
+    DEFAULT_LARGE_FILE_WARN_BYTES
+}
 
 pub fn run(args: CpArgs) -> Result<ExitKind> {
     let (src, dst) = (args.source.clone(), args.dest.clone());
@@ -74,6 +89,19 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
             MAX_FILE_BYTES
         );
         return Ok(ExitKind::Error);
+    }
+    // Field pitfall §1.4: warn when one push will saturate the shared
+    // multiplexed SSH channel for several seconds and starve any
+    // concurrent interactive verb against the same host.
+    let warn_bytes = large_file_warn_threshold();
+    if warn_bytes > 0 && body.len() >= warn_bytes {
+        eprintln!(
+            "inspect: warning: pushing {} bytes through the multiplexed SSH channel \
+             will briefly starve concurrent verbs against the same host. \
+             For sustained bulk transfers use raw `scp` over a dedicated connection. \
+             (silence with INSPECT_CP_WARN_BYTES=0)",
+            body.len()
+        );
     }
 
     let (runner, nses, targets) = plan(&remote_sel)?;
