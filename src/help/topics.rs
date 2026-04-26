@@ -99,6 +99,26 @@ pub fn all_ids() -> impl Iterator<Item = &'static str> {
     TOPICS.iter().map(|t| t.id)
 }
 
+/// Optional `verbose/<topic>.md` sidecar (HP-6). Returns the sidecar
+/// body when one ships for the given topic, else `None`. Sidecars are
+/// appended after the standard topic body when the user passes
+/// `--verbose`.
+///
+/// The mapping is hand-maintained (rather than glob-discovered) so
+/// the binary's surface stays stable: adding a sidecar is a
+/// deliberate edit here, mirrored by a new file under
+/// `src/help/verbose/`.
+pub fn verbose_body(id: &str) -> Option<&'static str> {
+    let needle = id.trim().to_ascii_lowercase();
+    Some(match needle.as_str() {
+        "ssh" => include_str!("verbose/ssh.md"),
+        "search" => include_str!("verbose/search.md"),
+        "write" => include_str!("verbose/write.md"),
+        "safety" => include_str!("verbose/safety.md"),
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // HP-2: verb <-> topic registry.
 //

@@ -56,24 +56,31 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     }
 
     // `inspect help all` concatenates every topic with a deterministic
-    // separator. HP-6 will additionally suppress the pager when this
-    // mode is invoked under a pipe; HP-1 keeps the renderer's normal
-    // tty-aware behaviour, which already disables the pager on pipes.
+    // separator. HP-6 contract: this mode is intended for piping (it's
+    // 1.5k+ lines), so we bypass the pager unconditionally — even on
+    // an interactive tty — to match `--json`'s pipe-friendly default.
+    // With `--verbose`, every topic's optional sidecar is appended.
     if matches!(args.topic.as_deref(), Some("all")) {
-        return render(&help::all_topics_page());
+        let body = if args.verbose {
+            help::all_topics_page_verbose()
+        } else {
+            help::all_topics_page()
+        };
+        return render_no_pager(&body);
     }
 
     match args.topic.as_deref() {
         None => render(&help::index_page()),
         Some(name) => match help::find(name) {
             Some(t) => {
-                let body = help::topic_page(t);
-                if args.verbose {
-                    // HP-6 will append `verbose/<id>.md` sidecars when
-                    // present. HP-0 contract: --verbose is accepted
-                    // and renders the standard topic so callers can
-                    // adopt the flag now without a behaviour change.
-                }
+                // HP-6: when --verbose is passed, append the optional
+                // `verbose/<id>.md` sidecar. Topics without a sidecar
+                // render identically to the non-verbose path.
+                let body = if args.verbose {
+                    help::topic_page_verbose(t)
+                } else {
+                    help::topic_page(t)
+                };
                 render(&body)
             }
             None => unknown_topic(name),
@@ -85,6 +92,28 @@ fn render(text: &str) -> Result<ExitKind> {
     if let Err(e) = help::render::write_paged(text) {
         eprintln!("inspect: failed to write help: {e}");
         return Ok(ExitKind::Error);
+    }
+    Ok(ExitKind::Success)
+}
+
+/// `inspect help all` is contracted as a pipe-friendly dump (HP-6
+/// DoD). We bypass the pager regardless of stdout's tty status; the
+/// output is meant to land in `wc -l`, `grep`, or a file. Other write
+/// errors fall through to the same handler as [`render`].
+fn render_no_pager(text: &str) -> Result<ExitKind> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    match lock.write_all(text.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(ExitKind::Success),
+        Err(e) => {
+            eprintln!("inspect: failed to write help: {e}");
+            return Ok(ExitKind::Error);
+        }
+    }
+    if !text.ends_with('\n') {
+        let _ = lock.write_all(b"\n");
     }
     Ok(ExitKind::Success)
 }

@@ -17,7 +17,7 @@ pub mod search;
 pub mod topics;
 pub mod json;
 
-pub use topics::{find, suggest, Topic, TOPICS};
+pub use topics::{find, suggest, verbose_body, Topic, TOPICS};
 
 /// Render the index page (the output of bare `inspect help`).
 ///
@@ -62,6 +62,18 @@ pub fn index_page() -> String {
 /// structured surface. Topics without a body fall back to their stub
 /// renderer so the output is always complete.
 pub fn all_topics_page() -> String {
+    all_topics_page_inner(false)
+}
+
+/// Like [`all_topics_page`] but appends each topic's optional verbose
+/// sidecar (HP-6). Used by `inspect help all --verbose`. Topics
+/// without a sidecar render identically to the non-verbose dump, so
+/// the verbose output is a strict superset of the standard one.
+pub fn all_topics_page_verbose() -> String {
+    all_topics_page_inner(true)
+}
+
+fn all_topics_page_inner(verbose: bool) -> String {
     let sep = "\n\n";
     let bar = "=".repeat(72);
     let mut out = String::with_capacity(64 * 1024);
@@ -71,7 +83,11 @@ pub fn all_topics_page() -> String {
             out.push_str(&bar);
             out.push_str(sep);
         }
-        out.push_str(&topic_page(t));
+        if verbose {
+            out.push_str(&topic_page_verbose(t));
+        } else {
+            out.push_str(&topic_page(t));
+        }
     }
     if !out.ends_with('\n') {
         out.push('\n');
@@ -99,6 +115,34 @@ pub fn topic_page(t: &Topic) -> String {
     s.push_str("SEE ALSO\n");
     s.push_str("  inspect help              the topic and command index\n");
     s.push_str("  inspect help quickstart   getting started in 60 seconds\n");
+    s
+}
+
+/// Render a topic body with its optional `verbose/<id>.md` sidecar
+/// appended. When no sidecar is registered for the topic, the output
+/// is identical to [`topic_page`] — `--verbose` is a safe-by-default
+/// flag, never a behaviour change for topics without depth-on-demand
+/// content.
+///
+/// Bible §4.5 — verbose content is *additive*; the standard body
+/// must always be the prefix of the verbose body so users who skim
+/// the head don't miss anything when they later add `--verbose`.
+pub fn topic_page_verbose(t: &Topic) -> String {
+    let mut s = topic_page(t);
+    if let Some(extra) = verbose_body(t.id) {
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push('\n');
+        // Stable horizontal rule — pinned by tests so the boundary
+        // between the standard body and the sidecar is greppable.
+        s.push_str(&"-".repeat(72));
+        s.push('\n');
+        s.push_str(extra);
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+    }
     s
 }
 
