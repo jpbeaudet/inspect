@@ -14,6 +14,7 @@ mod discovery;
 mod error;
 mod exec;
 mod format;
+mod help;
 mod logql;
 mod paths;
 mod profile;
@@ -117,5 +118,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Connectivity(args) => commands::connectivity::run(args),
         Command::Recipe(args) => commands::recipe::run(args),
         Command::Fleet(args) => commands::fleet::run(args),
+        Command::Help(args) => commands::help::run(args),
     }
 }

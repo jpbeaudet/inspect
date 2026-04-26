@@ -23,7 +23,11 @@ scaffolded and will be filled in by subsequent phases.
     about = "Operational debugging CLI",
     long_about = LONG_ABOUT,
     propagate_version = true,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    // We ship our own `help` subcommand (HP-0+). Disable clap's
+    // auto-generated one to avoid a "command name `help` is duplicated"
+    // panic at startup. The auto-generated `--help` flag is unaffected.
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -140,6 +144,35 @@ pub enum Command {
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
     Fleet(FleetArgs),
+
+    // ---- Help system (HP-0) -------------------------------------------------
+    /// Show help on a topic, search help, or list all topics.
+    ///
+    /// Run `inspect help` for the topic + command index, or
+    /// `inspect help <topic>` for in-depth documentation.
+    Help(HelpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HelpArgs {
+    /// Topic name (e.g. `quickstart`, `selectors`, `search`). Omit to
+    /// print the topic + command index.
+    pub topic: Option<String>,
+
+    /// Search every help topic, verb, and example for a keyword.
+    /// (Scheduled for HP-3; the flag is accepted today.)
+    #[arg(long, value_name = "KEYWORD")]
+    pub search: Option<String>,
+
+    /// Emit the full help registry as a stable, versioned JSON
+    /// document (the LLM/agent contract). Scheduled for HP-4.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Append the optional `verbose/<topic>.md` sidecar with edge
+    /// cases and implementation notes. (Sidecars ship in HP-6.)
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Args)]

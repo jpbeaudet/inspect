@@ -1,0 +1,127 @@
+//! `inspect help` command dispatcher.
+//!
+//! Bible §2: three entry points (index / topic / search), one renderer.
+//! HP-0 implements index + topic + "did you mean" suggester. The
+//! `--search` and `--json` arms are scaffolded as `Unimplemented`
+//! placeholders so the CLI surface is stable; HP-3 and HP-4 fill them.
+
+use anyhow::Result;
+
+use crate::cli::HelpArgs;
+use crate::error::ExitKind;
+use crate::help;
+
+pub fn run(args: HelpArgs) -> Result<ExitKind> {
+    // Mutually exclusive flags — keep the contract honest. clap can
+    // express this via `conflicts_with`, but doing it here too gives
+    // a stable error message regardless of clap's internal phrasing.
+    let mode_flags = [
+        ("--search", args.search.is_some()),
+        ("--json", args.json),
+    ];
+    let active: Vec<&str> = mode_flags
+        .iter()
+        .filter_map(|(name, on)| if *on { Some(*name) } else { None })
+        .collect();
+    if active.len() > 1 {
+        eprintln!(
+            "error: help flags {} are mutually exclusive",
+            active.join(" and ")
+        );
+        return Ok(ExitKind::Error);
+    }
+
+    if args.search.is_some() {
+        eprintln!("error: `inspect help --search` is scheduled for HP-3 and not yet implemented");
+        return Ok(ExitKind::Error);
+    }
+    if args.json {
+        eprintln!("error: `inspect help --json` is scheduled for HP-4 and not yet implemented");
+        return Ok(ExitKind::Error);
+    }
+
+    // `inspect help all` is reserved for HP-6. Surface a clear
+    // intermediate response rather than treating "all" as a missing
+    // topic — the index page already advertises this name.
+    if matches!(args.topic.as_deref(), Some("all")) {
+        eprintln!("error: `inspect help all` is scheduled for HP-6 and not yet implemented");
+        return Ok(ExitKind::Error);
+    }
+
+    match args.topic.as_deref() {
+        None => render(&help::index_page()),
+        Some(name) => match help::find(name) {
+            Some(t) => {
+                let body = help::topic_page(t);
+                if args.verbose {
+                    // HP-6 will append `verbose/<id>.md` sidecars when
+                    // present. HP-0 contract: --verbose is accepted
+                    // and renders the standard topic so callers can
+                    // adopt the flag now without a behaviour change.
+                }
+                render(&body)
+            }
+            None => unknown_topic(name),
+        },
+    }
+}
+
+fn render(text: &str) -> Result<ExitKind> {
+    if let Err(e) = help::render::write_paged(text) {
+        eprintln!("inspect: failed to write help: {e}");
+        return Ok(ExitKind::Error);
+    }
+    Ok(ExitKind::Success)
+}
+
+fn unknown_topic(name: &str) -> Result<ExitKind> {
+    let suggestion = help::suggest(name);
+    eprintln!("error: unknown help topic '{}'", name);
+    if let Some(s) = suggestion {
+        eprintln!("  did you mean: {s}?");
+    }
+    eprintln!("  see: inspect help");
+    // Exit code 1 = "no match" per bible §6 contract for `inspect help`.
+    Ok(ExitKind::NoMatches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(topic: Option<&str>) -> HelpArgs {
+        HelpArgs {
+            topic: topic.map(String::from),
+            search: None,
+            json: false,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn dispatch_index_succeeds() {
+        // We can't easily capture stdout here without an extra plumbing
+        // layer; the renderer's own tests cover the writer. This test
+        // just confirms dispatch returns Success for the no-arg case.
+        let r = run(args(None)).unwrap();
+        assert!(matches!(r, ExitKind::Success));
+    }
+
+    #[test]
+    fn dispatch_known_topic_succeeds() {
+        let r = run(args(Some("quickstart"))).unwrap();
+        assert!(matches!(r, ExitKind::Success));
+    }
+
+    #[test]
+    fn dispatch_unknown_topic_returns_nomatches() {
+        let r = run(args(Some("definitely-not-a-topic"))).unwrap();
+        assert!(matches!(r, ExitKind::NoMatches));
+    }
+
+    #[test]
+    fn dispatch_help_all_is_reserved() {
+        let r = run(args(Some("all"))).unwrap();
+        assert!(matches!(r, ExitKind::Error));
+    }
+}
