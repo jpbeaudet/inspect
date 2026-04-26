@@ -18,13 +18,13 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut steps_with_path = Vec::new();
     for s in iter_steps(&nses, &targets) {
         let Some(p) = s.path.clone() else {
-            eprintln!("error: rm requires a :path on selector");
+            crate::error::emit("rm requires a :path on selector");
             return Ok(ExitKind::Error);
         };
         steps_with_path.push((s, p));
     }
     if steps_with_path.is_empty() {
-        eprintln!("error: '{}' matched no targets", args.target);
+        crate::error::emit(format!("'{}' matched no targets", args.target));
         return Ok(ExitKind::Error);
     }
 

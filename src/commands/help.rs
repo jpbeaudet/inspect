@@ -91,11 +91,14 @@ fn render(text: &str) -> Result<ExitKind> {
 
 fn unknown_topic(name: &str) -> Result<ExitKind> {
     let suggestion = help::suggest(name);
-    eprintln!("error: unknown help topic '{}'", name);
+    // HP-5: emit() already appends `see: inspect help examples` for
+    // the "unknown help topic" fragment via the central catalog. We
+    // keep the "did you mean" hint but drop the redundant trailing
+    // see-line that the HP-0 baseline used.
+    crate::error::emit(format!("unknown help topic '{}'", name));
     if let Some(s) = suggestion {
         eprintln!("  did you mean: {s}?");
     }
-    eprintln!("  see: inspect help");
     // Exit code 1 = "no match" per bible §6 contract for `inspect help`.
     Ok(ExitKind::NoMatches)
 }

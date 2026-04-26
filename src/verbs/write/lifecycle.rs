@@ -64,7 +64,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         .filter(|s| s.service().is_some())
         .collect();
     if steps.is_empty() {
-        eprintln!("error: '{}' matched no service targets", args.selector);
+        crate::error::emit(format!("'{}' matched no service targets", args.selector));
         return Ok(ExitKind::Error);
     }
 

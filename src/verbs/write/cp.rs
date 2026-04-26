@@ -56,11 +56,11 @@ pub fn run(args: CpArgs) -> Result<ExitKind> {
         (false, true) => push(args, src, dst),
         (true, false) => pull(args, src, dst),
         (false, false) => {
-            eprintln!("error: cp needs at least one remote endpoint (selector with `:path`)");
+            crate::error::emit("cp needs at least one remote endpoint (selector with `:path`)");
             Ok(ExitKind::Error)
         }
         (true, true) => {
-            eprintln!("error: cp does not support remote→remote in v1");
+            crate::error::emit("cp does not support remote→remote in v1");
             Ok(ExitKind::Error)
         }
     }
@@ -108,13 +108,13 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
     let mut planned = Vec::new();
     for s in iter_steps(&nses, &targets) {
         let Some(p) = s.path.clone() else {
-            eprintln!("error: cp push requires a `:path` on the destination selector");
+            crate::error::emit("cp push requires a `:path` on the destination selector");
             return Ok(ExitKind::Error);
         };
         planned.push((s, p));
     }
     if planned.is_empty() {
-        eprintln!("error: '{remote_sel}' matched no targets");
+        crate::error::emit("'{remote_sel}' matched no targets");
         return Ok(ExitKind::Error);
     }
 
@@ -247,7 +247,7 @@ fn pull(_args: CpArgs, remote_sel: String, local: String) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&remote_sel)?;
     let steps: Vec<_> = iter_steps(&nses, &targets).collect();
     if steps.is_empty() {
-        eprintln!("error: '{remote_sel}' matched no targets");
+        crate::error::emit("'{remote_sel}' matched no targets");
         return Ok(ExitKind::Error);
     }
     if steps.len() > 1 {
@@ -259,7 +259,7 @@ fn pull(_args: CpArgs, remote_sel: String, local: String) -> Result<ExitKind> {
     }
     let s = &steps[0];
     let Some(path) = s.path.clone() else {
-        eprintln!("error: cp pull requires a `:path` on the source selector");
+        crate::error::emit("cp pull requires a `:path` on the source selector");
         return Ok(ExitKind::Error);
     };
 

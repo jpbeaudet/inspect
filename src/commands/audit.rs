@@ -65,7 +65,7 @@ fn list(entries: &[crate::safety::AuditEntry], json: bool, limit: Option<usize>)
 
 fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> Result<ExitKind> {
     let Some(e) = entries.iter().find(|e| e.id.starts_with(id_prefix)) else {
-        eprintln!("error: no audit entry matches id prefix '{id_prefix}'");
+        crate::error::emit("no audit entry matches id prefix '{id_prefix}'");
         return Ok(ExitKind::Error);
     };
     if json {

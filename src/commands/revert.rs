@@ -28,7 +28,7 @@ pub fn run(args: RevertArgs) -> Result<ExitKind> {
     let snaps = SnapshotStore::open()?;
 
     let Some(entry) = store.find(&args.audit_id)? else {
-        eprintln!("error: no audit entry matches id prefix '{}'", args.audit_id);
+        crate::error::emit(format!("no audit entry matches id prefix '{}'", args.audit_id));
         return Ok(ExitKind::Error);
     };
     let Some(prev_hash) = entry.previous_hash.clone() else {
@@ -55,7 +55,7 @@ pub fn run(args: RevertArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     };
     let Some(path) = step.path.clone() else {
-        eprintln!("error: audit selector '{}' has no path", entry.selector);
+        crate::error::emit(format!("audit selector '{}' has no path", entry.selector));
         return Ok(ExitKind::Error);
     };
 

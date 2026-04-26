@@ -164,17 +164,16 @@ pub fn render_full(pretty: bool) -> String {
     );
 
     // -- errors ----------------------------------------------------------
-    // HP-4 ships a stub error catalog: the variant shape is fixed but
-    // entries beyond the canonical five are added by HP-5 once every
-    // call site carries a `help_topic`. Today we expose what we already
-    // know — the hand-curated bible §7 mapping — so external tools can
-    // start consuming this field immediately.
+    // HP-5: surface the central error catalog so external tools can
+    // map any `error: …` line emitted by the binary back to its help
+    // topic. Order is the catalog's declared order — stable input for
+    // snapshot consumers.
     w.begin_array_field("errors");
-    for (code, summary, topic) in error_catalog() {
+    for e in crate::error::ERROR_CATALOG {
         w.begin_object();
-        w.kv_string("code", code);
-        w.kv_string("summary", summary);
-        w.kv_string("help_topic", topic);
+        w.kv_string("code", e.code);
+        w.kv_string("summary", e.summary);
+        w.kv_string("help_topic", e.help_topic.unwrap_or(""));
         w.end_object();
     }
     w.end_array();
@@ -271,29 +270,11 @@ fn command_examples(sub: &clap::Command) -> Vec<String> {
         .collect()
 }
 
-// ---------- error catalog (HP-5 will extend) -----------------------------
-
-fn error_catalog() -> &'static [(&'static str, &'static str, &'static str)] {
-    // Bible §7 hand-curated mapping. Any addition here must also be
-    // wired in `src/error.rs` once HP-5 lands; the stub is read-only.
-    &[
-        ("EmptySelector", "selector resolved to no targets", "selectors"),
-        ("BadSelectorGrammar", "selector grammar is invalid", "selectors"),
-        ("AmbiguousService", "selector matches more than one service", "selectors"),
-        ("UnknownAlias", "alias name is not registered", "aliases"),
-        ("BadLogQL", "LogQL query failed to parse", "search"),
-        ("MutuallyExclusiveFormat", "more than one --json/--csv/--md was set", "formats"),
-        ("MissingApply", "mutating verb requires --apply", "write"),
-        ("LargeFanoutAborted", "fan-out exceeds safety threshold", "write"),
-        ("AuditEntryNotFound", "no audit row matches the given id", "safety"),
-        ("RevertHashMismatch", "snapshot hash does not match current state", "safety"),
-        ("NamespaceNotConfigured", "namespace is not configured", "discovery"),
-        ("RecipeNotFound", "named recipe is not registered", "recipes"),
-        ("DiscoveryFailed", "discovery probe failed", "discovery"),
-        ("SshConnectFailed", "ssh handshake failed", "ssh"),
-        ("MaxSessionsExceeded", "ssh MaxSessions cap reached", "ssh"),
-    ]
-}
+// ---------- error catalog (single source of truth: src/error.rs) ----------
+//
+// HP-5 moved the catalog to `crate::error::ERROR_CATALOG`. The JSON path
+// reads from there directly so there is no second copy to drift. This
+// section is intentionally left empty; see `src/error.rs::ERROR_CATALOG`.
 
 // ---------- hand-rolled stable JSON writer -------------------------------
 

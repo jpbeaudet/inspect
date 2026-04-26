@@ -18,7 +18,7 @@ use crate::verbs::quote::shquote;
 
 pub fn run(args: ExecArgs) -> Result<ExitKind> {
     if args.cmd.is_empty() {
-        eprintln!("error: exec requires a command after `--`");
+        crate::error::emit("exec requires a command after `--`");
         return Ok(ExitKind::Error);
     }
     let user_cmd = args.cmd.join(" ");
@@ -26,7 +26,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
     let steps: Vec<_> = iter_steps(&nses, &targets).collect();
     if steps.is_empty() {
-        eprintln!("error: '{}' matched no targets", args.selector);
+        crate::error::emit(format!("'{}' matched no targets", args.selector));
         return Ok(ExitKind::Error);
     }
 

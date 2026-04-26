@@ -16,7 +16,7 @@ use crate::logql;
 pub fn run(args: SearchArgs) -> Result<ExitKind> {
     let query = args.query.trim();
     if query.is_empty() {
-        eprintln!("error: empty query");
+        crate::error::emit("empty query");
         eprintln!("hint: pass a LogQL query, e.g. inspect search '{{server=\"arte\", source=\"logs\"}} |= \"error\"'");
         return Ok(ExitKind::Error);
     }
@@ -88,7 +88,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                 println!("NEXT:");
                 println!("  inspect search '{}'   (re-run when ready)", args.query);
             } else {
-                eprintln!("error: {e}");
+                crate::error::emit("{e}");
                 let mut src = e.source();
                 while let Some(c) = src {
                     eprintln!("  caused by: {c}");

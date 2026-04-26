@@ -60,8 +60,11 @@ fn main() -> ExitCode {
     match result {
         Ok(kind) => ExitCode::from(kind.code()),
         Err(err) => {
-            eprintln!("error: {err}");
-            // Surface a chain of causes if available.
+            // HP-5: route the top-level error through the central
+            // helper so the `see: inspect help <topic>` line is
+            // attached automatically whenever the message matches a
+            // catalog fragment. Cause chain still rendered verbatim.
+            error::emit(err.to_string());
             let mut source = err.source();
             while let Some(cause) = source {
                 eprintln!("  caused by: {cause}");

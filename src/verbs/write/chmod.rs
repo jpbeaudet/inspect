@@ -28,13 +28,13 @@ pub fn run(args: ChmodArgs) -> Result<ExitKind> {
     let mut planned = Vec::new();
     for s in iter_steps(&nses, &targets) {
         let Some(p) = s.path.clone() else {
-            eprintln!("error: chmod requires a :path on selector");
+            crate::error::emit("chmod requires a :path on selector");
             return Ok(ExitKind::Error);
         };
         planned.push((s, p));
     }
     if planned.is_empty() {
-        eprintln!("error: '{}' matched no targets", args.target);
+        crate::error::emit(format!("'{}' matched no targets", args.target));
         return Ok(ExitKind::Error);
     }
 
