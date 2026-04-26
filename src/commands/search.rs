@@ -51,7 +51,14 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         until: args.until.clone(),
         tail: args.tail,
         follow: args.follow,
-        record_limit: args.tail.unwrap_or(0),
+        // Field pitfall §5.2: an unbounded `inspect search '...'`
+        // query against a chatty cluster can saturate SSH and OOM
+        // the local process before any output appears. Apply a
+        // best-effort cap (default 100k records, override via
+        // `INSPECT_MAX_RECORDS=N`, set to 0 to disable). An
+        // explicit `--tail N` always wins so power users keep the
+        // ergonomics they expect.
+        record_limit: args.tail.unwrap_or_else(default_record_limit),
         ..Default::default()
     };
 
@@ -121,8 +128,11 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
 }
 
 fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
+    let cap = args.tail.unwrap_or_else(default_record_limit);
+    let truncated = cap > 0 && records.len() >= cap;
     println!(
-        "SUMMARY: {} record(s) from `{}`",
+        "SUMMARY: {}{} record(s) from `{}`",
+        if truncated { "first " } else { "" },
         records.len(),
         truncate(&args.query, 80)
     );
@@ -140,6 +150,25 @@ fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
     println!("  inspect search '{}' --json   (machine-readable)", args.query);
     if args.tail.is_none() {
         println!("  inspect search '{}' --tail 50", args.query);
+    }
+    if truncated {
+        // Field pitfall §5.2: be loud about the cap so operators know
+        // their result was bounded -- silent truncation is the
+        // failure mode the doc warns about.
+        println!(
+            "  # NOTE: result capped at {cap} records (INSPECT_MAX_RECORDS); \
+             pass `--tail N` for an explicit bound or `INSPECT_MAX_RECORDS=0` to disable"
+        );
+    }
+}
+
+/// Field pitfall §5.2: default upper bound on records returned by a
+/// single `inspect search` invocation. Operators can override via
+/// `INSPECT_MAX_RECORDS=N` (0 disables the cap entirely).
+fn default_record_limit() -> usize {
+    match std::env::var("INSPECT_MAX_RECORDS") {
+        Ok(s) => s.parse::<usize>().unwrap_or(100_000),
+        Err(_) => 100_000,
     }
 }
 

@@ -117,13 +117,26 @@ pub fn run_remote(
         if let Some(status) = child.try_wait().context("waiting on ssh")? {
             let mut stdout = String::new();
             let mut stderr = String::new();
+            // Field pitfall §7.2: read raw bytes and lossily decode
+            // them as UTF-8. The previous `read_to_string` would *fail*
+            // the entire SSH read when the remote stream contained any
+            // byte that wasn't valid UTF-8 (Latin-1, Shift-JIS, GBK,
+            // a stray binary chunk in a log file, etc.). Operators saw
+            // "stream did not contain valid UTF-8" instead of the
+            // actual log line. Lossy decoding converts unknown bytes
+            // to U+FFFD so the line is still readable; downstream
+            // sanitization (`format::safe`) strips control bytes.
             if let Some(mut o) = child.stdout.take() {
                 use std::io::Read;
-                o.read_to_string(&mut stdout).ok();
+                let mut buf = Vec::new();
+                let _ = o.read_to_end(&mut buf);
+                stdout = String::from_utf8_lossy(&buf).into_owned();
             }
             if let Some(mut e) = child.stderr.take() {
                 use std::io::Read;
-                e.read_to_string(&mut stderr).ok();
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                stderr = String::from_utf8_lossy(&buf).into_owned();
             }
             let exit_code = status.code().unwrap_or(-1);
             // Audit §3.3: turn the cryptic OpenSSH "administratively

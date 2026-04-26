@@ -159,7 +159,18 @@ fn build_docker_logs(svc: &str, args: &LogsArgs) -> String {
 /// `--since`/`--until`/`--tail` and force `--tail 0` so we pick up
 /// only new lines after a follow-mode reconnect.
 fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String {
-    let mut s = String::from("docker logs");
+    // Field pitfall §5.1: `docker logs -f` chunks output through the
+    // daemon's pipe, which is block-buffered when stdout is not a tty.
+    // Operators see laggy, bursty lines instead of the live stream
+    // they expect. `stdbuf -oL -eL` overrides the libc buffer to
+    // line-buffered for this child only -- safe because docker logs
+    // is itself line-oriented. Apply only in follow mode (non-follow
+    // already drains the buffer at exit).
+    let mut s = if args.follow {
+        String::from("stdbuf -oL -eL docker logs")
+    } else {
+        String::from("docker logs")
+    };
     if args.follow {
         s.push_str(" -f");
     }
@@ -187,7 +198,13 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
 }
 
 fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
-    let mut s = String::from("journalctl --no-pager -u ");
+    // Field pitfall §5.1: line-buffer journalctl in follow mode so
+    // operators get a live stream instead of block-buffered chunks.
+    let mut s = if args.follow {
+        String::from("stdbuf -oL -eL journalctl --no-pager -u ")
+    } else {
+        String::from("journalctl --no-pager -u ")
+    };
     s.push_str(&shquote(unit));
     if args.follow {
         s.push_str(" -f");

@@ -9,6 +9,7 @@ use crate::profile::schema::{
     Volume,
 };
 use crate::ssh::{run_remote, RunOpts, SshTarget};
+use crate::verbs::quote::shquote;
 
 /// Outcome of a single probe.
 #[derive(Debug, Default)]
@@ -149,6 +150,11 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         }
     };
 
+    // Field pitfall §2.1: warn when any json-file container log has
+    // grown past `INSPECT_LOG_SIZE_WARN_BYTES` (default 1 GiB). One
+    // batched `stat -c '%s\t%n'` call covers every log path we know
+    // about so we don't pay an SSH round-trip per container.
+    log_size_warnings(ns, target, &rows, &details, &mut r);
     // Field pitfall §6.1: when two compose containers from the same
     // service (replicas) both expose the same compose label, we'd
     // otherwise emit two services with the same `name`. Deduplicate
@@ -389,6 +395,8 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
     if !out.ok() {
         return r;
     }
+    let filter = systemd_unit_filter();
+    let mut skipped = 0usize;
     for line in out.stdout.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.is_empty() {
@@ -396,6 +404,16 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
         }
         let name = cols[0].trim_end_matches(".service").to_string();
         if name.is_empty() {
+            continue;
+        }
+        // Field pitfall §6.3: filter out OS-internal units (dbus,
+        // cron, systemd-*, getty@, user@, etc.) so the inventory
+        // shows only operator-relevant services. Override via
+        // `INSPECT_SYSTEMD_INCLUDE=<regex>` (matches in addition to
+        // the allowlist) or `INSPECT_SYSTEMD_NO_FILTER=1` to keep
+        // every running unit (debug only).
+        if !filter.allows(&name) {
+            skipped += 1;
             continue;
         }
         r.services.push(Service {
@@ -412,7 +430,211 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
             depends_on: vec![],
         });
     }
+    if skipped > 0 {
+        r.warnings.push(format!(
+            "systemd: filtered {skipped} OS-internal unit(s) from inventory \
+             (set INSPECT_SYSTEMD_NO_FILTER=1 to keep every running unit, \
+             or INSPECT_SYSTEMD_INCLUDE=<regex> to add specific names)"
+        ));
+    }
     r
+}
+
+/// Field pitfall §6.3: predicate over systemd unit names that
+/// suppresses OS-internal noise by default.
+pub(crate) struct SystemdUnitFilter {
+    no_filter: bool,
+    extra: Option<regex::Regex>,
+}
+
+impl SystemdUnitFilter {
+    pub fn allows(&self, name: &str) -> bool {
+        if self.no_filter {
+            return true;
+        }
+        if let Some(re) = &self.extra {
+            if re.is_match(name) {
+                return true;
+            }
+        }
+        !systemd_name_is_os_internal(name)
+    }
+}
+
+pub(crate) fn systemd_unit_filter() -> SystemdUnitFilter {
+    let no_filter = matches!(
+        std::env::var("INSPECT_SYSTEMD_NO_FILTER").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
+    let extra = std::env::var("INSPECT_SYSTEMD_INCLUDE")
+        .ok()
+        .and_then(|s| regex::Regex::new(&s).ok());
+    SystemdUnitFilter { no_filter, extra }
+}
+
+/// Names matching this list are OS-internal infrastructure that no
+/// operator actually wants in the inventory by default. Curated from
+/// `systemctl list-units --state=running` on a stock Debian/Ubuntu
+/// server (the union of the dozen most common offenders).
+pub(crate) fn systemd_name_is_os_internal(name: &str) -> bool {
+    // Prefix matches first.
+    const PREFIXES: &[&str] = &[
+        "systemd-",
+        "user@",
+        "session-",
+        "getty@",
+        "serial-getty@",
+        "container-getty@",
+        "user-runtime-dir@",
+        "modprobe@",
+        "rc-local",
+    ];
+    for p in PREFIXES {
+        if name.starts_with(p) {
+            return true;
+        }
+    }
+    // Exact matches.
+    matches!(
+        name,
+        "dbus"
+            | "cron"
+            | "crond"
+            | "polkit"
+            | "rpcbind"
+            | "chrony"
+            | "chronyd"
+            | "ntp"
+            | "ntpd"
+            | "ssh"
+            | "sshd"
+            | "accounts-daemon"
+            | "networkd-dispatcher"
+            | "ModemManager"
+            | "NetworkManager"
+            | "wpa_supplicant"
+            | "udisks2"
+            | "colord"
+            | "avahi-daemon"
+            | "cups"
+            | "cups-browsed"
+            | "snapd"
+            | "snapd.socket"
+            | "rsyslog"
+            | "auditd"
+            | "atd"
+            | "irqbalance"
+            | "uuidd"
+            | "lvm2-monitor"
+            | "thermald"
+            | "unattended-upgrades"
+            | "multipathd"
+            | "packagekit"
+            | "fwupd"
+    )
+}
+
+/// Field pitfall §2.1: emit a warning for any json-file log past
+/// the size threshold. Soft probe — a `stat` failure (no permission,
+/// missing path) is silently ignored.
+fn log_size_warnings(
+    ns: &str,
+    target: &SshTarget,
+    rows: &[PsRow],
+    details: &std::collections::HashMap<String, InspectDetail>,
+    r: &mut ProbeResult,
+) {
+    let threshold = log_size_warn_threshold();
+    if threshold == u64::MAX {
+        return;
+    }
+    // Collect (svc_name, path) for every container with a log path.
+    let mut paths: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        let Some(d) = details.get(&row.id) else { continue };
+        let Some(p) = &d.log_path else { continue };
+        // Only json-file is sized this way; journald/local store
+        // elsewhere and have their own retention.
+        if !matches!(d.log_driver, Some(LogDriver::JsonFile)) {
+            continue;
+        }
+        paths.push((row.name.clone(), p.clone()));
+    }
+    if paths.is_empty() {
+        return;
+    }
+    // Build a single `stat` call. `-c '%s\t%n'` prints "<size>\t<path>"
+    // per file; missing paths produce a warning on stderr we ignore.
+    let mut cmd = String::from("stat -c '%s\t%n'");
+    for (_, p) in &paths {
+        cmd.push(' ');
+        cmd.push_str(&shquote(p));
+    }
+    cmd.push_str(" 2>/dev/null");
+    let out = match run_remote(ns, target, &cmd, RunOpts::with_timeout(20)) {
+        Ok(o) if o.ok() => o,
+        // Most common reason: the docker daemon stores logs under
+        // /var/lib/docker which is root-only on most distros. We don't
+        // want to spam every operator running as a non-root user.
+        _ => return,
+    };
+    let by_path: std::collections::HashMap<&str, &str> =
+        paths.iter().map(|(s, p)| (p.as_str(), s.as_str())).collect();
+    for line in out.stdout.lines() {
+        let mut it = line.splitn(2, '\t');
+        let size_s = match it.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let path = match it.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let size: u64 = match size_s.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if size < threshold {
+            continue;
+        }
+        let svc = by_path.get(path).copied().unwrap_or("?");
+        r.warnings.push(format!(
+            "service '{}' on {}: log file `{}` is {} (>{}) -- consider rotating with \
+             `--log-opt max-size=100m --log-opt max-file=3`, or `truncate -s 0 <path>`",
+            svc,
+            target.host,
+            path,
+            human_bytes(size),
+            human_bytes(threshold),
+        ));
+    }
+}
+
+fn log_size_warn_threshold() -> u64 {
+    // Default 1 GiB; `INSPECT_LOG_SIZE_WARN_BYTES=0` disables the probe.
+    match std::env::var("INSPECT_LOG_SIZE_WARN_BYTES") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(0) => u64::MAX,
+            Ok(n) => n,
+            Err(_) => 1 << 30,
+        },
+        Err(_) => 1 << 30,
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut idx = 0usize;
+    let mut v = n as f64;
+    while v >= 1024.0 && idx + 1 < UNITS.len() {
+        v /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{} {}", n, UNITS[idx])
+    } else {
+        format!("{:.1} {}", v, UNITS[idx])
+    }
 }
 
 // ---------- pure parsers (unit-tested without ssh) ---------------------------
@@ -468,6 +690,10 @@ pub(crate) struct InspectDetail {
     pub ports: Vec<Port>,
     pub mounts: Vec<Mount>,
     pub log_driver: Option<LogDriver>,
+    /// Field pitfall §2.1: absolute path to the active json-file
+    /// log on the daemon's host filesystem (`LogPath` from
+    /// `docker inspect`). Used to size-warn at discovery time.
+    pub log_path: Option<String>,
 }
 
 pub(crate) fn parse_docker_inspect(
@@ -573,6 +799,16 @@ pub(crate) fn parse_docker_inspect(
                 _ => Some(LogDriver::Other),
             };
         }
+
+        // Field pitfall §2.1: capture LogPath so a follow-up `du`
+        // probe can warn the operator when the json-file log has
+        // grown past a sane threshold.
+        if let Some(p) = v.get("LogPath").and_then(|x| x.as_str()) {
+            if !p.is_empty() {
+                det.log_path = Some(p.to_string());
+            }
+        }
+
         out.insert(id, det);
     }
     out
@@ -739,8 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_inspect_recognises_unsupported_log_drivers() {
-        // Field pitfall §2.3: distinguish unsupported drivers so the
+    fn parse_inspect_recognises_unsupported_log_drivers() {        // Field pitfall §2.3: distinguish unsupported drivers so the
         // logs verb can emit a clear, driver-specific error.
         let cases = [
             ("fluentd", LogDriver::Fluentd),
@@ -860,5 +1095,48 @@ mod tests {
                 problematic_service_name(ok)
             );
         }
+    }
+
+    #[test]
+    fn systemd_filter_blocks_os_internal_names() {
+        for blocked in [
+            "systemd-resolved",
+            "systemd-logind",
+            "user@1000",
+            "session-3",
+            "getty@tty1",
+            "dbus",
+            "cron",
+            "polkit",
+            "snapd",
+            "fwupd",
+            "NetworkManager",
+            "ssh",
+        ] {
+            assert!(
+                systemd_name_is_os_internal(blocked),
+                "expected {blocked:?} to be filtered as OS-internal"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_filter_passes_user_workloads() {
+        for ok in ["nginx", "postgresql", "my-app", "redis", "consul", "vault"] {
+            assert!(
+                !systemd_name_is_os_internal(ok),
+                "expected {ok:?} to pass the filter"
+            );
+        }
+    }
+
+    #[test]
+    fn human_bytes_formats_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(human_bytes(2u64 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 }

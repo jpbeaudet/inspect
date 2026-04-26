@@ -99,10 +99,24 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             }
         } else {
             bad += 1;
+            // Field pitfall §7.3: distroless / scratch images have no
+            // shell, so `docker exec ... sh -c ...` fails with the
+            // OCI runtime error below. Translate the runtime-spec
+            // wall-of-text into a one-line, actionable message so
+            // the operator knows to either install a shell in the
+            // image or use `docker cp` for file IO.
+            let stderr_msg = if looks_like_no_shell(&out.stderr) {
+                format!(
+                    "container has no `sh` (distroless/scratch image): \
+                     `inspect exec` requires a shell on the target. \
+                     Use `inspect cp` for file transfer, or rebuild the image with a busybox/alpine layer."
+                )
+            } else {
+                out.stderr.trim().to_string()
+            };
             renderer.data_line(format!(
                 "{label}: FAILED (exit {}): {}",
-                out.exit_code,
-                out.stderr.trim()
+                out.exit_code, stderr_msg
             ));
         }
     }
@@ -112,4 +126,36 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         .next("inspect audit ls");
     renderer.print();
     Ok(if bad == 0 { ExitKind::Success } else { ExitKind::Error })
+}
+
+/// Field pitfall §7.3: detect docker's runtime-spec error for "no
+/// shell in image". Three observed phrasings across docker 20.x-25.x
+/// (and the equivalent containerd/CRI message).
+pub(crate) fn looks_like_no_shell(stderr: &str) -> bool {
+    let s = stderr;
+    s.contains("\"sh\": executable file not found")
+        || s.contains("exec: \"sh\":")
+        || (s.contains("OCI runtime exec failed") && s.contains("sh"))
+        || s.contains("starting container process caused: exec: \"sh\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_distroless_no_shell() {
+        // OCI runtime spec wording on Docker 20-25.
+        let s = "OCI runtime exec failed: exec failed: unable to start container process: \
+                 exec: \"sh\": executable file not found in $PATH: unknown";
+        assert!(looks_like_no_shell(s));
+
+        // Containerd / CRI wording.
+        let s2 = "starting container process caused: exec: \"sh\": executable file not found";
+        assert!(looks_like_no_shell(s2));
+
+        // Genuine other failure must not trip the heuristic.
+        assert!(!looks_like_no_shell("permission denied"));
+        assert!(!looks_like_no_shell("container not found"));
+    }
 }
