@@ -801,6 +801,144 @@ This matches the behavior of `ls`, `grep`, `rg`, and most modern CLI tools.
 
 The format system is extensible via the shared rendering layer. Each format is a trait implementation that receives the same `CommandOutput` struct (containing summary, data records, next suggestions, and meta). Adding a new format (e.g., `--html`, `--latex`, `--proto`) requires one new trait impl and one new flag variant. No verb code changes.
 
+### Implementation notes (Phase 10.3 landed)
+
+**Module layout** ([src/format/](src/format/)):
+
+- `mod.rs` — `OutputFormat` enum (`Human`/`Table`/`Md`/`Json`/`Csv`/
+  `Tsv`/`Yaml`/`Format(String)`/`Raw`), `FormatArgs` clap-flattenable
+  struct, `resolve()` mutex validator, `no_color_active()` /
+  `is_stdout_tty()` helpers.
+- `template.rs` — Go-style template engine. Implements field access
+  `{{.x}}`, pipe functions (`upper`, `lower`, `len`, `default`,
+  `truncate N`, `pad N`, `join "sep"`, `json`, `ago`), and
+  `{{if eq .x "y"}}…{{else}}…{{end}}` conditionals. Missing fields
+  render as `<none>` (kubectl convention). Hand-written
+  recursive-descent parser; **no new dependencies** (no `tera`,
+  `handlebars`, etc.) — same rationale as the LogQL parser in §6.
+- `render.rs` — two entry points:
+  - `render_doc(&OutputDoc, &OutputFormat, &[String])` for aggregate
+    verbs (`status`/`health`/`why`/`connectivity`/`recipe`/`search`).
+    `extract_doc_rows()` projects nested arrays-of-objects from
+    `doc.data` into a row table for tabular formats.
+  - `render_rows(&[Value], summary, &[NextStep], &OutputFormat)` for
+    per-record verbs (`ps`/`ports`/`images`/`volumes`/`network`).
+
+**Wiring strategy**:
+
+- Every CLI struct that previously held `pub json: bool` now holds
+  `#[command(flatten)] pub format: crate::format::FormatArgs` (29 sites
+  in [src/cli.rs](src/cli.rs)). Call sites use
+  `args.format.is_json()` for backward-compat fast paths or
+  `args.format.resolve()?` to obtain the resolved `OutputFormat` for
+  full dispatch. **All pre-Phase-10.3 tests continue to pass
+  unchanged** because `--json` and `--jsonl` resolve to
+  `OutputFormat::Json`, which produces the same line-delimited JSON
+  envelope as before.
+- `Renderer` (the human SUMMARY/DATA/NEXT buffer from Phase 10) gained
+  `push_row(&Envelope)` and `dispatch(&OutputFormat)`. Per-record verbs
+  call `human.push_row(&env)` once per record then `human.dispatch(&fmt)`
+  at the end; the dispatcher routes `Human` to `print()`, `Json` to
+  the existing per-line writer, and everything else to `render_rows`.
+  Verbs no longer branch on every flag.
+
+**Mutual-exclusivity error wording** is bible-exact:
+
+```
+error: --json and --csv are mutually exclusive. Pick one output format.
+```
+
+`FormatArgs::resolve()` collects the set of enabled flags, and on
+`len > 1` returns the first two collisions in that message. Verified
+by `tests/phase10_3_formats.rs::json_and_csv_are_mutually_exclusive`.
+
+**Per-format SUMMARY/DATA/NEXT visibility** matches the table in
+§10.3 exactly:
+
+- `Human`/`Table`/`Md` retain `SUMMARY:` and `NEXT:` decoration.
+- `Yaml` emits envelope context as `# summary:` / `# next:` comments
+  at the top, then the YAML body.
+- `Csv`/`Tsv`/`Format`/`Raw` suppress the envelope entirely — pure
+  data only.
+- `Json` keeps the full envelope (matches `--json` semantics from
+  Phase 10).
+
+**TSV/CSV escaping** follows RFC 4180 for CSV (quote when the cell
+contains `,`, `"`, `\n`, or `\r`; double quotes inside escape as
+`""`); TSV strips embedded tabs/newlines to spaces (no quoting).
+Markdown escapes `|` as `\|`.
+
+**Reserved column ordering** for tabular formats: `_source`,
+`_medium`, `server`, `service` are emitted first (when present),
+matching the bible's "_source/_medium meta-fields are included as
+the first two columns for disambiguation" rule.
+
+**Template engine subset** (intentional):
+
+- Supported: `{{.field}}`, pipe chains, the 9 documented functions,
+  `eq`/`ne` conditionals with `{{else}}`, `\t`/`\n`/`\\` escape
+  sequences in literal text.
+- Out-of-scope (deferred): user-defined functions, `range`, nested
+  field paths, parentheses, comments. These can land later without
+  breaking the surface — the parser is hand-rolled and easy to
+  extend.
+
+**`NO_COLOR` / `--no-color` / TTY detection**:
+
+- `--no-color` is a flag on `FormatArgs` (uniform across every verb).
+- `no_color_active(flag)` honors `--no-color`, the `NO_COLOR` env
+  var, and `!is_stdout_tty()`.
+- `is_stdout_tty()` calls `libc::isatty(1)` on unix; returns `true`
+  on non-unix. No new dependency — `libc` was already vendored for
+  Phase 1 socket work.
+
+**Backward compatibility**:
+
+- `--json` → `OutputFormat::Json` produces byte-identical output to
+  pre-Phase-10.3 `--json`. All Phase 4/7/9/10 JSON tests pass
+  unchanged.
+- `--jsonl` is a strict alias for `--json`; verified by
+  `jsonl_emits_same_shape_as_json`.
+
+**No new dependencies.** All format work uses already-vendored
+`serde_json`, `serde_yaml`, `chrono`, and `libc` (unix-only).
+
+### Exit-criteria test references
+
+- Mutual exclusivity (bible wording):
+  `tests/phase10_3_formats.rs::json_and_csv_are_mutually_exclusive`,
+  `yaml_and_format_are_mutually_exclusive`.
+- `--jsonl` alias parity: `jsonl_emits_same_shape_as_json`.
+- CSV: `csv_emits_header_and_rows_no_envelope`,
+  `csv_quotes_fields_with_commas`.
+- TSV: `tsv_uses_tabs_no_quoting`.
+- YAML: `yaml_emits_summary_comment_and_documents`,
+  `status_yaml_keeps_summary_as_comment`.
+- Markdown: `md_emits_pipe_table`.
+- ASCII table: `table_is_plain_ascii_with_envelope`.
+- Templates (`--format`): `format_template_renders_per_record`,
+  `format_template_pipes_work`, `format_template_conditional`.
+- Raw: `raw_strips_envelope_and_emits_scalars`.
+- `--no-color` accepted globally: `no_color_flag_is_accepted_globally`.
+- Backward compat: `json_remains_line_delimited_envelopes`,
+  `default_human_format_unchanged_for_ps`.
+- OutputDoc commands honor format dispatch:
+  `status_csv_emits_services_table`,
+  `status_yaml_keeps_summary_as_comment`.
+- Template parser internals: `src/format/template.rs::tests` covers
+  field access, missing-field `<none>`, pipes (`upper`/`lower`/
+  `default`/`truncate`/`pad`/`join`/`len`), `if`/`else`, escape
+  sequences, error reporting on unterminated strings, and array
+  default rendering.
+- Renderer/CSV escape primitives: `src/format/render.rs::tests`
+  covers prelude column order, RFC-4180 quoting, TSV tab stripping,
+  markdown `|` escape, nested array projection, scalar fallback, and
+  ASCII column alignment.
+
+Final tally: **306 tests passing, `cargo clippy --all-targets -- -D
+warnings` clean**, **zero new dependencies**, full backward
+compatibility with the pre-10.3 surface.
+
 ## Phase 11 - Fleet Operations
 
 Goal: safe, concurrent multi-namespace operations across verbs.

@@ -9,6 +9,7 @@
 
 pub mod env;
 pub mod file;
+pub mod groups;
 pub mod namespace;
 pub mod resolver;
 

@@ -139,7 +139,7 @@ pub enum Command {
 
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
-    Fleet(SelectorArgs),
+    Fleet(FleetArgs),
 }
 
 #[derive(Debug, Args)]
@@ -215,6 +215,39 @@ pub struct ShowArgs {
 #[derive(Debug, Args)]
 pub struct SelectorArgs {
     /// Free-form selector or arguments. Validated in later phases.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+/// Phase 11 fleet orchestrator. Runs an inner verb across a set of
+/// namespaces selected via `--ns` (glob, comma-list, or `@group`).
+///
+/// Layout: `inspect fleet [FLEET-FLAGS] <verb> [VERB-ARGS...]`
+///
+/// Fleet flags must come before the verb name. Everything after the verb
+/// is forwarded verbatim to the child invocation.
+#[derive(Debug, Args)]
+pub struct FleetArgs {
+    /// Namespace pattern: a glob (`prod-*`), a comma-separated list
+    /// (`prod-1,prod-2`), or a group reference (`@prod`).
+    #[arg(long)]
+    pub ns: String,
+    /// Override `INSPECT_FLEET_CONCURRENCY` (default 8).
+    #[arg(long)]
+    pub concurrency: Option<usize>,
+    /// Skip the large-fanout interlock that would otherwise prompt when
+    /// the matched namespace count exceeds the safety threshold.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Emit a single aggregate JSON document with per-namespace results.
+    #[arg(long)]
+    pub json: bool,
+    /// Stop after the first failing namespace instead of continuing.
+    #[arg(long)]
+    pub abort_on_error: bool,
+    /// Inner verb to run (e.g. `status`, `restart`, `setup`).
+    pub verb: String,
+    /// Remaining args forwarded to the inner verb.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
 }

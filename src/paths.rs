@@ -30,7 +30,6 @@ pub fn aliases_toml() -> PathBuf {
     inspect_home().join("aliases.toml")
 }
 
-#[allow(dead_code)]
 pub fn groups_toml() -> PathBuf {
     inspect_home().join("groups.toml")
 }

@@ -8,6 +8,7 @@ pub mod connections;
 pub mod connectivity;
 pub mod disconnect;
 pub mod disconnect_all;
+pub mod fleet;
 pub mod list;
 pub mod placeholders;
 pub mod profile;

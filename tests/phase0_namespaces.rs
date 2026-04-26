@@ -300,16 +300,3 @@ fn rejects_unsafe_permissions_on_servers_toml() {
             .stderr(predicate::str::contains("unsafe permissions"));
     }
 }
-
-#[test]
-fn placeholder_verb_returns_phase_message() {
-    let (_g, home) = isolated_home();
-    let mut cmd = bin();
-    clear_inspect_env(&mut cmd);
-    cmd.env("INSPECT_HOME", &home)
-        .args(["fleet", "arte"])
-        .assert()
-        .failure() // exit 2 for unimplemented verbs
-        .stdout(predicate::str::contains("not implemented yet"))
-        .stdout(predicate::str::contains("Phase 11"));
-}

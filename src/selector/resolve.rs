@@ -98,7 +98,22 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
     let known_names: Vec<String> = all_namespaces.iter().map(|n| n.name.clone()).collect();
 
     // Step 1: filter namespaces.
-    let chosen_namespaces = match_servers(&sel.server, &known_names);
+    //
+    // Phase 11 fleet override: when `INSPECT_FLEET_FORCE_NS` is set, the
+    // fleet orchestrator has already chosen the namespace and the user's
+    // server spec must be ignored. We still enforce that the forced
+    // namespace exists; otherwise selector resolution falls back to
+    // `NoMatches` with the usual diagnostic.
+    let chosen_namespaces = match std::env::var("INSPECT_FLEET_FORCE_NS").ok() {
+        Some(forced) if !forced.is_empty() => {
+            if known_names.iter().any(|n| n == &forced) {
+                vec![forced]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => match_servers(&sel.server, &known_names),
+    };
 
     // Collect "what was available" for diagnostics.
     let mut all_services: BTreeSet<String> = BTreeSet::new();

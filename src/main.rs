@@ -89,6 +89,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Why(args) => commands::why::run(args),
         Command::Connectivity(args) => commands::connectivity::run(args),
         Command::Recipe(args) => commands::recipe::run(args),
-        Command::Fleet(_) => commands::placeholders::run(cli.command),
+        Command::Fleet(args) => commands::fleet::run(args),
     }
 }
