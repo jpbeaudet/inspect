@@ -99,6 +99,138 @@ pub fn all_ids() -> impl Iterator<Item = &'static str> {
     TOPICS.iter().map(|t| t.id)
 }
 
+// ---------------------------------------------------------------------------
+// HP-2: verb <-> topic registry.
+//
+// The mapping is the source of truth for two consumers:
+//   * `cli.rs`, which renders `See also: inspect help <topic>, ...` in the
+//     `after_help` block of every command's `--help` output,
+//   * `inspect help --json` (HP-4), which exposes `commands.<verb>.see_also`
+//     and `topics.<id>.verbs` so external agents can navigate the surface
+//     deterministically.
+//
+// Order in each `&[topic]` slice matters: the first entry is the primary
+// topic. The bible §HP-2 table is the source for these groupings — any
+// change here must round-trip through that table.
+// ---------------------------------------------------------------------------
+
+/// Static mapping `verb -> &[topic_ids]`, ordered (primary first).
+///
+/// Verbs not present here have no editorial topic linkage and the renderer
+/// must fall through to a generic footer. Today every top-level verb is
+/// listed; the test suite guards that invariant.
+pub const VERB_TOPICS: &[(&str, &[&str])] = &[
+    // Read verbs — the selector + format + worked-examples cluster.
+    ("status",          &["selectors", "formats", "examples"]),
+    ("health",          &["selectors", "formats", "examples"]),
+    ("logs",            &["selectors", "formats", "examples"]),
+    ("grep",            &["selectors", "formats", "examples"]),
+    ("cat",             &["selectors", "formats", "examples"]),
+    ("ls",              &["selectors", "formats", "examples"]),
+    ("find",            &["selectors", "formats", "examples"]),
+    ("ps",              &["selectors", "formats", "examples"]),
+    ("volumes",         &["selectors", "formats", "examples"]),
+    ("images",          &["selectors", "formats", "examples"]),
+    ("network",         &["selectors", "formats", "examples"]),
+    ("ports",           &["selectors", "formats", "examples"]),
+    ("resolve",         &["selectors", "aliases", "examples"]),
+
+    // Search.
+    ("search",          &["search", "selectors", "aliases", "formats"]),
+
+    // Write verbs — every one carries the safety + fleet cross-link.
+    ("restart",         &["write", "safety", "fleet"]),
+    ("stop",            &["write", "safety", "fleet"]),
+    ("start",           &["write", "safety", "fleet"]),
+    ("reload",          &["write", "safety", "fleet"]),
+    ("cp",              &["write", "safety", "fleet"]),
+    ("edit",            &["write", "safety", "fleet"]),
+    ("rm",              &["write", "safety", "fleet"]),
+    ("mkdir",           &["write", "safety", "fleet"]),
+    ("touch",           &["write", "safety", "fleet"]),
+    ("chmod",           &["write", "safety", "fleet"]),
+    ("chown",           &["write", "safety", "fleet"]),
+    ("exec",            &["write", "safety", "fleet"]),
+
+    // Audit + revert — the safety pair.
+    ("audit",           &["safety", "write"]),
+    ("revert",          &["safety", "write"]),
+
+    // Fleet orchestrator.
+    ("fleet",           &["fleet", "write", "selectors"]),
+
+    // Diagnostic recipes.
+    ("why",             &["recipes", "examples"]),
+    ("connectivity",    &["recipes", "examples"]),
+    ("recipe",          &["recipes", "examples"]),
+
+    // Setup / discovery / ssh lifecycle.
+    ("add",             &["discovery", "ssh", "quickstart"]),
+    ("list",            &["discovery", "ssh", "quickstart"]),
+    ("remove",          &["discovery", "ssh", "quickstart"]),
+    ("show",            &["discovery", "ssh", "quickstart"]),
+    ("test",            &["discovery", "ssh", "quickstart"]),
+    ("setup",           &["discovery", "ssh", "quickstart"]),
+    ("discover",        &["discovery", "ssh", "quickstart"]),
+    ("profile",         &["discovery", "ssh", "quickstart"]),
+    ("connect",         &["ssh", "discovery", "quickstart"]),
+    ("disconnect",      &["ssh", "discovery"]),
+    ("connections",     &["ssh", "discovery"]),
+    ("disconnect-all",  &["ssh", "discovery"]),
+
+    // Aliases.
+    ("alias",           &["aliases", "selectors", "search"]),
+
+    // Help is a verb too: it cross-links the user back to the index.
+    ("help",            &["quickstart", "examples"]),
+];
+
+/// Look up the topics linked to a verb. Returns the empty slice if the
+/// verb is unknown, which the JSON serialiser treats as "no editorial
+/// linkage" rather than panicking — keeps the contract resilient when a
+/// new verb is added but its row is forgotten (the test suite catches
+/// the omission).
+#[allow(dead_code)] // consumed by `inspect help --json` (HP-4)
+pub fn topics_for_verb(verb: &str) -> &'static [&'static str] {
+    VERB_TOPICS
+        .iter()
+        .find(|(v, _)| *v == verb)
+        .map(|(_, ts)| *ts)
+        .unwrap_or(&[])
+}
+
+/// Inverse view: every verb that lists `topic` (in any position).
+/// Produced on demand because the registry is small (≤ 50 verbs) and
+/// this is only called from `--json` and tests.
+#[allow(dead_code)] // consumed by `inspect help --json` (HP-4)
+pub fn verbs_for(topic: &str) -> Vec<&'static str> {
+    VERB_TOPICS
+        .iter()
+        .filter(|(_, ts)| ts.contains(&topic))
+        .map(|(v, _)| *v)
+        .collect()
+}
+
+/// Render the canonical `See also:` footer line for a verb. Used by the
+/// `after_help` blocks in [`crate::cli`] and by the JSON contract.
+///
+/// Format (pinned by the test suite):
+///   `See also: inspect help <t1>, inspect help <t2>, inspect help <t3>`
+///
+/// The bible §HP-2 DoD names this exact shape for `inspect grep --help`.
+#[allow(dead_code)] // consumed by the HP-2 contract test and `--json` (HP-4)
+pub fn see_also_line(verb: &str) -> String {
+    let topics = topics_for_verb(verb);
+    if topics.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = topics
+        .iter()
+        .map(|t| format!("inspect help {t}"))
+        .collect();
+    format!("See also: {}", parts.join(", "))
+}
+
 /// Levenshtein distance between two ASCII-lowercase strings, capped at
 /// `max + 1` for early exit. Used by the "did you mean" suggester so a
 /// long unknown topic doesn't turn into a quadratic comparison against

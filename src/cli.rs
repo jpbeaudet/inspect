@@ -15,6 +15,386 @@ Phase 0 implements namespace credential management. Other commands are \
 scaffolded and will be filled in by subsequent phases.
 ";
 
+// ---------------------------------------------------------------------------
+// HP-2: per-verb cross-link footers.
+//
+// These constants are attached to each command's `#[command(after_help = …)]`
+// attribute. The exact text is the contract — the test suite in
+// `tests/help_contract.rs` pins the format and verifies every constant is
+// in lock-step with `crate::help::topics::see_also_line(verb)`, which is the
+// runtime source of truth used by `inspect help --json` (HP-4).
+//
+// Format (frozen): `See also: inspect help <t1>, inspect help <t2>, ...`
+// ---------------------------------------------------------------------------
+
+const SEE_ALSO_READ: &str =
+    "See also: inspect help selectors, inspect help formats, inspect help examples";
+const SEE_ALSO_RESOLVE: &str =
+    "See also: inspect help selectors, inspect help aliases, inspect help examples";
+const SEE_ALSO_SEARCH: &str = "See also: inspect help search, inspect help selectors, \
+                               inspect help aliases, inspect help formats";
+const SEE_ALSO_WRITE: &str =
+    "See also: inspect help write, inspect help safety, inspect help fleet";
+const SEE_ALSO_SAFETY: &str = "See also: inspect help safety, inspect help write";
+const SEE_ALSO_FLEET: &str =
+    "See also: inspect help fleet, inspect help write, inspect help selectors";
+const SEE_ALSO_RECIPES: &str = "See also: inspect help recipes, inspect help examples";
+const SEE_ALSO_DISCOVER: &str =
+    "See also: inspect help discovery, inspect help ssh, inspect help quickstart";
+const SEE_ALSO_CONNECT: &str =
+    "See also: inspect help ssh, inspect help discovery, inspect help quickstart";
+const SEE_ALSO_SSH: &str = "See also: inspect help ssh, inspect help discovery";
+const SEE_ALSO_ALIAS: &str =
+    "See also: inspect help aliases, inspect help selectors, inspect help search";
+const SEE_ALSO_HELP: &str = "See also: inspect help quickstart, inspect help examples";
+
+// ---------------------------------------------------------------------------
+// HP-2: per-verb `long_about` blocks.
+//
+// These are attached to each `Command` variant via `#[command(long_about = …)]`
+// (the inner `Args` struct's long_about is shadowed by the variant doc-comment,
+// so the attribute must live on the variant itself). One constant per Args
+// struct family; verbs that share an Args type also share the long_about, with
+// examples chosen to demonstrate the cluster's idiom.
+//
+// Each block opens with a one-paragraph DESCRIPTION and ends with an EXAMPLES
+// stanza of three `$ inspect …` lines so `inspect <verb> --help` is
+// self-sufficient (HP-2 DoD).
+// ---------------------------------------------------------------------------
+
+const LONG_ADD: &str = "\
+Register or update a namespace's SSH credentials. Idempotent: running \
+`add` again with new flags rewrites the entry.
+
+EXAMPLES
+  $ inspect add arte
+  $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod
+  $ inspect add staging --non-interactive --force";
+
+const LONG_LIST: &str = "\
+Print every configured namespace with its host, user, and last-known \
+reachability.
+
+EXAMPLES
+  $ inspect list
+  $ inspect list --json
+  $ inspect list --csv";
+
+const LONG_REMOVE: &str = "\
+Delete a namespace's stored credentials and cached profile. The SSH key \
+file itself is never touched.
+
+EXAMPLES
+  $ inspect remove staging
+  $ inspect remove prod-eu --yes";
+
+const LONG_TEST: &str = "\
+Validate a namespace's configuration: env vars resolve, key file is \
+readable, host is reachable. Does not run discovery.
+
+EXAMPLES
+  $ inspect test arte
+  $ inspect test prod-eu --json";
+
+const LONG_SHOW: &str = "\
+Print a namespace's resolved configuration with secrets redacted. Use \
+`--profile` to see the cached discovery profile.
+
+EXAMPLES
+  $ inspect show arte
+  $ inspect show arte --json
+  $ inspect show arte --profile";
+
+const LONG_FLEET: &str = "\
+Run an inner verb across multiple namespaces selected by `--ns` (glob, \
+comma-list, or `@group`). Results stream as they arrive; failed \
+namespaces appear with error rows but do not abort the run unless \
+`--abort-on-error` is set.
+
+EXAMPLES
+  $ inspect fleet --ns 'prod-*' status
+  $ inspect fleet --ns @prod restart pulse --apply
+  $ inspect fleet --ns 'prod-*' --canary 1 restart pulse --apply";
+
+const LONG_WHY: &str = "\
+Diagnostic walk for a service: status, recent errors, health, and \
+connectivity from one selector. The built-in `why` recipe.
+
+EXAMPLES
+  $ inspect why arte/atlas
+  $ inspect why 'prod-*/storage' --json";
+
+const LONG_CONNECTIVITY: &str = "\
+Print the connectivity matrix for the selected services. With `--probe`, \
+live-test each declared edge with bash /dev/tcp.
+
+EXAMPLES
+  $ inspect connectivity arte
+  $ inspect connectivity arte/atlas --probe
+  $ inspect connectivity 'prod-*' --json";
+
+const LONG_RECIPE: &str = "\
+Run a multi-step diagnostic or remediation recipe. Built-in recipes are \
+listed in `inspect help recipes`. User recipes live under \
+~/.inspect/recipes/<name>.yaml. Mutating recipes require `--apply`.
+
+EXAMPLES
+  $ inspect recipe deploy-check arte
+  $ inspect recipe disk-audit 'prod-*'
+  $ inspect recipe cycle-atlas --sel arte/atlas --apply";
+
+const LONG_SEARCH: &str = "\
+LogQL query across logs, files, and discovery sources. Queries are \
+always single-quoted. The pipeline is the LogQL DSL, not the shell.
+
+EXAMPLES
+  $ inspect search '{server=\"arte\", source=\"logs\"} |= \"error\"' --since 1h
+  $ inspect search '{server=~\"prod-.*\", service=\"storage\", source=\"logs\"} |= \"timeout\"'
+  $ inspect search 'sum by (service) (count_over_time({server=\"arte\", source=\"logs\"} |= \"error\" [5m]))'";
+
+const LONG_CONNECT: &str = "\
+Open a persistent SSH session for a namespace. The first call prompts \
+for the key passphrase (if encrypted); subsequent commands reuse the \
+session via a control socket until the TTL expires.
+
+EXAMPLES
+  $ inspect connect arte
+  $ inspect connect prod-eu --ttl 4h
+  $ inspect connect arte --non-interactive";
+
+const LONG_DISCONNECT: &str = "\
+Close the persistent SSH session for one namespace. Does not affect \
+user-managed ControlMaster sockets in ~/.ssh/config.
+
+EXAMPLES
+  $ inspect disconnect arte
+  $ inspect disconnect prod-eu --json";
+
+const LONG_CONNECTIONS: &str = "\
+List active inspect-managed SSH sessions, with TTL remaining and the \
+path to each control socket.
+
+EXAMPLES
+  $ inspect connections
+  $ inspect connections --json
+  $ inspect connections --csv";
+
+const LONG_DISCONNECT_ALL: &str = "\
+Close every active inspect-managed SSH session. Prompts for confirmation \
+unless `--yes` is passed.
+
+EXAMPLES
+  $ inspect disconnect-all
+  $ inspect disconnect-all --yes";
+
+const LONG_SETUP: &str = "\
+Run discovery against a namespace and persist its profile (containers, \
+volumes, networks, listeners, remote tooling). Cached profiles live \
+under ~/.inspect/profiles/.
+
+EXAMPLES
+  $ inspect setup arte
+  $ inspect setup prod-eu --force
+  $ inspect setup arte --check-drift";
+
+const LONG_PROFILE: &str = "\
+Print the cached discovery profile for a namespace.
+
+EXAMPLES
+  $ inspect profile arte
+  $ inspect profile arte --json
+  $ inspect profile prod-eu --yaml";
+
+const LONG_ALIAS: &str = "\
+Manage saved selector aliases (`@name`). Subcommands: add, list, \
+remove, show.
+
+EXAMPLES
+  $ inspect alias add plogs '{server=\"arte\", service=\"pulse\", source=\"logs\"}'
+  $ inspect alias add storage-prod 'prod-*/storage'
+  $ inspect alias list";
+
+const LONG_RESOLVE: &str = "\
+Resolve a selector against discovered profiles and print the target \
+list. Useful to test selector grammar before a real verb call.
+
+EXAMPLES
+  $ inspect resolve arte/storage
+  $ inspect resolve 'prod-*/atlas'
+  $ inspect resolve @plogs";
+
+const LONG_SIMPLE_SELECTOR: &str = "\
+Generic listing for ports / volumes / images / network. The verb name \
+selects which medium to list.
+
+EXAMPLES
+  $ inspect volumes arte
+  $ inspect images arte/atlas
+  $ inspect ports 'prod-*'";
+
+const LONG_STATUS: &str = "\
+Service inventory and health rollup for the selected targets.
+
+EXAMPLES
+  $ inspect status arte
+  $ inspect status arte/atlas
+  $ inspect status 'prod-*' --json";
+
+const LONG_HEALTH: &str = "\
+Detailed health checks for the selected services. Calls each service's \
+declared health endpoint and reports per-check status.
+
+EXAMPLES
+  $ inspect health arte
+  $ inspect health arte/atlas --json
+  $ inspect health 'prod-*/storage'";
+
+const LONG_PS: &str = "\
+List containers on the selected targets.
+
+EXAMPLES
+  $ inspect ps arte
+  $ inspect ps arte --all
+  $ inspect ps 'prod-*' --json";
+
+const LONG_LOGS: &str = "\
+Tail or view container logs. With `--follow`, streams new records until \
+interrupted; the inner SSH session auto-resumes on transient failures.
+
+EXAMPLES
+  $ inspect logs arte/pulse --since 30m
+  $ inspect logs arte/atlas --tail 200 --follow
+  $ inspect logs 'prod-*/storage' --since 1h --json";
+
+const LONG_GREP: &str = "\
+Search content in logs or files on the selected targets. Selector may \
+include `:path` to grep a specific file. Smart-case by default.
+
+EXAMPLES
+  $ inspect grep \"error\" arte/pulse --since 1h
+  $ inspect grep -i \"timeout\" 'prod-*/storage' --since 30m
+  $ inspect grep \"milvus\" arte/atlas:/var/log/atlas.log";
+
+const LONG_CAT: &str = "\
+Print the contents of a file inside a container or on the host.
+
+EXAMPLES
+  $ inspect cat arte/atlas:/etc/atlas.conf
+  $ inspect cat arte/_:/var/log/syslog
+  $ inspect cat arte/pulse:/etc/pulse.conf --raw";
+
+const LONG_LS: &str = "\
+List directory contents on a target.
+
+EXAMPLES
+  $ inspect ls arte/atlas:/etc
+  $ inspect ls arte/_:/var/log -A
+  $ inspect ls arte/pulse:/var/lib/pulse -l";
+
+const LONG_FIND: &str = "\
+Find files by name pattern on a target. Wraps remote `find` and \
+respects discovery's tooling probe.
+
+EXAMPLES
+  $ inspect find arte/atlas:/etc \"*.conf\"
+  $ inspect find arte/_:/var/log \"*.log\"
+  $ inspect find 'prod-*/storage:/data'";
+
+const LONG_LIFECYCLE: &str = "\
+Container lifecycle (the verb form chooses the action: restart / stop / \
+start / reload). Dry-run by default; `--apply` executes.
+
+EXAMPLES
+  $ inspect restart arte/pulse
+  $ inspect restart arte/pulse --apply
+  $ inspect stop 'prod-*/atlas' --apply --yes-all";
+
+const LONG_EXEC: &str = "\
+Run a command on the selected targets. Doubly gated: requires both \
+`--apply` and `--allow-exec` because exec is the one verb that shells \
+out free-form code on the remote.
+
+EXAMPLES
+  $ inspect exec arte/atlas -- uptime
+  $ inspect exec arte/atlas --apply --allow-exec -- systemctl status atlas
+  $ inspect exec 'prod-*' --apply --allow-exec --yes-all -- df -h";
+
+const LONG_PATH_ARG: &str = "\
+File operation on a target path (the verb form chooses: rm / mkdir / \
+touch). Dry-run by default; `--apply` executes.
+
+EXAMPLES
+  $ inspect rm arte/atlas:/tmp/stale.log --apply
+  $ inspect mkdir arte/_:/var/log/inspect --apply
+  $ inspect touch arte/atlas:/tmp/marker --apply";
+
+const LONG_CHMOD: &str = "\
+Change file mode (octal or symbolic). Dry-run by default; `--apply` \
+executes.
+
+EXAMPLES
+  $ inspect chmod arte/atlas:/etc/atlas.conf 0644
+  $ inspect chmod arte/atlas:/etc/atlas.conf 0644 --apply
+  $ inspect chmod arte/atlas:/usr/local/bin/atlas u+x --apply";
+
+const LONG_CHOWN: &str = "\
+Change file ownership (`user[:group]`). Dry-run by default; `--apply` \
+executes.
+
+EXAMPLES
+  $ inspect chown arte/atlas:/etc/atlas.conf atlas
+  $ inspect chown arte/atlas:/etc/atlas.conf atlas:atlas --apply
+  $ inspect chown arte/_:/var/log/atlas root:adm --apply";
+
+const LONG_CP: &str = "\
+Copy a file between local and remote (push or pull, depending on which \
+side carries `<sel>:<path>`). Dry-run by default; `--diff` shows a \
+unified diff before `--apply`.
+
+EXAMPLES
+  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --diff
+  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --apply
+  $ inspect cp arte/atlas:/var/log/atlas.log ./atlas.log";
+
+const LONG_EDIT: &str = "\
+In-place sed-style content edit (atomic). Dry-run by default — shows a \
+unified diff. `--apply` writes.
+
+EXAMPLES
+  $ inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/'
+  $ inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/' --apply
+  $ inspect edit '*/atlas:/etc/atlas.conf' 's|debug=on|debug=off|' --apply --yes-all";
+
+const LONG_AUDIT: &str = "\
+Inspect or query the local audit log. Subcommands: ls, show, grep, \
+verify.
+
+EXAMPLES
+  $ inspect audit ls
+  $ inspect audit show <id>
+  $ inspect audit grep \"atlas\"";
+
+const LONG_REVERT: &str = "\
+Revert a previous mutation by audit id. Dry-run by default (shows the \
+reverse diff); `--apply` restores the original content. Refuses if the \
+file changed since the recorded mutation unless `--force`.
+
+EXAMPLES
+  $ inspect revert <audit-id>
+  $ inspect revert <audit-id> --apply
+  $ inspect revert <audit-id> --apply --force";
+
+const LONG_HELP: &str = "\
+Show in-binary documentation. Run with no topic to see the topic + \
+command index, or with a topic name for the full prose. Use `--search` \
+(HP-3) to find help by keyword and `--json` (HP-4) to get the full \
+machine-readable surface.
+
+EXAMPLES
+  $ inspect help
+  $ inspect help quickstart
+  $ inspect help all";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "inspect",
@@ -37,123 +417,177 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Add or update a namespace interactively.
+    #[command(long_about = LONG_ADD)]
     Add(AddArgs),
     /// List configured namespaces.
+    #[command(long_about = LONG_LIST)]
     List(ListArgs),
     /// Remove a namespace.
+    #[command(long_about = LONG_REMOVE)]
     Remove(RemoveArgs),
     /// Validate a namespace's configuration and reachability.
+    #[command(long_about = LONG_TEST)]
     Test(TestArgs),
     /// Show a namespace's resolved configuration (secrets redacted).
+    #[command(long_about = LONG_SHOW)]
     Show(ShowArgs),
 
     // ---- Phase 1 ssh lifecycle ----------------------------------------------
     /// Open a persistent SSH session for a namespace.
+    #[command(long_about = LONG_CONNECT)]
     Connect(ConnectArgs),
     /// Close the persistent SSH session for a namespace.
+    #[command(long_about = LONG_DISCONNECT)]
     Disconnect(DisconnectArgs),
     /// List active persistent connections.
+    #[command(long_about = LONG_CONNECTIONS)]
     Connections(ConnectionsArgs),
     /// Close all persistent connections.
+    #[command(long_about = LONG_DISCONNECT_ALL)]
     DisconnectAll(DisconnectAllArgs),
 
     // ---- Phase 2 discovery ---------------------------------------------------
     /// Run discovery against a namespace and persist its profile.
+    #[command(long_about = LONG_SETUP)]
     Setup(SetupArgs),
     /// Alias of `setup`.
+    #[command(long_about = LONG_SETUP)]
     Discover(SetupArgs),
     /// Show the cached profile for a namespace.
+    #[command(long_about = LONG_PROFILE)]
     Profile(ProfileArgs),
 
     // ---- Phase 4 read verbs --------------------------------------------------
     /// Show service inventory and health rollup.
+    #[command(long_about = LONG_STATUS)]
     Status(StatusArgs),
     /// Detailed health checks.
+    #[command(long_about = LONG_HEALTH)]
     Health(HealthArgs),
     /// Tail or view container logs.
+    #[command(long_about = LONG_LOGS)]
     Logs(LogsArgs),
     /// Search content in logs or files.
+    #[command(long_about = LONG_GREP)]
     Grep(GrepArgs),
     /// Read a file.
+    #[command(long_about = LONG_CAT)]
     Cat(CatArgs),
     /// List directory contents.
+    #[command(long_about = LONG_LS)]
     Ls(LsArgs),
     /// Find files by pattern.
+    #[command(long_about = LONG_FIND)]
     Find(FindArgs),
     /// List running containers.
+    #[command(long_about = LONG_PS)]
     Ps(PsArgs),
     /// List volumes.
+    #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Volumes(SimpleSelectorArgs),
     /// List images.
+    #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Images(SimpleSelectorArgs),
     /// List networks.
+    #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Network(SimpleSelectorArgs),
     /// List listening ports.
+    #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Ports(SimpleSelectorArgs),
     /// Diagnostic walk for a service.
+    #[command(long_about = LONG_WHY)]
     Why(WhyArgs),
     /// Connectivity matrix.
+    #[command(long_about = LONG_CONNECTIVITY)]
     Connectivity(ConnectivityArgs),
     /// Run a multi-step diagnostic recipe.
+    #[command(long_about = LONG_RECIPE)]
     Recipe(RecipeArgs),
 
     // ---- Phase 6/7 search ----------------------------------------------------
     /// LogQL search across mediums and namespaces.
+    #[command(long_about = LONG_SEARCH)]
     Search(SearchArgs),
 
     // ---- Phase 5 write verbs -------------------------------------------------
     /// Restart container(s).
+    #[command(long_about = LONG_LIFECYCLE)]
     Restart(LifecycleArgs),
     /// Stop container(s).
+    #[command(long_about = LONG_LIFECYCLE)]
     Stop(LifecycleArgs),
     /// Start container(s).
+    #[command(long_about = LONG_LIFECYCLE)]
     Start(LifecycleArgs),
     /// Reload service(s) (SIGHUP).
+    #[command(long_about = LONG_LIFECYCLE)]
     Reload(LifecycleArgs),
     /// Copy files between local and remote.
+    #[command(long_about = LONG_CP)]
     Cp(CpArgs),
     /// Sed-style content edit.
+    #[command(long_about = LONG_EDIT)]
     Edit(EditArgs),
     /// Delete file.
+    #[command(long_about = LONG_PATH_ARG)]
     Rm(PathArgArgs),
     /// Create directory.
+    #[command(long_about = LONG_PATH_ARG)]
     Mkdir(PathArgArgs),
     /// Create empty file.
+    #[command(long_about = LONG_PATH_ARG)]
     Touch(PathArgArgs),
     /// Change file mode.
+    #[command(long_about = LONG_CHMOD)]
     Chmod(ChmodArgs),
     /// Change file ownership.
+    #[command(long_about = LONG_CHOWN)]
     Chown(ChownArgs),
     /// Run a command on a target.
+    #[command(long_about = LONG_EXEC)]
     Exec(ExecArgs),
 
     // ---- Phase 3 alias management --------------------------------------------
     /// Manage selector aliases.
+    #[command(long_about = LONG_ALIAS)]
     Alias(AliasArgs),
 
     /// Resolve a selector against discovered profiles and print the targets.
     /// Useful for testing selector grammar before the read/write verbs land.
+    #[command(long_about = LONG_RESOLVE)]
     Resolve(ResolveArgs),
 
     // ---- Phase 5 audit + revert ----------------------------------------------
     /// Inspect or query the local audit log.
+    #[command(long_about = LONG_AUDIT)]
     Audit(AuditArgs),
     /// Revert a previous mutation by audit id.
+    #[command(long_about = LONG_REVERT)]
     Revert(RevertArgs),
 
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
+    #[command(long_about = LONG_FLEET)]
     Fleet(FleetArgs),
 
     // ---- Help system (HP-0) -------------------------------------------------
     /// Show help on a topic, search help, or list all topics.
-    ///
-    /// Run `inspect help` for the topic + command index, or
-    /// `inspect help <topic>` for in-depth documentation.
+    #[command(long_about = LONG_HELP)]
     Help(HelpArgs),
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Show in-binary documentation. Run with no topic to see the \
+topic + command index, or with a topic name for the full prose. Use \
+`--search` (HP-3) to find help by keyword and `--json` (HP-4) to get the \
+full machine-readable surface.\n\n\
+EXAMPLES\n  \
+  $ inspect help\n  \
+  $ inspect help quickstart\n  \
+  $ inspect help all",
+    after_help = SEE_ALSO_HELP,
+)]
 pub struct HelpArgs {
     /// Topic name (e.g. `quickstart`, `selectors`, `search`). Omit to
     /// print the topic + command index.
@@ -176,6 +610,15 @@ pub struct HelpArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Register or update a namespace's SSH credentials. Idempotent: \
+running `add` again with new flags rewrites the entry.\n\n\
+EXAMPLES\n  \
+  $ inspect add arte\n  \
+  $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod\n  \
+  $ inspect add staging --non-interactive --force",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct AddArgs {
     /// Namespace short name (e.g. `arte`, `prod`, `staging`).
     pub namespace: String,
@@ -210,12 +653,29 @@ pub struct AddArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Print every configured namespace with its host, user, and \
+last-known reachability.\n\n\
+EXAMPLES\n  \
+  $ inspect list\n  \
+  $ inspect list --json\n  \
+  $ inspect list --csv",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct ListArgs {
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Delete a namespace's stored credentials and cached profile. \
+The SSH key file itself is never touched.\n\n\
+EXAMPLES\n  \
+  $ inspect remove staging\n  \
+  $ inspect remove prod-eu --yes",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct RemoveArgs {
     /// Namespace to remove.
     pub namespace: String,
@@ -226,6 +686,14 @@ pub struct RemoveArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Validate a namespace's configuration: env vars resolve, key \
+file is readable, host is reachable. Does not run discovery.\n\n\
+EXAMPLES\n  \
+  $ inspect test arte\n  \
+  $ inspect test prod-eu --json",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct TestArgs {
     /// Namespace to test.
     pub namespace: String,
@@ -235,6 +703,15 @@ pub struct TestArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Print a namespace's resolved configuration with secrets \
+redacted. Use `--profile` to see the cached discovery profile.\n\n\
+EXAMPLES\n  \
+  $ inspect show arte\n  \
+  $ inspect show arte --json\n  \
+  $ inspect show arte --profile",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct ShowArgs {
     /// Namespace to show.
     pub namespace: String,
@@ -260,6 +737,17 @@ pub struct SelectorArgs {
 /// Fleet flags must come before the verb name. Everything after the verb
 /// is forwarded verbatim to the child invocation.
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Run an inner verb across multiple namespaces selected by \
+`--ns` (glob, comma-list, or `@group`). Results stream as they arrive; \
+failed namespaces appear with error rows but do not abort the run unless \
+`--abort-on-error` is set.\n\n\
+EXAMPLES\n  \
+  $ inspect fleet --ns 'prod-*' status\n  \
+  $ inspect fleet --ns @prod restart pulse --apply\n  \
+  $ inspect fleet --ns 'prod-*' --canary 1 restart pulse --apply",
+    after_help = SEE_ALSO_FLEET,
+)]
 pub struct FleetArgs {
     /// Namespace pattern: a glob (`prod-*`), a comma-separated list
     /// (`prod-1,prod-2`), or a group reference (`@prod`).
@@ -294,6 +782,14 @@ pub struct FleetArgs {
 // ---- Phase 9 diagnostics + recipes -----------------------------------------
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Diagnostic walk for a service: status, recent errors, \
+health, and connectivity from one selector. The built-in `why` recipe.\n\n\
+EXAMPLES\n  \
+  $ inspect why arte/atlas\n  \
+  $ inspect why 'prod-*/storage' --json",
+    after_help = SEE_ALSO_RECIPES,
+)]
 pub struct WhyArgs {
     /// Selector resolving to one or more services to diagnose.
     pub selector: String,
@@ -302,6 +798,15 @@ pub struct WhyArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Print the connectivity matrix for the selected services. \
+With `--probe`, live-test each declared edge with bash /dev/tcp.\n\n\
+EXAMPLES\n  \
+  $ inspect connectivity arte\n  \
+  $ inspect connectivity arte/atlas --probe\n  \
+  $ inspect connectivity 'prod-*' --json",
+    after_help = SEE_ALSO_RECIPES,
+)]
 pub struct ConnectivityArgs {
     /// Selector resolving to one or more services.
     pub selector: String,
@@ -313,6 +818,16 @@ pub struct ConnectivityArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Run a multi-step diagnostic or remediation recipe. Built-in \
+recipes are listed in `inspect help recipes`. User recipes live under \
+~/.inspect/recipes/<name>.yaml. Mutating recipes require `--apply`.\n\n\
+EXAMPLES\n  \
+  $ inspect recipe deploy-check arte\n  \
+  $ inspect recipe disk-audit 'prod-*'\n  \
+  $ inspect recipe cycle-atlas --sel arte/atlas --apply",
+    after_help = SEE_ALSO_RECIPES,
+)]
 pub struct RecipeArgs {
     /// Recipe name (built-in) or absolute/relative path to a recipe YAML.
     pub name: String,
@@ -327,6 +842,16 @@ pub struct RecipeArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "LogQL query across logs, files, and discovery sources. \
+Queries are always single-quoted. The pipeline is the LogQL DSL, not the \
+shell.\n\n\
+EXAMPLES\n  \
+  $ inspect search '{server=\"arte\", source=\"logs\"} |= \"error\"' --since 1h\n  \
+  $ inspect search '{server=~\"prod-.*\", service=\"storage\", source=\"logs\"} |= \"timeout\"'\n  \
+  $ inspect search 'sum by (service) (count_over_time({server=\"arte\", source=\"logs\"} |= \"error\" [5m]))'",
+    after_help = SEE_ALSO_SEARCH,
+)]
 pub struct SearchArgs {
     /// LogQL query string. Always pass a single quoted argument.
     pub query: String,
@@ -347,6 +872,16 @@ pub struct SearchArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Open a persistent SSH session for a namespace. The first \
+call prompts for the key passphrase (if encrypted); subsequent commands \
+reuse the session via a control socket until the TTL expires.\n\n\
+EXAMPLES\n  \
+  $ inspect connect arte\n  \
+  $ inspect connect prod-eu --ttl 4h\n  \
+  $ inspect connect arte --non-interactive",
+    after_help = SEE_ALSO_CONNECT,
+)]
 pub struct ConnectArgs {
     /// Namespace to connect.
     pub namespace: String,
@@ -368,6 +903,14 @@ pub struct ConnectArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Close the persistent SSH session for one namespace. Does \
+not affect user-managed ControlMaster sockets in ~/.ssh/config.\n\n\
+EXAMPLES\n  \
+  $ inspect disconnect arte\n  \
+  $ inspect disconnect prod-eu --json",
+    after_help = SEE_ALSO_SSH,
+)]
 pub struct DisconnectArgs {
     /// Namespace to disconnect.
     pub namespace: String,
@@ -376,12 +919,29 @@ pub struct DisconnectArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "List active inspect-managed SSH sessions, with TTL \
+remaining and the path to each control socket.\n\n\
+EXAMPLES\n  \
+  $ inspect connections\n  \
+  $ inspect connections --json\n  \
+  $ inspect connections --csv",
+    after_help = SEE_ALSO_SSH,
+)]
 pub struct ConnectionsArgs {
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Close every active inspect-managed SSH session. Prompts \
+for confirmation unless `--yes` is passed.\n\n\
+EXAMPLES\n  \
+  $ inspect disconnect-all\n  \
+  $ inspect disconnect-all --yes",
+    after_help = SEE_ALSO_SSH,
+)]
 pub struct DisconnectAllArgs {
     /// Skip confirmation prompt.
     #[arg(long, short)]
@@ -391,6 +951,16 @@ pub struct DisconnectAllArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Run discovery against a namespace and persist its profile \
+(containers, volumes, networks, listeners, remote tooling). Cached \
+profiles live under ~/.inspect/profiles/.\n\n\
+EXAMPLES\n  \
+  $ inspect setup arte\n  \
+  $ inspect setup prod-eu --force\n  \
+  $ inspect setup arte --check-drift",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct SetupArgs {
     /// Namespace to discover.
     pub namespace: String,
@@ -412,6 +982,14 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Print the cached discovery profile for a namespace.\n\n\
+EXAMPLES\n  \
+  $ inspect profile arte\n  \
+  $ inspect profile arte --json\n  \
+  $ inspect profile prod-eu --yaml",
+    after_help = SEE_ALSO_DISCOVER,
+)]
 pub struct ProfileArgs {
     /// Namespace whose profile to display.
     pub namespace: String,
@@ -422,6 +1000,15 @@ pub struct ProfileArgs {
 // ---- Phase 3 -----------------------------------------------------------------
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Manage saved selector aliases (`@name`). Subcommands: add, \
+list, remove, show.\n\n\
+EXAMPLES\n  \
+  $ inspect alias add plogs '{server=\"arte\", service=\"pulse\", source=\"logs\"}'\n  \
+  $ inspect alias add storage-prod 'prod-*/storage'\n  \
+  $ inspect alias list",
+    after_help = SEE_ALSO_ALIAS,
+)]
 pub struct AliasArgs {
     #[command(subcommand)]
     pub command: AliasCommand,
@@ -474,6 +1061,15 @@ pub struct AliasShowArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Resolve a selector against discovered profiles and print \
+the target list. Useful to test selector grammar before a real verb call.\n\n\
+EXAMPLES\n  \
+  $ inspect resolve arte/storage\n  \
+  $ inspect resolve 'prod-*/atlas'\n  \
+  $ inspect resolve @plogs",
+    after_help = SEE_ALSO_RESOLVE,
+)]
 pub struct ResolveArgs {
     /// Selector text (e.g. `arte/pulse`, `prod-*/storage`, `@plogs`).
     pub selector: String,
@@ -483,8 +1079,16 @@ pub struct ResolveArgs {
 
 // ---- Phase 4 read verbs ------------------------------------------------------
 
-/// Reusable arg block for verbs that just need a selector + `--json`.
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Generic listing for ports / volumes / images / network. \
+The verb name selects which medium to list.\n\n\
+EXAMPLES\n  \
+  $ inspect volumes arte\n  \
+  $ inspect images arte/atlas\n  \
+  $ inspect ports 'prod-*'",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct SimpleSelectorArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
@@ -493,6 +1097,15 @@ pub struct SimpleSelectorArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Service inventory and health rollup for the selected \
+targets.\n\n\
+EXAMPLES\n  \
+  $ inspect status arte\n  \
+  $ inspect status arte/atlas\n  \
+  $ inspect status 'prod-*' --json",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct StatusArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
@@ -501,6 +1114,15 @@ pub struct StatusArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Detailed health checks for the selected services. Calls \
+each service's declared health endpoint and reports per-check status.\n\n\
+EXAMPLES\n  \
+  $ inspect health arte\n  \
+  $ inspect health arte/atlas --json\n  \
+  $ inspect health 'prod-*/storage'",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct HealthArgs {
     pub selector: String,
     #[command(flatten)]
@@ -508,6 +1130,14 @@ pub struct HealthArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "List containers on the selected targets.\n\n\
+EXAMPLES\n  \
+  $ inspect ps arte\n  \
+  $ inspect ps arte --all\n  \
+  $ inspect ps 'prod-*' --json",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct PsArgs {
     pub selector: String,
     /// Show all containers (default shows just running).
@@ -518,6 +1148,16 @@ pub struct PsArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Tail or view container logs. With `--follow`, streams new \
+records until interrupted; the inner SSH session auto-resumes on transient \
+failures.\n\n\
+EXAMPLES\n  \
+  $ inspect logs arte/pulse --since 30m\n  \
+  $ inspect logs arte/atlas --tail 200 --follow\n  \
+  $ inspect logs 'prod-*/storage' --since 1h --json",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct LogsArgs {
     pub selector: String,
     /// Show logs since duration (e.g. 30s, 5m, 1h, 2d).
@@ -540,6 +1180,16 @@ pub struct LogsArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Search content in logs or files on the selected targets. \
+Selector may include `:path` to grep a specific file. Smart-case by \
+default.\n\n\
+EXAMPLES\n  \
+  $ inspect grep \"error\" arte/pulse --since 1h\n  \
+  $ inspect grep -i \"timeout\" 'prod-*/storage' --since 30m\n  \
+  $ inspect grep \"milvus\" arte/atlas:/var/log/atlas.log",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct GrepArgs {
     /// Pattern to search for.
     pub pattern: String,
@@ -591,6 +1241,15 @@ pub struct GrepArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Print the contents of a file inside a container or on the \
+host.\n\n\
+EXAMPLES\n  \
+  $ inspect cat arte/atlas:/etc/atlas.conf\n  \
+  $ inspect cat arte/_:/var/log/syslog\n  \
+  $ inspect cat arte/pulse:/etc/pulse.conf --raw",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct CatArgs {
     /// Selector with `:path` (e.g. `arte/atlas:/etc/atlas.conf`).
     pub target: String,
@@ -599,6 +1258,14 @@ pub struct CatArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "List directory contents on a target.\n\n\
+EXAMPLES\n  \
+  $ inspect ls arte/atlas:/etc\n  \
+  $ inspect ls arte/_:/var/log -A\n  \
+  $ inspect ls arte/pulse:/var/lib/pulse -l",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct LsArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -613,6 +1280,15 @@ pub struct LsArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Find files by name pattern on a target. Wraps remote \
+`find` and respects discovery's tooling probe.\n\n\
+EXAMPLES\n  \
+  $ inspect find arte/atlas:/etc \"*.conf\"\n  \
+  $ inspect find arte/_:/var/log \"*.log\"\n  \
+  $ inspect find 'prod-*/storage:/data'",
+    after_help = SEE_ALSO_READ,
+)]
 pub struct FindArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -624,10 +1300,16 @@ pub struct FindArgs {
 
 // ---- Phase 5 write verbs -----------------------------------------------------
 
-/// Shared safety flags for every write verb. Defined inline on each
-/// arg-struct rather than via `#[command(flatten)]` so the help text
-/// stays grouped per verb.
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Container lifecycle (the verb form chooses the action: \
+restart / stop / start / reload). Dry-run by default; `--apply` executes.\n\n\
+EXAMPLES\n  \
+  $ inspect restart arte/pulse\n  \
+  $ inspect restart arte/pulse --apply\n  \
+  $ inspect stop 'prod-*/atlas' --apply --yes-all",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct LifecycleArgs {
     /// Selector (server, server/service, ...).
     pub selector: String,
@@ -643,6 +1325,16 @@ pub struct LifecycleArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Run a command on the selected targets. Doubly gated: \
+requires both `--apply` and `--allow-exec` because exec is the one verb \
+that shells out free-form code on the remote.\n\n\
+EXAMPLES\n  \
+  $ inspect exec arte/atlas -- uptime\n  \
+  $ inspect exec arte/atlas --apply --allow-exec -- systemctl status atlas\n  \
+  $ inspect exec 'prod-*' --apply --allow-exec --yes-all -- df -h",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct ExecArgs {
     /// Selector.
     pub selector: String,
@@ -667,6 +1359,15 @@ pub struct ExecArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "File operation on a target path (the verb form chooses: \
+rm / mkdir / touch). Dry-run by default; `--apply` executes.\n\n\
+EXAMPLES\n  \
+  $ inspect rm arte/atlas:/tmp/stale.log --apply\n  \
+  $ inspect mkdir arte/_:/var/log/inspect --apply\n  \
+  $ inspect touch arte/atlas:/tmp/marker --apply",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct PathArgArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -679,6 +1380,15 @@ pub struct PathArgArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Change file mode (octal or symbolic). Dry-run by default; \
+`--apply` executes.\n\n\
+EXAMPLES\n  \
+  $ inspect chmod arte/atlas:/etc/atlas.conf 0644\n  \
+  $ inspect chmod arte/atlas:/etc/atlas.conf 0644 --apply\n  \
+  $ inspect chmod arte/atlas:/usr/local/bin/atlas u+x --apply",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct ChmodArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -693,6 +1403,15 @@ pub struct ChmodArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Change file ownership (`user[:group]`). Dry-run by default; \
+`--apply` executes.\n\n\
+EXAMPLES\n  \
+  $ inspect chown arte/atlas:/etc/atlas.conf atlas\n  \
+  $ inspect chown arte/atlas:/etc/atlas.conf atlas:atlas --apply\n  \
+  $ inspect chown arte/_:/var/log/atlas root:adm --apply",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct ChownArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -707,6 +1426,16 @@ pub struct ChownArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Copy a file between local and remote (push or pull, \
+depending on which side carries `<sel>:<path>`). Dry-run by default; \
+`--diff` shows a unified diff before `--apply`.\n\n\
+EXAMPLES\n  \
+  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --diff\n  \
+  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --apply\n  \
+  $ inspect cp arte/atlas:/var/log/atlas.log ./atlas.log",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct CpArgs {
     /// Source: local path or `<sel>:<path>`.
     pub source: String,
@@ -726,6 +1455,15 @@ pub struct CpArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "In-place sed-style content edit (atomic). Dry-run by \
+default — shows a unified diff. `--apply` writes.\n\n\
+EXAMPLES\n  \
+  $ inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/'\n  \
+  $ inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/' --apply\n  \
+  $ inspect edit '*/atlas:/etc/atlas.conf' 's|debug=on|debug=off|' --apply --yes-all",
+    after_help = SEE_ALSO_WRITE,
+)]
 pub struct EditArgs {
     /// Selector with `:path`.
     pub target: String,
@@ -740,6 +1478,15 @@ pub struct EditArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Inspect or query the local audit log. Subcommands: ls, \
+show, grep, verify.\n\n\
+EXAMPLES\n  \
+  $ inspect audit ls\n  \
+  $ inspect audit show <id>\n  \
+  $ inspect audit grep \"atlas\"",
+    after_help = SEE_ALSO_SAFETY,
+)]
 pub struct AuditArgs {
     #[command(subcommand)]
     pub command: AuditCommand,
@@ -794,6 +1541,16 @@ pub struct AuditVerifyArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    long_about = "Revert a previous mutation by audit id. Dry-run by default \
+(shows the reverse diff); `--apply` restores the original content. \
+Refuses if the file changed since the recorded mutation unless `--force`.\n\n\
+EXAMPLES\n  \
+  $ inspect revert <audit-id>\n  \
+  $ inspect revert <audit-id> --apply\n  \
+  $ inspect revert <audit-id> --apply --force",
+    after_help = SEE_ALSO_SAFETY,
+)]
 pub struct RevertArgs {
     /// Audit id (or unique prefix).
     pub audit_id: String,
@@ -806,4 +1563,63 @@ pub struct RevertArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+}
+
+#[cfg(test)]
+mod hp2_cross_check {
+    //! HP-2 cross-check: the literal `SEE_ALSO_*` constants in this
+    //! module must stay in lock-step with `help::topics::see_also_line`,
+    //! the runtime helper consumed by `inspect help --json` (HP-4).
+    //!
+    //! If a verb's topic mapping changes in `help::topics::VERB_TOPICS`
+    //! and the matching `SEE_ALSO_*` literal here is not updated, this
+    //! test fires and names the offending verb.
+
+    use crate::help::topics::see_also_line;
+
+    #[track_caller]
+    fn assert_match(verb: &str, literal: &str) {
+        let expected = see_also_line(verb);
+        assert_eq!(
+            literal, expected,
+            "SEE_ALSO_* literal for {verb:?} drifted from VERB_TOPICS"
+        );
+    }
+
+    #[test]
+    fn read_cluster_matches_registry() {
+        // Every read verb shares SEE_ALSO_READ; one representative
+        // is enough — VERB_TOPICS guarantees siblings agree.
+        assert_match("status", super::SEE_ALSO_READ);
+        assert_match("grep", super::SEE_ALSO_READ);
+        assert_match("logs", super::SEE_ALSO_READ);
+    }
+
+    #[test]
+    fn write_cluster_matches_registry() {
+        assert_match("restart", super::SEE_ALSO_WRITE);
+        assert_match("edit", super::SEE_ALSO_WRITE);
+        assert_match("cp", super::SEE_ALSO_WRITE);
+        assert_match("exec", super::SEE_ALSO_WRITE);
+    }
+
+    #[test]
+    fn other_clusters_match_registry() {
+        assert_match("resolve", super::SEE_ALSO_RESOLVE);
+        assert_match("search", super::SEE_ALSO_SEARCH);
+        assert_match("audit", super::SEE_ALSO_SAFETY);
+        assert_match("revert", super::SEE_ALSO_SAFETY);
+        assert_match("fleet", super::SEE_ALSO_FLEET);
+        assert_match("why", super::SEE_ALSO_RECIPES);
+        assert_match("recipe", super::SEE_ALSO_RECIPES);
+        assert_match("connectivity", super::SEE_ALSO_RECIPES);
+        assert_match("setup", super::SEE_ALSO_DISCOVER);
+        assert_match("add", super::SEE_ALSO_DISCOVER);
+        assert_match("connect", super::SEE_ALSO_CONNECT);
+        assert_match("disconnect", super::SEE_ALSO_SSH);
+        assert_match("connections", super::SEE_ALSO_SSH);
+        assert_match("disconnect-all", super::SEE_ALSO_SSH);
+        assert_match("alias", super::SEE_ALSO_ALIAS);
+        assert_match("help", super::SEE_ALSO_HELP);
+    }
 }

@@ -301,3 +301,121 @@ fn mutually_exclusive_mode_flags_rejected() {
         .code(2)
         .stderr(str::contains("mutually exclusive"));
 }
+
+// ---------------------------------------------------------------------------
+// HP-2: per-verb cross-link guards.
+//
+// Integration tests cannot import `Cli` directly (the crate has no `[lib]`
+// target), so each guard spawns the binary and inspects its stdout. The
+// `SEE_ALSO_*` constants in `cli.rs` carry their own bin-internal unit
+// test that pins them to `help::topics::see_also_line`.
+// ---------------------------------------------------------------------------
+
+/// Canonical list of every top-level subcommand the binary exposes.
+/// Mirrors `Command` in `cli.rs`. The `every_verb_listed_here_is_real`
+/// guard below asserts this stays in sync with the binary.
+const TOP_LEVEL_VERBS: &[&str] = &[
+    "add", "list", "remove", "test", "show",
+    "connect", "disconnect", "connections", "disconnect-all",
+    "setup", "discover", "profile",
+    "status", "health", "logs", "grep", "cat", "ls", "find", "ps",
+    "volumes", "images", "network", "ports",
+    "why", "connectivity", "recipe",
+    "search",
+    "restart", "stop", "start", "reload",
+    "cp", "edit", "rm", "mkdir", "touch", "chmod", "chown", "exec",
+    "alias", "resolve",
+    "audit", "revert",
+    "fleet",
+    "help",
+];
+
+// HP-2 sanity: every entry in `TOP_LEVEL_VERBS` must accept `--help`.
+// Catches typos in the test list itself; if the binary loses a verb
+// without the test list being updated, this guard fires first.
+#[test]
+fn every_verb_listed_here_is_real() {
+    for verb in TOP_LEVEL_VERBS {
+        inspect()
+            .args([verb, "--help"])
+            .assert()
+            .success();
+    }
+}
+
+// HP-2 G1: every top-level subcommand carries a non-empty
+// `See also: inspect help …` footer in its `--help` output.
+#[test]
+fn every_top_level_subcommand_has_see_also_footer() {
+    let mut missing: Vec<&str> = Vec::new();
+    for verb in TOP_LEVEL_VERBS {
+        let out = inspect()
+            .args([verb, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).unwrap_or_default();
+        if !text.contains("See also: inspect help ") {
+            missing.push(verb);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "subcommands missing `See also: inspect help …` footer: {missing:?}"
+    );
+}
+
+// HP-2 G2: every top-level subcommand's `--help` carries at least one
+// `$ inspect ` example line (bible §HP-2 DoD: --help is self-sufficient).
+#[test]
+fn every_top_level_subcommand_has_inline_examples() {
+    let mut missing: Vec<&str> = Vec::new();
+    for verb in TOP_LEVEL_VERBS {
+        let out = inspect()
+            .args([verb, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).unwrap_or_default();
+        let has_example = text
+            .lines()
+            .any(|l| l.trim_start().starts_with("$ inspect "));
+        if !has_example {
+            missing.push(verb);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "subcommands missing inline `$ inspect …` examples: {missing:?}"
+    );
+}
+
+// HP-2 DoD pin: `inspect grep --help` ends with the exact line
+// `See also: inspect help selectors, inspect help formats, inspect help examples`.
+// Byte-exact on the last non-blank line — this is the single most
+// load-bearing contract test in HP-2.
+#[test]
+fn grep_help_ends_with_pinned_see_also_line() {
+    let out = inspect()
+        .args(["grep", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).expect("grep --help is utf-8");
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("grep --help has at least one line");
+    assert_eq!(
+        last,
+        "See also: inspect help selectors, inspect help formats, inspect help examples",
+        "grep --help footer drifted from the HP-2 contract"
+    );
+}
