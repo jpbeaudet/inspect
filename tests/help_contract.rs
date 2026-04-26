@@ -117,17 +117,93 @@ fn unknown_topic_far_from_any_topic_omits_suggestion() {
         .stderr(str::contains("did you mean").not());
 }
 
-// G0g: the placeholder modes (`--search`, `--json`, `help all`) are
-// reserved with a clear, non-success error so callers know they exist
-// and are scheduled. This guards against accidentally shipping a
-// half-implemented mode in HP-0.
+// HP-3 G0g/G0h: `--search` is implemented. The flag must
+//   * print N matches grouped by topic on stdout for a known hit,
+//   * exit 0 on success and 1 on miss (NoMatches),
+//   * print a single "no results" line on stderr when empty,
+//   * intersect needles when multiple words are given (AND).
 #[test]
-fn search_flag_is_reserved_until_hp3() {
-    inspect()
+fn search_finds_timeout_with_at_least_three_hits() {
+    let out = inspect()
         .args(["help", "--search", "timeout"])
         .assert()
-        .code(2)
-        .stderr(str::contains("HP-3"));
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).expect("search output is utf-8");
+    // First line is "<N> match(es) for \"timeout\"" — N ≥ 3.
+    let first = text.lines().next().unwrap_or_default();
+    let n: usize = first
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        n >= 3,
+        "expected ≥3 hits for 'timeout', first line was {first:?}\nfull output:\n{text}"
+    );
+    // Hits must be grouped by topic and at least the 'search' topic
+    // (LogQL doc) and one cmd:* synthetic topic must appear.
+    assert!(
+        text.contains("\nsearch\n"),
+        "expected 'search' topic header in output:\n{text}"
+    );
+    assert!(
+        text.lines().any(|l| l.starts_with("cmd:")),
+        "expected at least one cmd:* synthetic topic in output:\n{text}"
+    );
+}
+
+#[test]
+fn search_unknown_keyword_exits_one_with_stderr_line() {
+    inspect()
+        .args(["help", "--search", "xyzzynonexistent"])
+        .assert()
+        .code(1)
+        .stderr(str::contains("no results for"));
+}
+
+#[test]
+fn search_and_semantics_intersect() {
+    // "fleet apply" should AND-intersect — every result must mention
+    // both. We assert via output line count: it cannot exceed either
+    // single-needle result count.
+    let single = inspect()
+        .args(["help", "--search", "apply"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let single = String::from_utf8(single).unwrap();
+    let single_n: usize = single
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let both = inspect()
+        .args(["help", "--search", "fleet apply"])
+        .assert();
+    // AND query may legitimately return zero hits if no line mentions
+    // both — but if it returns hits, count must not exceed single_n.
+    let both_out = both.get_output().stdout.clone();
+    let both = String::from_utf8(both_out).unwrap();
+    let both_n: usize = both
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        both_n <= single_n,
+        "AND-result ({both_n}) must not exceed single-needle result ({single_n})"
+    );
 }
 
 #[test]

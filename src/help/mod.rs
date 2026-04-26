@@ -13,6 +13,7 @@
 //! links.
 
 pub mod render;
+pub mod search;
 pub mod topics;
 
 pub use topics::{find, suggest, Topic, TOPICS};

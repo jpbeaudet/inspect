@@ -31,9 +31,15 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    if args.search.is_some() {
-        eprintln!("error: `inspect help --search` is scheduled for HP-3 and not yet implemented");
-        return Ok(ExitKind::Error);
+    if let Some(needle) = args.search.as_deref() {
+        let hits = help::search::query(needle);
+        if hits.is_empty() {
+            // HP-3 DoD: empty result still prints a single contract
+            // line on stderr and exits 1 (NoMatches).
+            eprintln!("inspect help: no results for {:?}", needle);
+            return Ok(ExitKind::NoMatches);
+        }
+        return render(&help::search::render(&hits, needle));
     }
     if args.json {
         eprintln!("error: `inspect help --json` is scheduled for HP-4 and not yet implemented");
