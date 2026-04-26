@@ -51,7 +51,7 @@ pub struct ReadStep<'a> {
 }
 
 /// Trait every medium reader implements.
-pub trait Reader {
+pub trait Reader: Send + Sync {
     /// Best-effort kind tag (matches [`Medium::kind`]).
     fn kind(&self) -> &'static str;
 
@@ -79,6 +79,22 @@ pub fn for_medium(m: &Medium) -> Box<dyn Reader> {
     }
 }
 
+/// `Arc`-shareable variant of [`for_medium`] used when the engine
+/// fans out reads across worker threads.
+pub fn for_medium_arc(m: &Medium) -> std::sync::Arc<dyn Reader + Send + Sync> {
+    match m {
+        Medium::Logs => std::sync::Arc::new(logs::LogsReader),
+        Medium::File(path) => std::sync::Arc::new(file::FileReader { path: path.clone() }),
+        Medium::Dir(path) => std::sync::Arc::new(dir::DirReader { path: path.clone() }),
+        Medium::Discovery => std::sync::Arc::new(discovery::DiscoveryReader),
+        Medium::State => std::sync::Arc::new(state::StateReader),
+        Medium::Volume(name) => std::sync::Arc::new(volume::VolumeReader { filter: name.clone() }),
+        Medium::Image => std::sync::Arc::new(image::ImageReader),
+        Medium::Network => std::sync::Arc::new(network::NetworkReader),
+        Medium::Host(path) => std::sync::Arc::new(host::HostReader { path: path.clone() }),
+    }
+}
+
 /// Helper used by readers that produce one record per stdout line.
 pub fn lines_to_records(stdout: &str) -> Vec<Record> {
     stdout
@@ -86,4 +102,27 @@ pub fn lines_to_records(stdout: &str) -> Vec<Record> {
         .filter(|l| !l.is_empty())
         .map(|l| Record::new().with_line(l.to_string()))
         .collect()
+}
+
+/// Append a `| grep ...` chain to `cmd` for each line filter, so the
+/// remote command pre-filters bytes before we ever read them. Bible
+/// §9.10 — filter pushdown.
+///
+/// Each clause uses `|| true` to swallow grep's exit-1 on no-match (we
+/// rely on the upstream command's exit code, not grep's).
+pub fn push_line_filters_grep(cmd: &mut String, filters: &[LineFilter]) {
+    use crate::verbs::quote::shquote;
+    for f in filters {
+        cmd.push_str(" | grep ");
+        if f.negated {
+            cmd.push_str("-v ");
+        }
+        if f.regex {
+            cmd.push_str("-E ");
+        } else {
+            cmd.push_str("-F ");
+        }
+        cmd.push_str(&shquote(&f.pattern));
+        cmd.push_str(" || true");
+    }
 }

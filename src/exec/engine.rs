@@ -14,6 +14,7 @@
 //!    [`crate::exec::metric::execute`].
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
@@ -22,10 +23,12 @@ use crate::alias;
 use crate::exec::medium::Medium;
 use crate::exec::metric;
 use crate::exec::pipeline;
-use crate::exec::reader::{self, ReadOpts, ReadStep};
+use crate::exec::reader::{self, LineFilter, ReadOpts, ReadStep};
 use crate::exec::record::Record;
 use crate::exec::ExecCtx;
-use crate::logql::ast::{LabelMatcher, LogQuery, MatchOp, Query, Selector};
+use crate::logql::ast::{
+    Filter, FilterOp, LabelMatcher, LogQuery, MatchOp, PipelineOp, Query, Selector,
+};
 use crate::profile::cache::load_profile;
 use crate::profile::schema::{Profile, Service};
 use crate::ssh::options::SshTarget;
@@ -88,11 +91,23 @@ pub(crate) fn execute_log(ctx: &ExecCtx<'_>, src: &str) -> Result<LogResult> {
 }
 
 fn run_log(ctx: &ExecCtx<'_>, l: &LogQuery) -> Result<Vec<Record>> {
-    let mut all = Vec::new();
-    for branch in &l.selector.branches {
-        let mut recs = run_branch(ctx, branch)?;
-        all.append(&mut recs);
-    }
+    // Bible §9.10 — extract leading line filters from the pipeline so
+    // readers can push them to remote `grep`. We keep the filters in
+    // the pipeline too: re-applying contains/regex on already-filtered
+    // records is idempotent, and readers that don't honor pushdown
+    // would otherwise return unfiltered data.
+    let pushdown_filters = collect_leading_line_filters(&l.pipeline);
+
+    // Run branches in parallel (up to `max_parallel`) — each branch
+    // resolves its own targets and reads concurrently across them.
+    let branches = &l.selector.branches;
+    let results: Result<Vec<Vec<Record>>> = parallel_map(
+        ctx.opts.max_parallel,
+        branches,
+        |branch| run_branch(ctx, branch, &pushdown_filters),
+    );
+    let mut all: Vec<Record> = results?.into_iter().flatten().collect();
+
     all = pipeline::apply(ctx, &l.pipeline, all)?;
     if ctx.opts.record_limit > 0 && all.len() > ctx.opts.record_limit {
         all.truncate(ctx.opts.record_limit);
@@ -100,16 +115,113 @@ fn run_log(ctx: &ExecCtx<'_>, l: &LogQuery) -> Result<Vec<Record>> {
     Ok(all)
 }
 
-fn run_branch(ctx: &ExecCtx<'_>, sel: &Selector) -> Result<Vec<Record>> {
+/// Collect leading `Filter` ops from the pipeline (until the first
+/// `Stage`) and convert them into reader-level [`LineFilter`]s. Only
+/// runs of contains/regex filters are pushed; once a parsing or format
+/// stage appears, line content may be rewritten and no further
+/// pushdown is safe.
+fn collect_leading_line_filters(pipeline: &[PipelineOp]) -> Vec<LineFilter> {
+    let mut out = Vec::new();
+    for op in pipeline {
+        match op {
+            PipelineOp::Filter(f) => out.push(filter_to_line_filter(f)),
+            PipelineOp::Stage(_) => break,
+        }
+    }
+    out
+}
+
+fn filter_to_line_filter(f: &Filter) -> LineFilter {
+    match f.op {
+        FilterOp::Contains => LineFilter {
+            negated: false,
+            regex: false,
+            pattern: f.pattern.clone(),
+        },
+        FilterOp::NotContains => LineFilter {
+            negated: true,
+            regex: false,
+            pattern: f.pattern.clone(),
+        },
+        FilterOp::Re => LineFilter {
+            negated: false,
+            regex: true,
+            pattern: f.pattern.clone(),
+        },
+        FilterOp::Nre => LineFilter {
+            negated: true,
+            regex: true,
+            pattern: f.pattern.clone(),
+        },
+    }
+}
+
+/// Run `f` on each input in parallel up to `max` workers, preserving
+/// input order in the output. A `max` of 1 (or single input) runs
+/// inline to avoid `thread::scope` overhead on the hot path.
+fn parallel_map<I, T, R, F>(max: usize, items: I, f: F) -> Result<Vec<R>>
+where
+    I: IntoIterator<Item = T>,
+    T: Send,
+    R: Send,
+    F: Fn(T) -> Result<R> + Sync,
+{
+    let items: Vec<T> = items.into_iter().collect();
+    let n = items.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let parallel = max.max(1).min(n);
+    if parallel == 1 {
+        let mut out = Vec::with_capacity(n);
+        for it in items {
+            out.push(f(it)?);
+        }
+        return Ok(out);
+    }
+    // Slot-based collector preserves input ordering.
+    let slots: Vec<Mutex<Option<Result<R>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let f_ref = &f;
+    let slots_ref = &slots;
+    let next_ref = &next;
+    // Move items into a single shared queue (one Option per index).
+    let queue: Vec<Mutex<Option<T>>> = items.into_iter().map(|t| Mutex::new(Some(t))).collect();
+    let queue_ref: &Vec<Mutex<Option<T>>> = &queue;
+    std::thread::scope(|scope| {
+        for _ in 0..parallel {
+            scope.spawn(move || loop {
+                let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if idx >= n {
+                    return;
+                }
+                let item = queue_ref[idx].lock().unwrap().take();
+                if let Some(item) = item {
+                    let r = f_ref(item);
+                    *slots_ref[idx].lock().unwrap() = Some(r);
+                }
+            });
+        }
+    });
+    let mut out = Vec::with_capacity(n);
+    for slot in slots {
+        match slot.into_inner().unwrap() {
+            Some(r) => out.push(r?),
+            None => return Err(anyhow!("internal: worker dropped slot")),
+        }
+    }
+    Ok(out)
+}
+
+fn run_branch(
+    ctx: &ExecCtx<'_>,
+    sel: &Selector,
+    line_filters: &[LineFilter],
+) -> Result<Vec<Record>> {
     let medium_value = source_value(sel)?;
-    let medium = Medium::parse(medium_value).map_err(|e| {
-        anyhow!(
-            "invalid `source=\"{}\"`: {}",
-            medium_value,
-            e
-        )
-    })?;
-    let reader_impl = reader::for_medium(&medium);
+    let medium = Medium::parse(medium_value)
+        .map_err(|e| anyhow!("invalid `source=\"{}\"`: {}", medium_value, e))?;
+    let reader_impl: Arc<dyn reader::Reader + Send + Sync> = reader::for_medium_arc(&medium);
 
     // Resolve namespaces + services using the existing selector engine.
     let plan = build_plan(sel)?;
@@ -117,7 +229,7 @@ fn run_branch(ctx: &ExecCtx<'_>, sel: &Selector) -> Result<Vec<Record>> {
         since: ctx.opts.since.clone(),
         until: ctx.opts.until.clone(),
         tail: ctx.opts.tail,
-        line_filters: Vec::new(),
+        line_filters: line_filters.to_vec(),
     };
 
     // Compile non-source/non-server/non-service matchers ("user matchers")
@@ -135,31 +247,41 @@ fn run_branch(ctx: &ExecCtx<'_>, sel: &Selector) -> Result<Vec<Record>> {
         .iter()
         .find(|m| m.name == "source" && matches!(m.op, MatchOp::Re | MatchOp::Nre));
 
+    // Run steps in parallel.
+    let medium_label = medium.as_label();
+    let steps = plan.steps;
+    let per_step_results: Result<Vec<Vec<Record>>> = parallel_map(
+        ctx.opts.max_parallel,
+        steps.iter(),
+        |step| -> Result<Vec<Record>> {
+            let svc_def_owned: Option<Service> = step.service.as_ref().and_then(|svc| {
+                step.profile
+                    .services
+                    .iter()
+                    .find(|s| &s.name == svc)
+                    .cloned()
+            });
+            let read_step = ReadStep {
+                namespace: &step.namespace,
+                target: &step.target,
+                service: step.service.as_deref(),
+                service_def: svc_def_owned.as_ref(),
+            };
+            reader_impl
+                .read(ctx.runner, &read_step, &read_opts)
+                .with_context(|| {
+                    format!(
+                        "reading source={} for {}/{}",
+                        medium_label,
+                        step.namespace,
+                        step.service.as_deref().unwrap_or("_")
+                    )
+                })
+        },
+    );
+
     let mut out = Vec::new();
-    for step in &plan.steps {
-        let svc_def_owned: Option<Service> = step.service.as_ref().and_then(|svc| {
-            step.profile
-                .services
-                .iter()
-                .find(|s| &s.name == svc)
-                .cloned()
-        });
-        let read_step = ReadStep {
-            namespace: &step.namespace,
-            target: &step.target,
-            service: step.service.as_deref(),
-            service_def: svc_def_owned.as_ref(),
-        };
-        let recs = reader_impl
-            .read(ctx.runner, &read_step, &read_opts)
-            .with_context(|| {
-                format!(
-                    "reading source={} for {}/{}",
-                    medium.as_label(),
-                    step.namespace,
-                    step.service.as_deref().unwrap_or("_")
-                )
-            })?;
+    for recs in per_step_results? {
         for r in recs {
             if let Some(m) = source_matcher {
                 let v = r.label("source").unwrap_or_default();
@@ -269,14 +391,21 @@ fn matcher_for<'a>(sel: &'a Selector, name: &str) -> Option<&'a LabelMatcher> {
 /// Translate one LogQL matcher into a syntactic atom that the verb
 /// selector parser understands. We use:
 ///   - `=`  → literal
-///   - `=~` → `re:<pattern>`
-///   - `!=` / `!~` → not directly representable in the verb selector
-///     parser; we fall back to `*` and rely on per-record filtering
-///     (`match_label`) to enforce.
-fn matcher_to_selector_atom(m: &LabelMatcher, _is_server: bool) -> String {
+///   - `=~` on `service` → `/<pattern>/` (verb selector regex form)
+///   - `=~` on `server`  → `*` (verb parser has no server-regex form);
+///     the engine's per-record [`match_label`] then enforces the regex
+///     post-resolution.
+///   - `!=` / `!~` → `*`, enforced by [`match_label`].
+fn matcher_to_selector_atom(m: &LabelMatcher, is_server: bool) -> String {
     match m.op {
         MatchOp::Eq => m.value.clone(),
-        MatchOp::Re => format!("re:{}", m.value),
+        MatchOp::Re => {
+            if is_server {
+                "*".to_string()
+            } else {
+                format!("/{}/", m.value)
+            }
+        }
         MatchOp::Ne | MatchOp::Nre => "*".to_string(),
     }
 }

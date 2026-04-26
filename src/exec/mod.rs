@@ -44,6 +44,10 @@ pub struct ExecOpts {
     /// Hard cap on `map` fanout — a runaway sub-query shouldn't fork
     /// thousands of remote calls.
     pub map_max_fanout: usize,
+    /// Maximum parallel reader invocations (across selector branches
+    /// and per-branch namespace/service steps). Bible §14.3 — needed
+    /// to hit the "<2s first results across 5 servers" target.
+    pub max_parallel: usize,
 }
 
 impl Default for ExecOpts {
@@ -55,8 +59,22 @@ impl Default for ExecOpts {
             follow: false,
             record_limit: 0,
             map_max_fanout: 256,
+            max_parallel: default_max_parallel(),
         }
     }
+}
+
+fn default_max_parallel() -> usize {
+    // Operator override always wins; otherwise we cap at 8 which is
+    // safe across SSH ControlMaster fanout without saturating sockets.
+    if let Ok(v) = std::env::var("INSPECT_MAX_PARALLEL") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    8
 }
 
 /// Execution context shared by all stages and sub-queries.

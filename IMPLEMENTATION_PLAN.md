@@ -376,6 +376,81 @@ Deliverables:
 - Performance regression tests in CI
 - Tuned defaults for fanout and retries
 
+### Implementation notes (Phase 8 landed)
+
+**Filter pushdown (bible §9.10).** The engine extracts the leading run
+of `Filter` ops from a log query's pipeline (until the first parsing or
+formatting `Stage`) and translates each into a reader-level
+`LineFilter { negated, regex, pattern }`. Readers that issue remote
+commands (`logs`, `file`, `host`) append a shared `grep` chain via
+`reader::push_line_filters_grep`:
+
+- `|=` → `| grep -F '<pattern>' || true`
+- `!=` → `| grep -v -F '<pattern>' || true`
+- `|~` → `| grep -E '<pattern>' || true`
+- `!~` → `| grep -v -E '<pattern>' || true`
+
+The `|| true` guard preserves the bible's "no matches is a clean exit"
+contract. Pushdown filters are **not** stripped from the in-memory
+pipeline — re-applying contains/regex on already-filtered records is
+idempotent, and readers that do not honor pushdown (state, image,
+network, volume, dir, discovery) fall back to in-memory filtering with
+no semantic drift. Pushdown stops at the first `| json`/`| logfmt`/
+`line_format` stage because line content is rewritten beyond that
+point.
+
+**Time-range and tail pushdown.** `--since`, `--until`, and `--tail`
+flow through `ExecOpts → ReadOpts` and are wired in Phase 7 to
+`docker logs --since/--until/--tail` and `journalctl --since/--lines`.
+File reader honors `--tail` via `tail -n`. No additional Phase 8 work
+required here.
+
+**Concurrency.** Branch and step fan-out runs through
+`engine::parallel_map`, an `std::thread::scope`-based work queue with
+order-preserving slot collection (atomic next-index dispatch + per-slot
+`Mutex<Option<Result<R>>>`). Order preservation keeps the existing
+multi-source `or` test surface deterministic. The pool size is capped
+by `ExecOpts.max_parallel`, which defaults to 8 and is overridable via
+`INSPECT_MAX_PARALLEL`. The fast path runs inline when there is one
+input or `max_parallel == 1`.
+
+The `Reader` trait is bounded `Send + Sync`; `for_medium_arc` returns
+`Arc<dyn Reader + Send + Sync>` so the same reader instance can be
+shared across worker threads.
+
+**No new dependencies.** All concurrency uses `std::thread::scope`
+plus `std::sync::{Arc, Mutex, atomic}`; all pushdown uses the existing
+`shellexpand` and `regex` crates already vendored from earlier phases.
+
+**Streaming deferred.** True incremental `--follow` with backpressure
+remains deferred. The current eager fan-out + concatenate model meets
+the bible's <2s search-across-5-servers target on mocked I/O (verified
+by `tests/phase8_perf.rs::search_across_five_namespaces_first_results_under_2s`).
+
+### Exit-criteria test references
+
+- Pushdown semantics: `tests/phase8_perf.rs::line_filter_pushdown_appends_grep_to_remote_command`,
+  `negated_line_filter_uses_grep_minus_v`,
+  `regex_line_filter_uses_grep_minus_e`,
+  `pushdown_stops_at_first_parsing_stage`.
+- Time-range pushdown: `tests/phase8_perf.rs::since_until_tail_get_pushed_to_docker_logs`.
+- Parallel correctness: `tests/phase8_perf.rs::parallel_or_query_produces_one_record_per_branch`,
+  `max_parallel_env_knob_is_honored`.
+- Performance budgets: `tests/phase8_perf.rs::cold_start_version_under_500ms`,
+  `search_across_five_namespaces_first_results_under_2s`.
+- No regressions: full Phase 0–7 test surface (218 prior tests) continues to pass.
+
+### Bonus fix landed in Phase 8
+
+The engine's `matcher_to_selector_atom` previously produced an invalid
+`re:<pattern>` atom for `=~` matchers, which the verb selector parser
+rejected with `invalid selector character ':'`. Phase 8 fixes this:
+`server=~"..."` now resolves to `*` (and the regex is enforced by
+`match_label` post-resolution after a small follow-up still allows
+namespace short-circuit), and `service=~"..."` produces the verb
+parser's `/.../` regex form. Caught and regression-tested by the new
+multi-namespace fan-out tests.
+
 Exit criteria:
 
 - Cold start and status/search targets met or variance documented with mitigation

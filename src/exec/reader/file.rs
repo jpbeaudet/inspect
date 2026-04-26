@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::{ReadOpts, ReadStep, Reader, lines_to_records};
+use super::{lines_to_records, push_line_filters_grep, ReadOpts, ReadStep, Reader};
 use crate::exec::record::Record;
 use crate::profile::schema::ServiceKind;
 use crate::ssh::exec::RunOpts;
@@ -21,9 +21,10 @@ impl Reader for FileReader {
         &self,
         runner: &dyn RemoteRunner,
         step: &ReadStep<'_>,
-        _opts: &ReadOpts,
+        opts: &ReadOpts,
     ) -> Result<Vec<Record>> {
-        let cmd = build_cat(step, &self.path);
+        let mut cmd = build_cat(step, &self.path);
+        push_line_filters_grep(&mut cmd, &opts.line_filters);
         let out = runner.run(step.namespace, step.target, &cmd, RunOpts::with_timeout(30))?;
         if !out.ok() {
             return Ok(Vec::new());
