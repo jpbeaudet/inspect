@@ -134,12 +134,9 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(w.new_text.as_bytes());
 
         let tmp = format!("{}.inspect.{}.tmp", w.path, &new_hash[..8]);
-        let inner = format!(
-            "set -e; printf %s {b64_q} | base64 -d > {tmp_q} && mv {tmp_q} {path_q}",
-            b64_q = shquote(&b64),
-            tmp_q = shquote(&tmp),
-            path_q = shquote(&w.path),
-        );
+        // Preserve mode/uid/gid of the original file across the
+        // rename (audit §4.2). See `verbs::write::atomic`.
+        let inner = super::atomic::write_then_rename(&b64, &tmp, &w.path);
         let cmd = match w.service.as_deref() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
             None => format!("sh -c {}", shquote(&inner)),

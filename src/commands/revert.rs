@@ -122,12 +122,8 @@ pub fn run(args: RevertArgs) -> Result<ExitKind> {
     let restored_hash = sha256_hex(&original);
     let b64 = base64::engine::general_purpose::STANDARD.encode(&original);
     let tmp = format!("{path}.inspect.{}.tmp", &restored_hash[..8]);
-    let inner = format!(
-        "set -e; printf %s {b64_q} | base64 -d > {tmp_q} && mv {tmp_q} {path_q}",
-        b64_q = shquote(&b64),
-        tmp_q = shquote(&tmp),
-        path_q = shquote(&path),
-    );
+    // Preserve mode/uid/gid across the revert (audit §4.2).
+    let inner = crate::verbs::write::atomic::write_then_rename(&b64, &tmp, &path);
     let cmd = match step.service() {
         Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
         None => format!("sh -c {}", shquote(&inner)),

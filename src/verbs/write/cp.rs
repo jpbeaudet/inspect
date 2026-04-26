@@ -168,14 +168,10 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
             Some(snaps.put(prev_text.as_bytes())?)
         };
 
-        // 2. Atomic push: write to <path>.tmp.<rand>, then rename.
+        // 2. Atomic push: write to <path>.tmp.<rand>, preserve
+        //    mode/uid/gid of the original (audit §4.2), then rename.
         let tmp = format!("{path}.inspect.{}.tmp", &new_hash[..8]);
-        let inner = format!(
-            "set -e; printf %s {b64} | base64 -d > {tmp_q} && mv {tmp_q} {path_q}",
-            tmp_q = shquote(&tmp),
-            path_q = shquote(path),
-            b64 = shquote(&b64),
-        );
+        let inner = super::atomic::write_then_rename(&b64, &tmp, path);
         let cmd = match s.service() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
             None => format!("sh -c {}", shquote(&inner)),

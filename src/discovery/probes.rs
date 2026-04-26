@@ -144,6 +144,20 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
     };
 
     for row in rows {
+        // Audit §7.2 / §7.3: warn when a service name collides with a
+        // selector reserved char or the host placeholder. The service
+        // is still discovered (we don't drop data), but operators get
+        // a one-line heads-up so they understand why selectors like
+        // `srv,foo` won't match it.
+        if let Some(reason) = problematic_service_name(&row.name) {
+            r.warnings.push(format!(
+                "container '{}' on {}: {} -- selectors that target it must use the regex form `/{}$/`",
+                row.name,
+                target.host,
+                reason,
+                regex::escape(&row.name),
+            ));
+        }
         let det = details.get(&row.id);
         let (ports, mounts, log_driver) = det
             .map(|d| (d.ports.clone(), d.mounts.clone(), d.log_driver))
@@ -497,6 +511,40 @@ fn extract_process(line: &str) -> Option<String> {
     None
 }
 
+/// Detect container/service names that will collide with selector
+/// syntax (audit §7.2, §7.3). Returns a human-readable reason when the
+/// name is problematic, or `None` when it's safe.
+///
+/// Trip points:
+///   * `_` is the reserved host-level placeholder; a real container
+///     literally named `_` cannot be addressed without the regex
+///     escape hatch.
+///   * `,` separates services in a selector list.
+///   * `/`, `:`, `*`, `~`, `[`, `]`, `{`, `}`, ` `, `\t` are reserved
+///     by the selector grammar (path separator, regex delimiters,
+///     glob metas, whitespace).
+pub(crate) fn problematic_service_name(name: &str) -> Option<String> {
+    if name == "_" {
+        return Some(
+            "name `_` collides with the reserved host-level placeholder".to_string(),
+        );
+    }
+    const RESERVED: &[char] = &[',', '/', ':', '*', '~', '[', ']', '{', '}', ' ', '\t'];
+    let bad: Vec<char> = name.chars().filter(|c| RESERVED.contains(c)).collect();
+    if !bad.is_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in bad {
+            seen.insert(c);
+        }
+        let list: Vec<String> = seen.into_iter().map(|c| format!("{c:?}")).collect();
+        return Some(format!(
+            "name contains selector-reserved chars: {}",
+            list.join(", ")
+        ));
+    }
+    None
+}
+
 /// Translate common docker CLI failures into a one-line actionable
 /// hint (audit §6.1, §6.2). Returns `None` when we don't recognize the
 /// failure — the raw stderr is still surfaced separately.
@@ -607,5 +655,32 @@ mod tests {
     #[test]
     fn explain_docker_unknown_returns_none() {
         assert!(explain_docker_failure("some unrelated stderr").is_none());
+    }
+
+    #[test]
+    fn problematic_name_flags_underscore_placeholder() {
+        let r = problematic_service_name("_").expect("`_` is reserved");
+        assert!(r.contains("placeholder"));
+    }
+
+    #[test]
+    fn problematic_name_flags_reserved_chars() {
+        for bad in ["api,db", "svc/v1", "host:port", "x*y", "a~b", "a b", "a\tb"] {
+            assert!(
+                problematic_service_name(bad).is_some(),
+                "should flag {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn problematic_name_passes_normal_names() {
+        for ok in ["api", "db_2", "svc-prod", "user.api", "abc123", "Web_API"] {
+            assert!(
+                problematic_service_name(ok).is_none(),
+                "should pass {ok:?}: {:?}",
+                problematic_service_name(ok)
+            );
+        }
     }
 }

@@ -260,8 +260,42 @@ fn is_alias_char(c: u8) -> bool {
 
 fn lex_string(b: &[u8], start: usize) -> Result<(String, usize), ParseError> {
     debug_assert_eq!(b[start], b'"');
-    let mut i = start + 1;
-    let mut out = String::new();
+    let body_start = start + 1;
+    // Fast path (audit §8.2): scan for the closing quote without seeing
+    // any escape, then slice the body directly. This avoids the
+    // per-byte allocation loop for the common case (filter strings,
+    // label values, and JSON keys are usually escape-free) and is also
+    // a correctness fix: the previous loop did `c as char` which
+    // re-interprets each byte as a codepoint, splitting multi-byte
+    // UTF-8 sequences. Slicing preserves the bytes verbatim.
+    let mut i = body_start;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                // Whole literal is escape-free → cheap slice.
+                let s = std::str::from_utf8(&b[body_start..i]).map_err(|_| {
+                    ParseError::new("string contains invalid UTF-8", body_start..i)
+                })?;
+                return Ok((s.to_string(), i + 1));
+            }
+            b'\\' => break, // fall through to slow path
+            _ => i += 1,
+        }
+    }
+    if i >= b.len() {
+        return Err(ParseError::new(
+            "unterminated string literal",
+            start..b.len(),
+        ));
+    }
+
+    // Slow path: copy the escape-free prefix in one shot, then process
+    // escapes byte-by-byte.
+    let mut out = String::with_capacity((b.len() - body_start).min(64));
+    let prefix = std::str::from_utf8(&b[body_start..i]).map_err(|_| {
+        ParseError::new("string contains invalid UTF-8", body_start..i)
+    })?;
+    out.push_str(prefix);
     while i < b.len() {
         match b[i] {
             b'"' => return Ok((out, i + 1)),
@@ -287,9 +321,17 @@ fn lex_string(b: &[u8], start: usize) -> Result<(String, usize), ParseError> {
                 }
                 i += 2;
             }
-            c => {
-                out.push(c as char);
-                i += 1;
+            _ => {
+                // Copy a maximal escape-free run as a UTF-8 slice
+                // (preserves multi-byte sequences correctly).
+                let run_start = i;
+                while i < b.len() && b[i] != b'"' && b[i] != b'\\' {
+                    i += 1;
+                }
+                let run = std::str::from_utf8(&b[run_start..i]).map_err(|_| {
+                    ParseError::new("string contains invalid UTF-8", run_start..i)
+                })?;
+                out.push_str(run);
             }
         }
     }
@@ -418,5 +460,38 @@ mod tests {
     fn bare_bang_errors() {
         let e = tokenize("a ! b").unwrap_err();
         assert!(e.message.contains("!"));
+    }
+
+    #[test]
+    fn string_preserves_multibyte_utf8() {
+        // Audit §8.2 fast path: the previous loop did `c as char`
+        // which split multi-byte UTF-8 sequences. Slicing preserves
+        // them verbatim.
+        let t = toks(r#"{server="日本語", source="logs"}"#);
+        let s = t.iter().find_map(|x| match x {
+            Token::String(s) if s == "日本語" => Some(s.clone()),
+            _ => None,
+        });
+        assert!(s.is_some(), "expected the JP string token, got {t:?}");
+    }
+
+    #[test]
+    fn string_with_escapes_still_works() {
+        let t = toks(r#"{a="line1\nline2\t\"quoted\""}"#);
+        let got = t.iter().find_map(|x| match x {
+            Token::String(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(got.as_deref(), Some("line1\nline2\t\"quoted\""));
+    }
+
+    #[test]
+    fn string_mixed_escape_and_utf8() {
+        let t = toks(r#"{a="日本\n語"}"#);
+        let got = t.iter().find_map(|x| match x {
+            Token::String(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(got.as_deref(), Some("日本\n語"));
     }
 }

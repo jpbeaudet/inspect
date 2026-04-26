@@ -15,3 +15,5 @@ pub mod lifecycle; // restart / stop / start / reload
 pub mod mkdir;
 pub mod rm;
 pub mod touch;
+
+pub(crate) mod atomic;
