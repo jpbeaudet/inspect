@@ -40,7 +40,7 @@ pub fn run(args: ConnectionsArgs) -> anyhow::Result<ExitKind> {
         rows.push(row);
     }
 
-    if args.json {
+    if args.format.is_json() {
         emit_json(&rows);
         return Ok(ExitKind::Success);
     }

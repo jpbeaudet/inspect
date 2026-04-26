@@ -24,14 +24,14 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     let target = SshTarget::from_resolved(&resolved)?;
 
     if args.check_drift {
-        return drift_only(&resolved.name, &target, args.json);
+        return drift_only(&resolved.name, &target, args.format.is_json());
     }
 
     // Honor TTL unless --force.
     if !args.force {
         if let Ok(Some(prev)) = load_profile(&resolved.name) {
             if !is_stale(&prev) {
-                return print_existing(&prev, args.json);
+                return print_existing(&prev, args.format.is_json());
             }
         }
     }
@@ -45,7 +45,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     let profile = discovery::discover(&resolved.name, &target, opts)
         .with_context(|| format!("setup '{}'", resolved.name))?;
 
-    if args.json {
+    if args.format.is_json() {
         print_json(&profile, "discovered");
     } else {
         print_human(&profile, "discovered");

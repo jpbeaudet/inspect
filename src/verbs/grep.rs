@@ -34,7 +34,7 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
         let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(60))?;
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}: grep failed (exit {}): {}",
                     step.ns.namespace,
@@ -57,7 +57,7 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
             // we render the integer per target.
             let n: u64 = out.stdout.trim().parse().unwrap_or(0);
             matches += n as usize;
-            if args.json {
+            if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)
@@ -71,7 +71,7 @@ pub fn run(args: GrepArgs) -> Result<ExitKind> {
 
         for line in out.stdout.lines() {
             matches += 1;
-            if args.json {
+            if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)

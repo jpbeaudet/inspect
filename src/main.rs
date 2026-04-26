@@ -13,6 +13,7 @@ mod config;
 mod discovery;
 mod error;
 mod exec;
+mod format;
 mod logql;
 mod paths;
 mod profile;

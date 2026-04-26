@@ -15,7 +15,7 @@ pub fn run(args: ProfileArgs) -> anyhow::Result<ExitKind> {
     let profile = match load_profile(&args.namespace)? {
         Some(p) => p,
         None => {
-            if args.json {
+            if args.format.is_json() {
                 println!(
                     "{{\"schema_version\":1,\"namespace\":{ns},\"status\":\"missing\"}}",
                     ns = json_string(&args.namespace),
@@ -32,7 +32,7 @@ pub fn run(args: ProfileArgs) -> anyhow::Result<ExitKind> {
     };
 
     let drift = read_drift_marker(&args.namespace);
-    if args.json {
+    if args.format.is_json() {
         // Stream the full YAML re-encoded as JSON for parity with other
         // `--json` outputs.
         let value: serde_json::Value = serde_json::to_value(&profile)?;

@@ -33,7 +33,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
         if !out.ok() && out.stdout.is_empty() {
             // find can return non-zero on permission denied while still
             // listing matches; only treat true failures (no stdout) as errors.
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}: find failed (exit {}): {}",
                     step.ns.namespace,
@@ -45,7 +45,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
         }
         for line in out.stdout.lines().filter(|l| !l.is_empty()) {
             total_hits += 1;
-            if args.json {
+            if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))
                         .with_service(step.service().unwrap_or("_"))
@@ -61,7 +61,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
         }
     }
     if total_hits == 0 {
-        if !args.json {
+        if !args.format.is_json() {
             eprintln!("(no matches)");
         }
         return Ok(ExitKind::NoMatches);

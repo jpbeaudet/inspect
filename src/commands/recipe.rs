@@ -51,7 +51,7 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
     if doc.mutating && !args.apply {
         // Surface a clear dry-run banner before steps run, mirroring
         // the per-verb safety contract.
-        if !args.json {
+        if !args.format.is_json() {
             eprintln!("note: recipe '{}' is marked mutating; running in dry-run mode (pass --apply to enact)", doc.name);
         }
     }
@@ -93,7 +93,7 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
 
         let mut cmd = Command::new(&me);
         cmd.args(&argv);
-        if args.json {
+        if args.format.is_json() {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         } else {
             // Prefix per-step header so users can correlate output to steps.
@@ -114,7 +114,7 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
-        if !args.json {
+        if !args.format.is_json() {
             data_lines.push(format!(
                 "step {}: inspect {} -> exit {}",
                 idx + 1,
@@ -162,11 +162,8 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
             "apply mutating steps",
         ));
     }
-    if args.json {
-        doc_out.print_json();
-    } else {
-        doc_out.print_human(&data_lines);
-    }
+    let fmt = args.format.resolve()?;
+    crate::format::render::render_doc(&doc_out, &fmt, &data_lines)?;
 
     Ok(if any_failed { ExitKind::Error } else { ExitKind::Success })
 }
@@ -414,7 +411,7 @@ mod tests {
             name: "x".into(),
             sel: Some("arte".into()),
             apply: false,
-            json: false,
+            format: crate::format::FormatArgs::default(),
         };
         substitute_placeholders(&mut argv, &args);
         assert_eq!(argv, vec!["status", "arte"]);

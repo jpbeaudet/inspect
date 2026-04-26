@@ -6,10 +6,11 @@ use crate::cli::PsArgs;
 use crate::error::ExitKind;
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::plan;
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: PsArgs) -> Result<ExitKind> {
     let (runner, nses, _targets) = plan(&args.selector)?;
+    let fmt = args.format.resolve()?;
     let mut count = 0usize;
     let mut human = Renderer::new();
     let flag = if args.all { " -a" } else { "" };
@@ -18,7 +19,7 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
         let cmd = format!("docker ps{flag} --format '{{{{json .}}}}'");
         let out = runner.run(&ns.namespace, &ns.target, &cmd, RunOpts::with_timeout(20))?;
         if !out.ok() {
-            if !args.json {
+            if fmt.shows_envelope() {
                 eprintln!(
                     "{}: docker ps failed (exit {}): {}",
                     ns.namespace,
@@ -39,26 +40,19 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
                 .to_string();
             let image = value.get("Image").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let status = value.get("Status").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if args.json {
-                JsonOut::write(
-                    &Envelope::new(&ns.namespace, "state", "state")
-                        .with_service(&name)
-                        .put("image", image)
-                        .put("status", status)
-                        .put("raw", value),
-                );
-            } else {
-                human.data_line(format!(
+            human.data_line(format!(
                     "{ns} | {name:<20} {image:<32} {status}",
                     ns = ns.namespace
                 ));
-            }
+            human.push_row(&Envelope::new(&ns.namespace, "state", "state")
+                        .with_service(&name)
+                        .put("image", image)
+                        .put("status", status)
+                        .put("raw", value));
         }
     }
-    if !args.json {
-        human.summary(format!("{count} container(s) running"));
-        human.next("inspect status <sel> for health rollup");
-        human.print();
-    }
+    human.summary(format!("{count} container(s) running"));
+    human.next("inspect status <sel> for health rollup");
+    human.dispatch(&fmt)?;
     Ok(ExitKind::Success)
 }

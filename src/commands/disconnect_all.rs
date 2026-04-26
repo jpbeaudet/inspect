@@ -12,7 +12,7 @@ use crate::ssh::SshTarget;
 pub fn run(args: DisconnectAllArgs) -> anyhow::Result<ExitKind> {
     let sockets = list_sockets()?;
     if sockets.is_empty() {
-        if args.json {
+        if args.format.is_json() {
             println!("{{\"schema_version\":1,\"closed\":[]}}");
         } else {
             println!("SUMMARY: no inspect-managed connections to close");
@@ -47,7 +47,7 @@ pub fn run(args: DisconnectAllArgs) -> anyhow::Result<ExitKind> {
         }
     }
 
-    if args.json {
+    if args.format.is_json() {
         emit_json(&closed, &failed);
     } else {
         println!(

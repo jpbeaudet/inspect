@@ -37,7 +37,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     )
     .with_context(|| format!("connect '{}'", resolved.name))?;
 
-    if args.json {
+    if args.format.is_json() {
         let socket = outcome
             .socket
             .as_ref()

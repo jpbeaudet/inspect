@@ -21,7 +21,7 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
         closed = true;
     }
 
-    if args.json {
+    if args.format.is_json() {
         println!(
             "{{\"schema_version\":1,\"namespace\":{ns},\"prior\":{prior},\"closed\":{closed}}}",
             ns = json_string(&resolved.name),

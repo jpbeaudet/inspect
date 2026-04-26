@@ -7,7 +7,7 @@ use crate::selector::resolve::{resolve, TargetKind};
 pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
     let targets = resolve(&args.selector)?;
 
-    if args.json {
+    if args.format.is_json() {
         let arr: Vec<_> = targets
             .iter()
             .map(|t| {

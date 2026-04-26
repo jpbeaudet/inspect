@@ -25,7 +25,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     if let Err(e) = logql::parse_with_aliases(query, |name| {
         alias::get(name).ok().flatten().map(|e| e.selector)
     }) {
-        if args.json {
+        if args.format.is_json() {
             let env = json!({
                 "schema_version": 1,
                 "summary": format!("parse error: {}", e.message),
@@ -58,7 +58,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     let result = match exec::execute(query, opts) {
         Ok(out) => out,
         Err(e) => {
-            if args.json {
+            if args.format.is_json() {
                 let env = json!({
                     "schema_version": 1,
                     "summary": "execution failed",
@@ -81,7 +81,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
 
     match result {
         ExecOutput::Log(r) => {
-            if args.json {
+            if args.format.is_json() {
                 emit_log_json(&args, &r.records);
             } else {
                 emit_log_human(&args, &r.records);
@@ -93,7 +93,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
             })
         }
         ExecOutput::Metric(samples) => {
-            if args.json {
+            if args.format.is_json() {
                 emit_metric_json(&args, &samples);
             } else {
                 emit_metric_human(&args, &samples);

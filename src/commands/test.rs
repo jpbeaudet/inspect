@@ -113,7 +113,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<ExitKind> {
 
     let overall = overall_status(&checks);
 
-    if args.json {
+    if args.format.is_json() {
         emit_json(&r.name, &checks, overall);
     } else {
         emit_text(&r.name, host, port, &checks, overall);

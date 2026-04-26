@@ -119,11 +119,8 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         }
     }
 
-    if args.json {
-        doc.print_json();
-    } else {
-        doc.print_human(&data_lines);
-    }
+    let fmt = args.format.resolve()?;
+    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
 
     Ok(if overall_failing > 0 {
         ExitKind::Error

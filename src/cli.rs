@@ -178,9 +178,8 @@ pub struct AddArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -198,9 +197,8 @@ pub struct TestArgs {
     /// Namespace to test.
     pub namespace: String,
 
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -208,9 +206,8 @@ pub struct ShowArgs {
     /// Namespace to show.
     pub namespace: String,
 
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 /// Generic selector container used by all not-yet-implemented verbs so that
@@ -228,9 +225,8 @@ pub struct SelectorArgs {
 pub struct WhyArgs {
     /// Selector resolving to one or more services to diagnose.
     pub selector: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -240,9 +236,8 @@ pub struct ConnectivityArgs {
     /// Live-probe each declared edge with `bash -c '</dev/tcp/host/port'`.
     #[arg(long)]
     pub probe: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -255,9 +250,8 @@ pub struct RecipeArgs {
     /// Apply mutating steps (default is dry-run).
     #[arg(long)]
     pub apply: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -276,12 +270,8 @@ pub struct SearchArgs {
     /// Stream new records as they arrive (log queries only).
     #[arg(long, short = 'f')]
     pub follow: bool,
-    /// Emit machine-readable JSON envelopes instead of human text.
-    #[arg(long)]
-    pub json: bool,
-    /// Disable ANSI color in human output.
-    #[arg(long)]
-    pub no_color: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -301,25 +291,22 @@ pub struct ConnectArgs {
     /// Disable interactive prompts entirely (CI mode).
     #[arg(long)]
     pub non_interactive: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct DisconnectArgs {
     /// Namespace to disconnect.
     pub namespace: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct ConnectionsArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -327,9 +314,8 @@ pub struct DisconnectAllArgs {
     /// Skip confirmation prompt.
     #[arg(long, short)]
     pub yes: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -349,18 +335,16 @@ pub struct SetupArgs {
     /// without re-discovering.
     #[arg(long, conflicts_with_all = ["force", "skip_systemd", "skip_host_listeners"])]
     pub check_drift: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
     /// Namespace whose profile to display.
     pub namespace: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 // ---- Phase 3 -----------------------------------------------------------------
@@ -399,9 +383,8 @@ pub struct AliasAddArgs {
 
 #[derive(Debug, Args)]
 pub struct AliasListArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -414,18 +397,16 @@ pub struct AliasRemoveArgs {
 pub struct AliasShowArgs {
     /// Alias name (without the leading '@').
     pub name: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct ResolveArgs {
     /// Selector text (e.g. `arte/pulse`, `prod-*/storage`, `@plogs`).
     pub selector: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 // ---- Phase 4 read verbs ------------------------------------------------------
@@ -435,25 +416,23 @@ pub struct ResolveArgs {
 pub struct SimpleSelectorArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct HealthArgs {
     pub selector: String,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -462,8 +441,8 @@ pub struct PsArgs {
     /// Show all containers (default shows just running).
     #[arg(short = 'a', long)]
     pub all: bool,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -481,9 +460,8 @@ pub struct LogsArgs {
     /// Stream logs.
     #[arg(short = 'f', long)]
     pub follow: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
     /// Hidden: ssh-side timeout for follow mode (seconds).
     #[arg(long, hide = true)]
     pub follow_timeout_secs: Option<u64>,
@@ -536,16 +514,16 @@ pub struct GrepArgs {
     #[arg(short = 'c', long = "count")]
     pub count: bool,
 
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct CatArgs {
     /// Selector with `:path` (e.g. `arte/atlas:/etc/atlas.conf`).
     pub target: String,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -558,8 +536,8 @@ pub struct LsArgs {
     /// Long listing (`-l`).
     #[arg(short = 'l', long)]
     pub long: bool,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -568,8 +546,8 @@ pub struct FindArgs {
     pub target: String,
     /// Optional name pattern (find -name).
     pub pattern: Option<String>,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 // ---- Phase 5 write verbs -----------------------------------------------------
@@ -665,8 +643,8 @@ pub struct CpArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -704,22 +682,22 @@ pub struct AuditLsArgs {
     /// Maximum entries to show.
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct AuditShowArgs {
     pub id: String,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct AuditGrepArgs {
     pub pattern: String,
-    #[arg(long)]
-    pub json: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]

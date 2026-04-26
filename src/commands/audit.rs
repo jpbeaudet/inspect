@@ -11,9 +11,9 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     let store = AuditStore::open()?;
     let entries = store.all()?;
     match args.command {
-        AuditCommand::Ls(o) => list(&entries, o.json, Some(o.limit)),
-        AuditCommand::Show(o) => show(&entries, &o.id, o.json),
-        AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.json),
+        AuditCommand::Ls(o) => list(&entries, o.format.is_json(), Some(o.limit)),
+        AuditCommand::Show(o) => show(&entries, &o.id, o.format.is_json()),
+        AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.format.is_json()),
     }
 }
 

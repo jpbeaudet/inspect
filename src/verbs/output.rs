@@ -9,11 +9,18 @@ use serde_json::{Map, Value};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Human renderer state. Buffers SUMMARY/DATA/NEXT and prints all at once.
+///
+/// In Phase 10.3 the renderer additionally buffers per-record envelopes
+/// in [`Self::rows`] so the universal format dispatcher
+/// ([`crate::format::render::render_rows`]) can re-render them as
+/// CSV/TSV/YAML/Markdown/templates/raw without each verb having to
+/// branch on every flag.
 #[derive(Debug, Default)]
 pub struct Renderer {
     pub summary: String,
     pub data: Vec<String>,
     pub next: Vec<String>,
+    pub rows: Vec<Value>,
 }
 
 impl Renderer {
@@ -32,6 +39,14 @@ impl Renderer {
         self.next.push(s.into());
         self
     }
+    /// Phase 10.3 — buffer the per-record envelope so format dispatch
+    /// can re-render it as CSV / TSV / YAML / Markdown / template / raw.
+    pub fn push_row(&mut self, env: &Envelope) -> &mut Self {
+        if let Ok(v) = serde_json::to_value(env) {
+            self.rows.push(v);
+        }
+        self
+    }
     pub fn print(&self) {
         println!("SUMMARY: {}", self.summary);
         if self.data.is_empty() {
@@ -48,6 +63,39 @@ impl Renderer {
             println!("NEXT:");
             for line in &self.next {
                 println!("  {line}");
+            }
+        }
+    }
+
+    /// Phase 10.3 — render whichever output the user asked for.
+    ///
+    /// * `Human` falls back to [`Self::print`] (with full envelope).
+    /// * `Json` emits one envelope per line via the existing
+    ///   line-delimited writer (backward-compatible with all pre-10.3
+    ///   tests).
+    /// * `Csv` / `Tsv` / `Yaml` / `Md` / `Table` / `Format` / `Raw`
+    ///   delegate to [`crate::format::render::render_rows`] using the
+    ///   buffered envelopes.
+    pub fn dispatch(&self, fmt: &crate::format::OutputFormat) -> anyhow::Result<()> {
+        use crate::format::OutputFormat as F;
+        match fmt {
+            F::Human => {
+                self.print();
+                Ok(())
+            }
+            F::Json => {
+                for row in &self.rows {
+                    println!("{}", serde_json::to_string(row)?);
+                }
+                Ok(())
+            }
+            _ => {
+                let next: Vec<NextStep> = self
+                    .next
+                    .iter()
+                    .map(|s| NextStep::new(s.clone(), String::new()))
+                    .collect();
+                crate::format::render::render_rows(&self.rows, &self.summary, &next, fmt)
             }
         }
     }

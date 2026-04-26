@@ -32,7 +32,7 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
         };
         let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(30))?;
         if !out.ok() {
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}: ls failed (exit {}): {}",
                     step.ns.namespace,
@@ -51,7 +51,7 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
             continue;
         }
         any_ok = true;
-        if args.json {
+        if args.format.is_json() {
             for line in out.stdout.lines() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))

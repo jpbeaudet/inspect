@@ -8,7 +8,7 @@ use crate::error::ExitKind;
 pub fn run(args: ListArgs) -> anyhow::Result<ExitKind> {
     let resolved = resolver::list_all()?;
 
-    if args.json {
+    if args.format.is_json() {
         emit_json(&resolved);
         return Ok(ExitKind::Success);
     }

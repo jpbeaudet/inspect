@@ -116,7 +116,7 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
             planned.len(),
             diff_summary(&summary_diffs),
         ));
-        if args.diff || args.json /* harmless */ {
+        if args.diff || args.format.is_json() /* harmless */ {
             for (lbl, old, new) in &diffs {
                 let block = unified_diff(old, new, lbl, &format!("{lbl} (proposed)"));
                 if !block.is_empty() {

@@ -24,7 +24,7 @@ fn add(a: crate::cli::AliasAddArgs) -> anyhow::Result<ExitKind> {
 
 fn list(a: crate::cli::AliasListArgs) -> anyhow::Result<ExitKind> {
     let entries = alias::list()?;
-    if a.json {
+    if a.format.is_json() {
         let arr: Vec<_> = entries
             .iter()
             .map(|(n, e)| {
@@ -83,7 +83,7 @@ fn show(a: crate::cli::AliasShowArgs) -> anyhow::Result<ExitKind> {
         return Ok(ExitKind::Error);
     };
     let kind = alias::classify(&entry.selector);
-    if a.json {
+    if a.format.is_json() {
         let v = serde_json::json!({
             "name": a.name,
             "selector": entry.selector,

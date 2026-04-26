@@ -36,7 +36,7 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
         };
         let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)?;
         if !out.ok() && out.stdout.is_empty() {
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}/{}: logs failed (exit {}): {}",
                     step.ns.namespace,
@@ -49,7 +49,7 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
         }
         for line in out.stdout.lines() {
             any_lines = true;
-            if args.json {
+            if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "logs", "logs")
                         .with_service(&svc_name)

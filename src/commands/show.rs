@@ -12,7 +12,7 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
     let r = resolver::resolve(&args.namespace)?;
 
-    if args.json {
+    if args.format.is_json() {
         let body = format!(
             "{{\"schema_version\":1,\"name\":{name},\"host\":{host},\"user\":{user},\
              \"port\":{port},\"key_path\":{key_path},\"key_passphrase_env\":{kpe},\

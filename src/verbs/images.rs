@@ -20,7 +20,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
             RunOpts::with_timeout(20),
         )?;
         if !out.ok() {
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}: docker images failed (exit {}): {}",
                     ns.namespace,
@@ -37,24 +37,18 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
             let tag = v.get("Tag").and_then(|x| x.as_str()).unwrap_or("");
             let size = v.get("Size").and_then(|x| x.as_str()).unwrap_or("");
             let repo_tag = format!("{repo}:{tag}");
-            if args.json {
-                JsonOut::write(
-                    &Envelope::new(&ns.namespace, "image", "image")
-                        .put("repo_tag", repo_tag.clone())
-                        .put("size", size.to_string())
-                        .put("raw", v),
-                );
-            } else {
-                renderer.data_line(format!(
+            renderer.data_line(format!(
                     "{ns} | {repo_tag:<48} {size}",
                     ns = ns.namespace
                 ));
-            }
+            renderer.push_row(&Envelope::new(&ns.namespace, "image", "image")
+                        .put("repo_tag", repo_tag.clone())
+                        .put("size", size.to_string())
+                        .put("raw", v));
         }
     }
-    if !args.json {
-        renderer.summary(format!("{count} image(s)"));
-        renderer.print();
-    }
+            renderer.summary(format!("{count} image(s)"));
+    let __fmt = args.format.resolve()?;
+    renderer.dispatch(&__fmt)?;
     Ok(ExitKind::Success)
 }

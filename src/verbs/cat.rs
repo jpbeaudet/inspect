@@ -28,7 +28,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
         let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(30))?;
         if !out.ok() {
             errored_any = true;
-            if args.json {
+            if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "file", format!("file:{path}"))
                         .with_service(step.service().unwrap_or("_"))
@@ -47,7 +47,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             continue;
         }
         printed_any = true;
-        if args.json {
+        if args.format.is_json() {
             for line in out.stdout.lines() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "file", format!("file:{path}"))
@@ -64,7 +64,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
         }
     }
 
-    if args.json {
+    if args.format.is_json() {
         return Ok(if printed_any { ExitKind::Success } else { ExitKind::Error });
     }
     if !printed_any && errored_any {

@@ -20,7 +20,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
             RunOpts::with_timeout(20),
         )?;
         if !out.ok() {
-            if !args.json {
+            if !args.format.is_json() {
                 eprintln!(
                     "{}: docker network ls failed (exit {}): {}",
                     ns.namespace,
@@ -36,25 +36,19 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
             let name = v.get("Name").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let driver = v.get("Driver").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let scope = v.get("Scope").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            if args.json {
-                JsonOut::write(
-                    &Envelope::new(&ns.namespace, "network", format!("network:{name}"))
-                        .put("name", name)
-                        .put("driver", driver)
-                        .put("scope", scope)
-                        .put("raw", v),
-                );
-            } else {
-                renderer.data_line(format!(
+            renderer.data_line(format!(
                     "{ns} | {name:<24} {driver:<12} {scope}",
                     ns = ns.namespace
                 ));
-            }
+            renderer.push_row(&Envelope::new(&ns.namespace, "network", format!("network:{name}"))
+                        .put("name", name)
+                        .put("driver", driver)
+                        .put("scope", scope)
+                        .put("raw", v));
         }
     }
-    if !args.json {
-        renderer.summary(format!("{count} network(s)"));
-        renderer.print();
-    }
+            renderer.summary(format!("{count} network(s)"));
+    let __fmt = args.format.resolve()?;
+    renderer.dispatch(&__fmt)?;
     Ok(ExitKind::Success)
 }
