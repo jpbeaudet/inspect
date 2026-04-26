@@ -14,18 +14,21 @@ use crate::cli::WhyArgs;
 use crate::error::ExitKind;
 use crate::profile::schema::{HealthStatus, Profile, Service};
 use crate::ssh::exec::RunOpts;
+use crate::verbs::correlation::why_rules;
 use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::OutputDoc;
 use crate::verbs::runtime::RemoteRunner;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
     let live_running = collect_live_running(runner.as_ref(), &nses);
 
-    let mut renderer = Renderer::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut services_json: Vec<serde_json::Value> = Vec::new();
     let mut overall_failing = 0usize;
     let mut overall_total = 0usize;
     let mut emitted = 0usize;
+    let mut last_root: Option<(String, String)> = None; // (server, root)
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = match step.service() {
@@ -46,6 +49,9 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             .map(|n| (n.clone(), node_status(profile, live, n)))
             .collect();
         let root = pick_root_cause(&walk, &status_map);
+        if let Some(r) = &root {
+            last_root = Some((ns.clone(), r.clone()));
+        }
 
         overall_total += walk.nodes.len();
         overall_failing += status_map
@@ -53,62 +59,70 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             .filter(|s| matches!(s, NodeStatus::Down | NodeStatus::Unhealthy))
             .count();
 
-        if args.json {
-            let nodes_json: Vec<serde_json::Value> = walk
-                .order
-                .iter()
-                .map(|name| {
-                    let st = status_map.get(name).copied().unwrap_or(NodeStatus::Unknown);
-                    let depth = walk.depth.get(name).copied().unwrap_or(0);
-                    serde_json::json!({
-                        "name": name,
-                        "status": st.as_str(),
-                        "depth": depth,
-                        "depends_on": walk.edges.get(name).cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            JsonOut::write(
-                &Envelope::new(ns, "discovery", "discovery")
-                    .with_service(&svc_name)
-                    .put("nodes", nodes_json)
-                    .put(
-                        "root_cause",
-                        root.clone().unwrap_or_default(),
-                    )
-                    .put(
-                        "self_status",
-                        status_map
-                            .get(&svc_name)
-                            .copied()
-                            .unwrap_or(NodeStatus::Unknown)
-                            .as_str(),
-                    ),
-            );
-        } else {
-            renderer.data_line(format!("{ns}/{svc_name}:"));
-            for name in &walk.order {
-                let depth = walk.depth.get(name).copied().unwrap_or(0);
+        let nodes_json: Vec<serde_json::Value> = walk
+            .order
+            .iter()
+            .map(|name| {
                 let st = status_map.get(name).copied().unwrap_or(NodeStatus::Unknown);
-                let mark = if Some(name) == root.as_ref() { "  <- likely root cause" } else { "" };
-                let indent = "  ".repeat(depth + 1);
-                renderer.data_line(format!("{indent}{name}: {}{mark}", st.as_str()));
-            }
+                let depth = walk.depth.get(name).copied().unwrap_or(0);
+                serde_json::json!({
+                    "name": name,
+                    "status": st.as_str(),
+                    "depth": depth,
+                    "depends_on": walk.edges.get(name).cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        services_json.push(serde_json::json!({
+            "server": ns,
+            "service": svc_name,
+            "self_status": status_map.get(&svc_name).copied().unwrap_or(NodeStatus::Unknown).as_str(),
+            "root_cause": root.clone(),
+            "nodes": nodes_json,
+        }));
+
+        data_lines.push(format!("{ns}/{svc_name}:"));
+        for name in &walk.order {
+            let depth = walk.depth.get(name).copied().unwrap_or(0);
+            let st = status_map.get(name).copied().unwrap_or(NodeStatus::Unknown);
+            let mark = if Some(name) == root.as_ref() { "  <- likely root cause" } else { "" };
+            let indent = "  ".repeat(depth + 1);
+            data_lines.push(format!("{indent}{name}: {}{mark}", st.as_str()));
         }
     }
 
-    if !args.json {
-        let summary = if emitted == 0 {
-            "no services matched".to_string()
-        } else {
-            format!(
-                "{emitted} service(s) walked; {overall_failing} failing dep(s) of {overall_total}"
-            )
-        };
-        renderer.summary(summary);
-        renderer.next("inspect health <sel> for direct probes");
-        renderer.next("inspect logs <sel> --since 5m for recent activity");
-        renderer.print();
+    let summary = if emitted == 0 {
+        "no services matched".to_string()
+    } else {
+        format!("{emitted} service(s) walked; {overall_failing} failing dep(s) of {overall_total}")
+    };
+    let mut doc = OutputDoc::new(
+        summary,
+        serde_json::json!({
+            "services": services_json,
+            "totals": {
+                "walked": emitted,
+                "failing": overall_failing,
+                "total_nodes": overall_total,
+            }
+        }),
+    )
+    .with_meta("selector", args.selector.clone());
+    if let Some((server, root)) = &last_root {
+        for n in why_rules(server, Some(root.as_str())) {
+            doc.push_next(n);
+        }
+    } else if emitted > 0 {
+        let server = nses.first().map(|n| n.namespace.as_str()).unwrap_or("<server>");
+        for n in why_rules(server, None) {
+            doc.push_next(n);
+        }
+    }
+
+    if args.json {
+        doc.print_json();
+    } else {
+        doc.print_human(&data_lines);
     }
 
     Ok(if overall_failing > 0 {

@@ -100,3 +100,95 @@ impl JsonOut {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Phase 10 — unified command-level envelope (bible §11).
+// -----------------------------------------------------------------------------
+
+/// One follow-up suggestion attached to an [`OutputDoc`] in the `next`
+/// array. `cmd` is what the operator should run (or copy/paste);
+/// `rationale` is a one-sentence explanation of why.
+#[derive(Debug, Clone, Serialize)]
+pub struct NextStep {
+    pub cmd: String,
+    pub rationale: String,
+}
+
+impl NextStep {
+    pub fn new(cmd: impl Into<String>, rationale: impl Into<String>) -> Self {
+        Self { cmd: cmd.into(), rationale: rationale.into() }
+    }
+}
+
+/// Single command-level output document. Used for aggregate / summary
+/// commands (`status`, `health`, `why`, `connectivity`, `recipe`,
+/// `search`). Streaming commands (`logs`, `grep`, etc.) use the
+/// per-record [`Envelope`] from §10 instead.
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputDoc {
+    pub schema_version: u32,
+    pub summary: String,
+    pub data: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<NextStep>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub meta: Map<String, Value>,
+}
+
+impl OutputDoc {
+    pub fn new(summary: impl Into<String>, data: Value) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            summary: summary.into(),
+            data,
+            next: Vec::new(),
+            meta: Map::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_next(mut self, next: Vec<NextStep>) -> Self {
+        self.next = next;
+        self
+    }
+
+    pub fn push_next(&mut self, n: NextStep) -> &mut Self {
+        self.next.push(n);
+        self
+    }
+
+    pub fn with_meta(mut self, key: &str, value: impl Into<Value>) -> Self {
+        self.meta.insert(key.to_string(), value.into());
+        self
+    }
+
+    /// Print to stdout: a single JSON line for `--json` callers.
+    pub fn print_json(&self) {
+        if let Ok(s) = serde_json::to_string(self) {
+            println!("{s}");
+        }
+    }
+
+    /// Print as SUMMARY/DATA/NEXT human blocks. Caller supplies the
+    /// renderer for `data` lines because the structured shape varies
+    /// per command. `next` is rendered as `cmd  -- rationale`.
+    pub fn print_human(&self, data_lines: &[String]) {
+        println!("SUMMARY: {}", self.summary);
+        if data_lines.is_empty() {
+            println!("DATA:    (none)");
+        } else {
+            println!("DATA:");
+            for l in data_lines {
+                println!("  {l}");
+            }
+        }
+        if self.next.is_empty() {
+            println!("NEXT:    (none)");
+        } else {
+            println!("NEXT:");
+            for n in &self.next {
+                println!("  {}  -- {}", n.cmd, n.rationale);
+            }
+        }
+    }
+}

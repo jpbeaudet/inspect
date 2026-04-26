@@ -16,17 +16,19 @@ use crate::error::ExitKind;
 use crate::profile::schema::{Profile, Service};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::OutputDoc;
 use crate::verbs::quote::shquote;
 use crate::verbs::runtime::RemoteRunner;
 
 pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
-    let mut renderer = Renderer::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut services_json: Vec<serde_json::Value> = Vec::new();
     let mut total_edges = 0usize;
     let mut probed_open = 0usize;
     let mut probed_closed = 0usize;
     let mut emitted_services = 0usize;
+    let mut closed_edge: Option<(String, String, String)> = None;
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = match step.service() {
@@ -47,7 +49,16 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
                     let p = probe_edge(runner.as_ref(), step.ns, e);
                     match p {
                         Some(true) => probed_open += 1,
-                        Some(false) => probed_closed += 1,
+                        Some(false) => {
+                            probed_closed += 1;
+                            if closed_edge.is_none() {
+                                closed_edge = Some((
+                                    step.ns.namespace.clone(),
+                                    e.from.clone(),
+                                    e.to.clone(),
+                                ));
+                            }
+                        }
                         None => {}
                     }
                     EdgeProbe { edge: e.clone(), open: p }
@@ -60,63 +71,86 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
                 .collect()
         };
 
-        if args.json {
-            let edges_json: Vec<serde_json::Value> = probes
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "from": p.edge.from,
-                        "to": p.edge.to,
-                        "to_host": p.edge.to_host,
-                        "port": p.edge.port,
-                        "proto": p.edge.proto,
-                        "probed": match p.open {
-                            Some(true) => "open",
-                            Some(false) => "closed",
-                            None => "skipped",
-                        },
-                    })
+        let edges_json: Vec<serde_json::Value> = probes
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "from": p.edge.from,
+                    "to": p.edge.to,
+                    "to_host": p.edge.to_host,
+                    "port": p.edge.port,
+                    "proto": p.edge.proto,
+                    "probed": match p.open {
+                        Some(true) => "open",
+                        Some(false) => "closed",
+                        None => "skipped",
+                    },
                 })
-                .collect();
-            JsonOut::write(
-                &Envelope::new(&step.ns.namespace, "discovery", "discovery")
-                    .with_service(&svc_name)
-                    .put("edges", edges_json),
-            );
-        } else {
-            renderer.data_line(format!("{}/{svc_name}:", step.ns.namespace));
-            if probes.is_empty() {
-                renderer.data_line("  (no declared dependencies)".to_string());
-            }
-            for p in &probes {
-                let port = p.edge.port.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
-                let badge = match p.open {
-                    Some(true) => "[open]   ",
-                    Some(false) => "[closed] ",
-                    None => "         ",
-                };
-                renderer.data_line(format!(
-                    "  {badge} {} -> {}:{port}/{}",
-                    p.edge.from, p.edge.to, p.edge.proto
-                ));
-            }
+            })
+            .collect();
+        services_json.push(serde_json::json!({
+            "server": step.ns.namespace,
+            "service": svc_name,
+            "edges": edges_json,
+        }));
+
+        data_lines.push(format!("{}/{svc_name}:", step.ns.namespace));
+        if probes.is_empty() {
+            data_lines.push("  (no declared dependencies)".to_string());
+        }
+        for p in &probes {
+            let port = p.edge.port.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            let badge = match p.open {
+                Some(true) => "[open]   ",
+                Some(false) => "[closed] ",
+                None => "         ",
+            };
+            data_lines.push(format!(
+                "  {badge} {} -> {}:{port}/{}",
+                p.edge.from, p.edge.to, p.edge.proto
+            ));
         }
     }
 
-    if !args.json {
-        let probe_summary = if args.probe {
-            format!(", probed {probed_open} open / {probed_closed} closed")
-        } else {
-            String::new()
-        };
-        renderer.summary(format!(
-            "{emitted_services} service(s), {total_edges} edge(s){probe_summary}"
+    let probe_summary = if args.probe {
+        format!(", probed {probed_open} open / {probed_closed} closed")
+    } else {
+        String::new()
+    };
+    let summary = format!(
+        "{emitted_services} service(s), {total_edges} edge(s){probe_summary}"
+    );
+    let mut doc = OutputDoc::new(
+        summary,
+        serde_json::json!({
+            "services": services_json,
+            "totals": {
+                "services": emitted_services,
+                "edges": total_edges,
+                "open": probed_open,
+                "closed": probed_closed,
+                "probed": args.probe,
+            },
+        }),
+    )
+    .with_meta("selector", args.selector.clone());
+    if !args.probe {
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect connectivity {} --probe", args.selector),
+            "live-test edges with /dev/tcp probes".to_string(),
         ));
-        if !args.probe {
-            renderer.next("inspect connectivity <sel> --probe to live-test edges");
-        }
-        renderer.next("inspect why <sel> to walk failures");
-        renderer.print();
+    }
+    if let Some((server, _from, to)) = &closed_edge {
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect why {server}/{to}"),
+            format!("dep '{to}' is unreachable; walk its state"),
+        ));
+    }
+
+    if args.json {
+        doc.print_json();
+    } else {
+        doc.print_human(&data_lines);
     }
 
     Ok(if args.probe && probed_closed > 0 {

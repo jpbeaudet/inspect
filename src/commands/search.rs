@@ -146,18 +146,33 @@ fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
             })
         })
         .collect();
+    // Phase 10 — correlation: dominant-service hint.
+    let services: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.label("service").map(|s| s.to_string()))
+        .collect();
+    let server_hint = records
+        .iter()
+        .find_map(|r| r.label("server").map(|s| s.to_string()));
+    let next: Vec<Value> = crate::verbs::correlation::search_rules(
+        server_hint.as_deref(),
+        &services,
+    )
+    .into_iter()
+    .map(|n| json!({"cmd": n.cmd, "rationale": n.rationale}))
+    .collect();
     let env = json!({
         "schema_version": 1,
         "summary": format!("{} record(s)", records.len()),
         "data": { "kind": "log", "records": data },
-        "next": [],
+        "next": next,
         "meta": {
             "query": args.query,
             "since": args.since,
             "until": args.until,
             "tail":  args.tail,
             "follow": args.follow,
-            "phase": 7
+            "phase": 10
         }
     });
     println!("{env}");

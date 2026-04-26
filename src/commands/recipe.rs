@@ -22,7 +22,8 @@ use serde::Deserialize;
 use crate::cli::RecipeArgs;
 use crate::error::ExitKind;
 use crate::paths;
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::OutputDoc;
+use serde_json::json;
 
 /// Verbs that mutate remote state. Keep in sync with the write-verb
 /// matrix in `src/verbs/write/`.
@@ -59,7 +60,7 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
         .context("locating current `inspect` binary for recipe step execution")?;
 
     let mut step_results: Vec<StepResult> = Vec::with_capacity(doc.steps.len());
-    let mut renderer = Renderer::new();
+    let mut data_lines: Vec<String> = Vec::new();
     let mut any_failed = false;
 
     for (idx, raw) in doc.steps.iter().enumerate() {
@@ -114,7 +115,7 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
         if !args.json {
-            renderer.data_line(format!(
+            data_lines.push(format!(
                 "step {}: inspect {} -> exit {}",
                 idx + 1,
                 argv.join(" "),
@@ -123,40 +124,48 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
         }
     }
 
-    if args.json {
-        let steps_json: Vec<serde_json::Value> = step_results
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "argv": s.argv,
-                    "exit_code": s.exit_code,
-                    "stdout": s.stdout,
-                    "stderr": s.stderr,
-                })
+    let steps_json: Vec<serde_json::Value> = step_results
+        .iter()
+        .map(|s| {
+            json!({
+                "argv": s.argv,
+                "exit_code": s.exit_code,
+                "stdout": s.stdout,
+                "stderr": s.stderr,
             })
-            .collect();
-        JsonOut::write(
-            &Envelope::new("_local", "recipe", "recipe")
-                .put("recipe", doc.name.clone())
-                .put("description", doc.description.clone().unwrap_or_default())
-                .put("mutating", doc.mutating)
-                .put("apply", args.apply)
-                .put("steps", steps_json),
-        );
-    } else {
-        renderer.summary(format!(
-            "recipe '{}' completed {} step(s){}",
-            doc.name,
-            doc.steps.len(),
-            if any_failed { " (with failures)" } else { "" }
+        })
+        .collect();
+    let summary = format!(
+        "recipe '{}' completed {} step(s){}",
+        doc.name,
+        doc.steps.len(),
+        if any_failed { " (with failures)" } else { "" }
+    );
+    let mut doc_out = OutputDoc::new(
+        summary,
+        json!({
+            "recipe": doc.name.clone(),
+            "description": doc.description.clone().unwrap_or_default(),
+            "mutating": doc.mutating,
+            "apply": args.apply,
+            "steps": steps_json,
+            "totals": {
+                "steps": doc.steps.len(),
+                "failed": step_results.iter().filter(|s| s.exit_code != 0).count(),
+            }
+        }),
+    )
+    .with_meta("phase", 10);
+    if doc.mutating && !args.apply {
+        doc_out.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect recipe {} --apply", args.name),
+            "apply mutating steps",
         ));
-        if doc.mutating && !args.apply {
-            renderer.next(format!(
-                "inspect recipe {} --apply   (apply mutating steps)",
-                args.name
-            ));
-        }
-        renderer.print();
+    }
+    if args.json {
+        doc_out.print_json();
+    } else {
+        doc_out.print_human(&data_lines);
     }
 
     Ok(if any_failed { ExitKind::Error } else { ExitKind::Success })

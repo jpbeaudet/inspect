@@ -10,6 +10,7 @@
 //! - `2` — error (any failure path)
 
 pub mod cat;
+pub mod correlation;
 pub mod dispatch;
 pub mod duration;
 pub mod find;

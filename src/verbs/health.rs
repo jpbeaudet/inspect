@@ -5,17 +5,21 @@
 //! `health_status` if any. Host-level targets get a basic `uptime` probe.
 
 use anyhow::Result;
+use serde_json::{json, Value};
 
 use crate::cli::HealthArgs;
 use crate::error::ExitKind;
 use crate::ssh::exec::RunOpts;
+use crate::verbs::correlation::{status_rules, StatusRow};
 use crate::verbs::dispatch::{iter_steps, plan};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::OutputDoc;
 use crate::verbs::quote::shquote;
 
 pub fn run(args: HealthArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
-    let mut renderer = Renderer::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut probes_json: Vec<Value> = Vec::new();
+    let mut rows: Vec<StatusRow> = Vec::new();
     let mut total = 0usize;
     let mut ok = 0usize;
     let mut bad = 0usize;
@@ -28,8 +32,16 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
 
         let result = match url.as_deref() {
             Some(u) => {
-                let cmd = format!("curl -fsS -m 3 -o /dev/null -w '%{{http_code}}' {} || true", shquote(u));
-                let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, RunOpts::with_timeout(10))?;
+                let cmd = format!(
+                    "curl -fsS -m 3 -o /dev/null -w '%{{http_code}}' {} || true",
+                    shquote(u)
+                );
+                let out = runner.run(
+                    &step.ns.namespace,
+                    &step.ns.target,
+                    &cmd,
+                    RunOpts::with_timeout(10),
+                )?;
                 let code = out.stdout.trim().to_string();
                 let healthy = code.starts_with('2') || code.starts_with('3');
                 ProbeResult {
@@ -39,7 +51,6 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
                 }
             }
             None => {
-                // No URL: fall back to cached marker.
                 let marker = svc_def
                     .and_then(|s| s.health_status)
                     .map(|s| format!("{s:?}"))
@@ -56,30 +67,43 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
         } else {
             bad += 1;
         }
-
-        if args.json {
-            JsonOut::write(
-                &Envelope::new(&step.ns.namespace, "discovery", "discovery")
-                    .with_service(&svc)
-                    .put("healthy", result.healthy)
-                    .put("detail", result.detail.clone())
-                    .put("probe_url", result.url.clone()),
-            );
-        } else {
-            let badge = if result.healthy { "OK " } else { "BAD" };
-            renderer.data_line(format!(
-                "[{badge}] {ns}/{svc:<20} {detail}",
-                ns = step.ns.namespace,
-                detail = result.detail
-            ));
-        }
+        rows.push(StatusRow {
+            server: step.ns.namespace.clone(),
+            service: svc.clone(),
+            status: if result.healthy { "ok".into() } else { "unhealthy".into() },
+        });
+        probes_json.push(json!({
+            "server": step.ns.namespace,
+            "service": svc,
+            "healthy": result.healthy,
+            "detail": result.detail,
+            "probe_url": result.url,
+        }));
+        let badge = if result.healthy { "OK " } else { "BAD" };
+        data_lines.push(format!(
+            "[{badge}] {ns}/{svc:<20} {detail}",
+            ns = step.ns.namespace,
+            detail = result.detail
+        ));
     }
 
-    if !args.json {
-        renderer
-            .summary(format!("{total} probe(s): {ok} ok, {bad} not-ok"))
-            .next("inspect logs <sel>/<service> --since 5m");
-        renderer.print();
+    let summary = format!("{total} probe(s): {ok} ok, {bad} not-ok");
+    let mut doc = OutputDoc::new(
+        summary,
+        json!({
+            "probes": probes_json,
+            "totals": { "total": total, "ok": ok, "bad": bad },
+        }),
+    )
+    .with_meta("selector", args.selector.clone());
+    for n in status_rules(&rows) {
+        doc.push_next(n);
+    }
+
+    if args.json {
+        doc.print_json();
+    } else {
+        doc.print_human(&data_lines);
     }
 
     Ok(ExitKind::Success)

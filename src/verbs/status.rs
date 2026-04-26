@@ -5,13 +5,15 @@
 //! profile services that no longer exist as `down`.
 
 use anyhow::Result;
+use serde_json::{json, Value};
 
 use crate::cli::StatusArgs;
 use crate::error::ExitKind;
 use crate::profile::schema::HealthStatus;
 use crate::ssh::exec::RunOpts;
+use crate::verbs::correlation::{status_rules, StatusRow};
 use crate::verbs::dispatch::{iter_steps, plan};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::OutputDoc;
 
 pub fn run(args: StatusArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
@@ -21,7 +23,9 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     let mut unhealthy = 0usize;
     let mut unknown = 0usize;
 
-    let mut renderer = Renderer::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut services_json: Vec<Value> = Vec::new();
+    let mut rows: Vec<StatusRow> = Vec::new();
 
     // Optionally reconcile with live state to detect down-but-cached services.
     let mut live_running: std::collections::HashMap<String, std::collections::HashSet<String>> =
@@ -73,33 +77,48 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             "unhealthy" | "down" => unhealthy += 1,
             _ => unknown += 1,
         }
-        if args.json {
-            JsonOut::write(
-                &Envelope::new(&step.ns.namespace, "discovery", "discovery")
-                    .with_service(svc_name)
-                    .put("health_status", status_str)
-                    .put(
-                        "image",
-                        svc_def.and_then(|s| s.image.clone()).unwrap_or_default(),
-                    ),
-            );
-        } else {
-            let img = svc_def.and_then(|s| s.image.clone()).unwrap_or_default();
-            renderer.data_line(format!(
-                "{ns}/{svc_name:<20} {status_str:<10} {img}",
-                ns = step.ns.namespace
-            ));
-        }
+        let img = svc_def.and_then(|s| s.image.clone()).unwrap_or_default();
+        rows.push(StatusRow {
+            server: step.ns.namespace.clone(),
+            service: svc_name.to_string(),
+            status: status_str.clone(),
+        });
+        services_json.push(json!({
+            "server": step.ns.namespace,
+            "service": svc_name,
+            "status": status_str,
+            "image": img,
+        }));
+        data_lines.push(format!(
+            "{ns}/{svc_name:<20} {status_str:<10} {img}",
+            ns = step.ns.namespace
+        ));
     }
 
-    if !args.json {
-        renderer
-            .summary(format!(
-                "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
-            ))
-            .next("inspect health <sel> for per-service probe details")
-            .next("inspect logs <sel>/<service> --since 5m for recent activity");
-        renderer.print();
+    let summary = format!(
+        "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
+    );
+    let mut doc = OutputDoc::new(
+        summary,
+        json!({
+            "services": services_json,
+            "totals": {
+                "total": total,
+                "healthy": healthy,
+                "unhealthy": unhealthy,
+                "unknown": unknown,
+            }
+        }),
+    )
+    .with_meta("selector", args.selector.clone());
+    for n in status_rules(&rows) {
+        doc.push_next(n);
+    }
+
+    if args.json {
+        doc.print_json();
+    } else {
+        doc.print_human(&data_lines);
     }
 
     Ok(ExitKind::Success)

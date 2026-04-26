@@ -598,6 +598,208 @@ Exit criteria:
 - Backward-compatibility tests for schema versions
 
 Estimated duration: 1 sprint
+### 10.3 Output Format Options
+
+Every command passes through a shared rendering layer. Format selection applies universally — any format works with any verb and with `inspect search`.
+
+#### Flag summary
+
+| Flag | Output | Convention source |
+|---|---|---|
+| *(default)* | Rich human-readable tables with color, box-drawing, alignment | universal CLI |
+| `--json` | Line-delimited JSON (NDJSON), one record per line | rg, jq, vector |
+| `--jsonl` | Alias for `--json` (explicit NDJSON for tooling that distinguishes) | fluent, vector |
+| `--csv` | RFC 4180 CSV with header row | standard |
+| `--tsv` | Tab-separated values with header row | awk, cut, column -t |
+| `--yaml` | YAML document(s), one per record or wrapped in a list | kubectl -o yaml |
+| `--table` | Plain ASCII table (no box-drawing, no color) for piping to `less`, `column`, log files | psql, mysql CLI |
+| `--md` | GitHub-flavored Markdown table | gh, glow |
+| `--format '<template>'` | Go-style template per record | docker, kubectl, gh |
+| `--raw` | Raw content only (no SUMMARY, no NEXT, no envelope) | grep, cat |
+
+#### Mutual exclusivity
+
+Format flags are mutually exclusive. Combining two (e.g., `--json --csv`) is a parse error with a clear message:
+
+```
+error: --json and --csv are mutually exclusive. Pick one output format.
+```
+
+#### SUMMARY / DATA / NEXT behavior per format
+
+| Format | SUMMARY | DATA | NEXT |
+|---|---|---|---|
+| default (human) | printed above data | rich table | printed below data |
+| `--json` | `summary` field in envelope | `data` field | `next` field |
+| `--jsonl` | same as `--json` | same | same |
+| `--csv` / `--tsv` | suppressed (data only) | rows with header | suppressed |
+| `--yaml` | comment at top | YAML body | comment at bottom |
+| `--table` | printed above data | ASCII table | printed below data |
+| `--md` | printed above table | Markdown table | printed below table |
+| `--format` | suppressed (template only) | template-rendered lines | suppressed |
+| `--raw` | suppressed | raw content, no decoration | suppressed |
+
+Rationale: `--csv`, `--tsv`, `--format`, and `--raw` suppress the envelope because their consumers expect pure data. `--json` preserves the full envelope because scripts rely on it. Human-oriented formats (`default`, `--table`, `--md`) include everything.
+
+#### `--json` / `--jsonl` (line-delimited JSON)
+
+Already specified in §10.1. One JSON object per line. Stable schema with `schema_version`. Composable with `jq`, `mlr`, `xargs`, webhooks.
+
+```bash
+inspect grep "error" arte --since 1h --json | jq '.service' | sort -u
+```
+
+For commands that return a single result set (e.g., `inspect status`), the envelope itself is one JSON object. For streaming commands (e.g., `inspect logs --follow`), each record is one JSON line; the envelope wraps the final summary after the stream ends (or is omitted if the stream is interrupted).
+
+#### `--csv` / `--tsv`
+
+RFC 4180 compliant CSV. First row is always a header derived from the record schema's field names. Fields containing commas, quotes, or newlines are properly escaped.
+
+```bash
+# Open in Excel / Google Sheets
+inspect ps 'prod-*' --csv > fleet-status.csv
+
+# Quick column alignment in terminal
+inspect status arte --tsv | column -t
+
+# Feed to awk
+inspect ps arte --tsv | awk -F'\t' '$4 == "unhealthy" { print $2 }'
+```
+
+TSV uses literal tab characters, no quoting. Preferred when piping to `awk`, `cut`, `sort`, or `column -t` because tab-separation doesn't collide with field content.
+
+Field ordering follows the record schema definition order. The `_source` and `_medium` meta-fields are included as the first two columns for disambiguation.
+
+#### `--yaml`
+
+YAML output, one document per record (separated by `---`). For single-result commands, one document. For multi-result, a YAML list or multi-document stream.
+
+```bash
+# Readable config-style output
+inspect status arte --yaml
+
+# Diff two servers' service state
+diff <(inspect status arte --yaml) <(inspect status prod --yaml)
+```
+
+Convention source: `kubectl get -o yaml`. Familiar to any Kubernetes operator.
+
+#### `--table`
+
+Plain ASCII table. No box-drawing characters, no ANSI color codes, no Unicode. Safe for piping to `less`, redirecting to a file, pasting into a terminal that doesn't support Unicode, or embedding in a log.
+
+```bash
+inspect status arte --table | less
+inspect ps 'prod-*' --table > fleet-snapshot.txt
+```
+
+Difference from default: the default human format uses `comfy-table` with box-drawing and color. `--table` strips all of that for maximum portability.
+
+#### `--md`
+
+GitHub-flavored Markdown table. Copy-paste directly into GitHub issues, PRs, Slack (which renders Markdown tables), Notion, or any Markdown-aware tool.
+
+```bash
+# Paste fleet status into a GitHub issue
+inspect status 'prod-*' --md | pbcopy
+
+# Include in a report
+echo "## Fleet Status" >> report.md
+inspect fleet status --md >> report.md
+```
+
+Output example:
+
+```
+8 services, 7 healthy, 1 down (neo4j).
+
+| Service | Container | Port | Health | Uptime |
+|---|---|---|---|---|
+| pulse | running | 8000 | ok | 4h 12m |
+| atlas | running | 8001 | ok | 2h 45m |
+| neo4j | exited | — | down | — |
+
+Suggested next:
+- `inspect why arte/neo4j` — diagnose the down service
+```
+
+#### `--format '<template>'` (Go-style templates)
+
+Per-record template rendering. Uses Go `text/template` syntax (the de-facto standard for CLI formatting via Docker, kubectl, gh). Every field from the record schema is available as `{{.field_name}}`.
+
+```bash
+# Just service names, one per line
+inspect ps arte --format '{{.service}}'
+
+# Custom columns
+inspect status arte --format '{{.service}}\t{{.health}}\t{{.uptime}}'
+
+# Build selectors for piping
+inspect ps arte --format '{{.server}}/{{.service}}' | xargs -I{} inspect logs {} --since 5m
+
+# Conditional formatting
+inspect status arte --format '{{if eq .health "down"}}ALERT: {{.service}} is down{{end}}'
+
+# JSON-ish custom shape
+inspect ps arte --format '{"name":"{{.service}}","status":"{{.health}}"}'
+```
+
+Template functions available (matching Docker/kubectl convention):
+
+| Function | Purpose | Example |
+|---|---|---|
+| `upper`, `lower` | case conversion | `{{.service \| upper}}` |
+| `join` | join list field with separator | `{{.ports \| join ","}}` |
+| `json` | render field as JSON | `{{.mounts \| json}}` |
+| `len` | length of list/string | `{{len .ports}}` |
+| `default` | fallback value | `{{.health \| default "unknown"}}` |
+| `truncate` | shorten string | `{{.image \| truncate 40}}` |
+| `ago` | human-readable time-since | `{{.started_at \| ago}}` |
+| `pad` | right-pad for column alignment | `{{.service \| pad 20}}` |
+
+If a template references a field that doesn't exist on the current record, it renders as `<none>` (kubectl convention), not an error.
+
+Implementation note: Rust doesn't have Go's `text/template` natively. Use the `tera` crate (Jinja2-style) or `handlebars` crate, with a compatibility shim that translates `{{.field}}` (Go-style dot-prefix) to the crate's native syntax at parse time. The user-facing syntax is always Go-style because that's what Docker/kubectl/gh users and LLM agents expect.
+
+#### `--raw`
+
+Strips all decoration. No SUMMARY, no NEXT, no table borders, no headers, no envelope. Just the content.
+
+For `inspect cat`: the file content, nothing else.
+For `inspect logs`: log lines, nothing else.
+For `inspect grep`: matching lines, nothing else.
+For `inspect ps` / `inspect status`: one record per line, space-separated fields.
+
+```bash
+# Exact file content, usable with diff
+inspect cat arte/atlas:/etc/atlas.conf --raw > atlas.conf.local
+diff atlas.conf.local reference.conf
+
+# Log lines only, no prefix decoration
+inspect logs arte/pulse --since 5m --raw | grep -P '\d{3}ms'
+
+# Count lines with standard tools
+inspect grep "error" arte --since 1h --raw | wc -l
+```
+
+`--raw` is the "get out of my way" format. For when the user wants to treat `inspect` as a transparent pipe to the remote content.
+
+#### `NO_COLOR` and `--no-color`
+
+The default human format respects the `NO_COLOR` environment variable (https://no-color.org/). `--no-color` is the flag equivalent. Both suppress ANSI color codes in the default and `--table` formats. Other formats (`--json`, `--csv`, `--yaml`, `--md`, `--format`, `--raw`) never emit color codes regardless.
+
+#### Format detection heuristics
+
+When stdout is not a TTY (e.g., piped to another command or redirected to a file), the default format automatically:
+- Disables color (same as `NO_COLOR`)
+- Disables progress indicators (`indicatif`)
+- Keeps table formatting (use `--raw` or `--csv` to remove it)
+
+This matches the behavior of `ls`, `grep`, `rg`, and most modern CLI tools.
+
+#### Adding formats in the future
+
+The format system is extensible via the shared rendering layer. Each format is a trait implementation that receives the same `CommandOutput` struct (containing summary, data records, next suggestions, and meta). Adding a new format (e.g., `--html`, `--latex`, `--proto`) requires one new trait impl and one new flag variant. No verb code changes.
 
 ## Phase 11 - Fleet Operations
 

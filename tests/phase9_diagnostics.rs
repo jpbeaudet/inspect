@@ -160,8 +160,9 @@ fn why_walks_dependency_chain_and_marks_root_cause() {
     assert_eq!(out.status.code(), Some(2));
     let line = String::from_utf8(out.stdout).unwrap();
     let v: Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
-    assert_eq!(v["root_cause"], "postgres");
-    let nodes = v["nodes"].as_array().unwrap();
+    let svc = &v["data"]["services"][0];
+    assert_eq!(svc["root_cause"], "postgres");
+    let nodes = svc["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 3);
     let postgres = nodes.iter().find(|n| n["name"] == "postgres").unwrap();
     assert_eq!(postgres["status"], "unhealthy");
@@ -185,8 +186,9 @@ fn why_marks_missing_container_as_down() {
     let v: Value =
         serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
             .unwrap();
-    assert_eq!(v["root_cause"], "pulse");
-    let pulse = v["nodes"].as_array().unwrap().iter().find(|n| n["name"] == "pulse").unwrap();
+    let svc = &v["data"]["services"][0];
+    assert_eq!(svc["root_cause"], "pulse");
+    let pulse = svc["nodes"].as_array().unwrap().iter().find(|n| n["name"] == "pulse").unwrap();
     assert_eq!(pulse["status"], "down");
 }
 
@@ -230,7 +232,7 @@ fn connectivity_lists_edges_from_depends_on() {
     let v: Value =
         serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
             .unwrap();
-    let edges = v["edges"].as_array().unwrap();
+    let edges = v["data"]["services"][0]["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 2);
     let pulse_edge = edges.iter().find(|e| e["to"] == "pulse").unwrap();
     assert_eq!(pulse_edge["from"], "atlas");
@@ -260,7 +262,7 @@ fn connectivity_probe_runs_dev_tcp() {
     let v: Value =
         serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap())
             .unwrap();
-    let edges = v["edges"].as_array().unwrap();
+    let edges = v["data"]["services"][0]["edges"].as_array().unwrap();
     let pulse = edges.iter().find(|e| e["to"] == "pulse").unwrap();
     let pg = edges.iter().find(|e| e["to"] == "postgres").unwrap();
     assert_eq!(pulse["probed"], "open");
@@ -294,8 +296,8 @@ fn recipe_runs_user_yaml_with_sel_substitution() {
         String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
     )
     .unwrap();
-    assert_eq!(v["recipe"], "smoke");
-    let steps = v["steps"].as_array().unwrap();
+    assert_eq!(v["data"]["recipe"], "smoke");
+    let steps = v["data"]["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 1);
     assert_eq!(
         steps[0]["argv"]
@@ -326,8 +328,8 @@ fn recipe_resolves_builtin_health_everything() {
         String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
     )
     .unwrap();
-    assert_eq!(v["recipe"], "health-everything");
-    assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(v["data"]["recipe"], "health-everything");
+    assert_eq!(v["data"]["steps"].as_array().unwrap().len(), 2);
 }
 
 #[test]
@@ -350,15 +352,15 @@ fn mutating_recipe_dry_run_by_default_does_not_append_apply() {
         String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
     )
     .unwrap();
-    let argv: Vec<String> = v["steps"][0]["argv"]
+    let argv: Vec<String> = v["data"]["steps"][0]["argv"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s.as_str().unwrap().to_string())
         .collect();
     assert!(!argv.iter().any(|a| a == "--apply"), "argv={:?}", argv);
-    assert_eq!(v["mutating"], true);
-    assert_eq!(v["apply"], false);
+    assert_eq!(v["data"]["mutating"], true);
+    assert_eq!(v["data"]["apply"], false);
 }
 
 #[test]
@@ -381,9 +383,9 @@ fn mutating_recipe_with_apply_appends_apply_to_mutating_steps_only() {
         String::from_utf8(out.stdout).unwrap().lines().next().unwrap(),
     )
     .unwrap();
-    let step0_argv: Vec<String> = v["steps"][0]["argv"]
+    let step0_argv: Vec<String> = v["data"]["steps"][0]["argv"]
         .as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
-    let step1_argv: Vec<String> = v["steps"][1]["argv"]
+    let step1_argv: Vec<String> = v["data"]["steps"][1]["argv"]
         .as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
     // status is non-mutating: must NOT receive --apply
     assert!(!step0_argv.iter().any(|a| a == "--apply"), "step0={:?}", step0_argv);
