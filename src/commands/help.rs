@@ -42,8 +42,17 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
         return render(&help::search::render(&hits, needle));
     }
     if args.json {
-        eprintln!("error: `inspect help --json` is scheduled for HP-4 and not yet implemented");
-        return Ok(ExitKind::Error);
+        // HP-4: full surface envelope, or single-topic envelope when a
+        // topic is named alongside `--json`.
+        let pretty = help::json::pretty_default();
+        let body = match args.topic.as_deref() {
+            None | Some("all") => help::json::render_full(pretty),
+            Some(name) => match help::json::render_topic(name, pretty) {
+                Some(s) => s,
+                None => return unknown_topic(name),
+            },
+        };
+        return render(&body);
     }
 
     // `inspect help all` concatenates every topic with a deterministic

@@ -207,12 +207,21 @@ fn search_and_semantics_intersect() {
 }
 
 #[test]
-fn json_flag_is_reserved_until_hp4() {
-    inspect()
+fn json_flag_emits_valid_json() {
+    // HP-4 lit this up. Full schema/keys are pinned in
+    // tests/help_json_snapshot.rs; here we just guard the dispatcher
+    // path: --json succeeds and emits parseable JSON with a
+    // schema_version.
+    let out = inspect()
         .args(["help", "--json"])
         .assert()
-        .code(2)
-        .stderr(str::contains("HP-4"));
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+    assert_eq!(v["schema_version"], 1);
 }
 
 // HP-1 G0j: `inspect help all` concatenates every topic. The dump

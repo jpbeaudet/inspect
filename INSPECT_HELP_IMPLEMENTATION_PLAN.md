@@ -228,7 +228,7 @@ Cadence: each HP-phase is a single PR. No phase merges with red tests or a missi
 
 ---
 
-### HP-5 — Error → help linkage
+### HP-5 — Error → help linkageError → help linkage
 
 **Goal:** every user-facing error names the topic that explains it.
 
