@@ -190,3 +190,42 @@ fn trailing_garbage_errors() {
     let e = err(r#"{source="logs"} junk"#);
     assert!(e.message.contains("trailing"));
 }
+
+#[test]
+fn diagnostic_uses_friendly_token_names_not_debug() {
+    // Bad: missing string after match operator. Error must say `}`,
+    // not the debug form `RBrace`.
+    let e = err(r#"{server=}"#);
+    assert!(e.message.contains("`}`"), "got: {}", e.message);
+    assert!(!e.message.contains("RBrace"), "leaked Debug repr: {}", e.message);
+}
+
+#[test]
+fn diagnostic_includes_actionable_hint() {
+    let e = err(r#"{server=}"#);
+    assert!(e.hint.is_some(), "expected a hint, got none");
+    let h = e.hint.unwrap();
+    assert!(h.contains("double-quoted") || h.contains("\""), "hint not actionable: {h}");
+}
+
+#[test]
+fn diagnostic_for_bad_duration_suggests_format() {
+    let e = err(r#"count_over_time({source="logs"}[5xx])"#);
+    let h = e.hint.expect("expected a hint");
+    assert!(h.contains("5m") || h.contains("30s"), "hint should suggest duration format: {h}");
+}
+
+#[test]
+fn diagnostic_for_topk_non_integer_suggests_form() {
+    let e = err(r#"topk("five", sum({source="logs"}))"#);
+    assert!(e.message.contains("topk"));
+    let h = e.hint.expect("hint");
+    assert!(h.contains("topk(5"), "hint should give example: {h}");
+}
+
+#[test]
+fn diagnostic_for_missing_open_brace_suggests_selector_form() {
+    let e = err(r#"foobar"#);
+    let h = e.hint.expect("hint");
+    assert!(h.contains("{") && h.contains("source"), "hint should sketch selector: {h}");
+}

@@ -91,7 +91,27 @@ fn parse_error_renders_carat() {
         .assert()
         .failure()
         .stderr(contains("error:"))
-        .stderr(contains("^"));
+        .stderr(contains("^"))
+        .stderr(contains("hint:"));
+}
+
+#[test]
+fn parse_error_human_message_uses_friendly_token_names() {
+    // Regression: error messages must NEVER leak Debug-form token
+    // names like `RBrace`, `Ident("foo")`, `PipeEq`.
+    let sb = Sandbox::new();
+    let out = sb
+        .cmd()
+        .args(["search", r#"{server=}"#])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(!err.contains("RBrace"), "leaked Debug repr in:\n{err}");
+    assert!(!err.contains("PipeEq"), "leaked Debug repr in:\n{err}");
+    // Should contain the friendly form `}` and a hint.
+    assert!(err.contains("`}`"), "missing friendly token in:\n{err}");
+    assert!(err.contains("hint:"), "missing hint in:\n{err}");
 }
 
 #[test]

@@ -43,6 +43,50 @@ pub enum Token {
     KwWithout,
 }
 
+impl Token {
+    /// User-friendly rendering of a token for diagnostics.
+    /// e.g. `LBrace` -> "`{`", `Ident("foo")` -> "`foo`", `String(_)` -> "a string".
+    pub fn display(&self) -> String {
+        match self {
+            Token::LBrace => "`{`".into(),
+            Token::RBrace => "`}`".into(),
+            Token::LParen => "`(`".into(),
+            Token::RParen => "`)`".into(),
+            Token::LBracket => "`[`".into(),
+            Token::RBracket => "`]`".into(),
+            Token::Comma => "`,`".into(),
+            Token::Pipe => "`|`".into(),
+            Token::Eq => "`=`".into(),
+            Token::Ne => "`!=`".into(),
+            Token::Re => "`=~`".into(),
+            Token::Nre => "`!~`".into(),
+            Token::EqEq => "`==`".into(),
+            Token::Gt => "`>`".into(),
+            Token::Ge => "`>=`".into(),
+            Token::Lt => "`<`".into(),
+            Token::Le => "`<=`".into(),
+            Token::PipeEq => "`|=`".into(),
+            Token::PipeRe => "`|~`".into(),
+            Token::String(s) => {
+                // Truncate long strings in diagnostics.
+                let preview: String = s.chars().take(24).collect();
+                let trail = if s.chars().count() > 24 { "…" } else { "" };
+                format!("a string (\"{preview}{trail}\")")
+            }
+            Token::Ident(s) => format!("`{s}`"),
+            Token::Number(n) => format!("the number `{n}`"),
+            Token::Integer(n) => format!("the number `{n}`"),
+            Token::Duration(_) => "a duration".into(),
+            Token::AliasRef(n) => format!("alias reference `@{n}`"),
+            Token::KwOr => "`or`".into(),
+            Token::KwAnd => "`and`".into(),
+            Token::KwNot => "`not`".into(),
+            Token::KwBy => "`by`".into(),
+            Token::KwWithout => "`without`".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spanned {
     pub token: Token,

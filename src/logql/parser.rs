@@ -16,12 +16,10 @@ pub fn parse_tokens(tokens: &[Spanned], src: &str) -> Result<Query, ParseError> 
     if !p.at_end() {
         let span = p.cur_span();
         return Err(ParseError::new(
-            format!(
-                "unexpected trailing input: `{}`",
-                p.cur_repr()
-            ),
+            format!("unexpected trailing input: {}", p.cur_repr()),
             span,
-        ));
+        )
+        .with_hint("a query is one selector union, optional pipeline stages, optionally wrapped in a metric function"));
     }
     Ok(q)
 }
@@ -59,7 +57,7 @@ impl<'a> Parser<'a> {
     fn cur_repr(&self) -> String {
         match self.peek() {
             None => "end of input".into(),
-            Some(t) => format!("{t:?}"),
+            Some(t) => t.display(),
         }
     }
     fn expect(&mut self, want: &Token, what: &str) -> Result<Range<usize>, ParseError> {
@@ -179,7 +177,9 @@ impl<'a> Parser<'a> {
             )
             .with_hint("define it via `inspect alias add` or check the name"));
         }
-        let lbrace = self.expect(&Token::LBrace, "`{`")?;
+        let lbrace = self.expect(&Token::LBrace, "`{` to begin a selector").map_err(|e| {
+            e.with_hint("a query starts with a selector, e.g. `{server=\"arte\", source=\"logs\"} |= \"error\"`")
+        })?;
         let mut matchers = Vec::new();
         if !matches!(self.peek(), Some(Token::RBrace)) {
             loop {
@@ -190,7 +190,9 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let rbrace_span = self.expect(&Token::RBrace, "`}`")?;
+        let rbrace_span = self.expect(&Token::RBrace, "`}` to close the selector").map_err(|e| {
+            e.with_hint("label matchers are comma-separated, e.g. `{server=\"arte\", source=\"logs\"}`")
+        })?;
         Ok(Selector {
             matchers,
             span: lbrace.start..rbrace_span.end,
@@ -210,9 +212,10 @@ impl<'a> Parser<'a> {
             Token::KwNot => "not".into(),
             _ => {
                 return Err(ParseError::new(
-                    format!("expected label name, found {:?}", name_tok.token),
+                    format!("expected label name, found {}", name_tok.token.display()),
                     name_tok.span.clone(),
-                ));
+                )
+                .with_hint("label names look like `server`, `service`, `source`, `path`, …"));
             }
         };
         let name_span = name_tok.span.clone();
@@ -228,23 +231,26 @@ impl<'a> Parser<'a> {
                         self.cur_repr()
                     ),
                     self.cur_span(),
-                ));
+                )
+                .with_hint("label matchers look like `server=\"arte\"` or `path=~\".*\\.log\"`"));
             }
         };
         self.bump();
         let val_tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected string value after match operator", self.cur_span())
+            ParseError::new("expected a quoted string value after the match operator", self.cur_span())
+                .with_hint("e.g. `server=\"arte\"`")
         })?;
         let value = match &val_tok.token {
             Token::String(s) => s.clone(),
             _ => {
                 return Err(ParseError::new(
                     format!(
-                        "expected quoted string value, found {:?}",
-                        val_tok.token
+                        "expected a quoted string value, found {}",
+                        val_tok.token.display()
                     ),
                     val_tok.span.clone(),
-                ));
+                )
+                .with_hint("label values must be double-quoted, e.g. `service=\"api\"`"));
             }
         };
         Ok(LabelMatcher {
@@ -267,21 +273,23 @@ impl<'a> Parser<'a> {
         };
         let pat_tok = self.bump().ok_or_else(|| {
             ParseError::new(
-                format!("expected string after `{}`", op.as_str()),
+                format!("expected a quoted string after `{}`", op.as_str()),
                 self.cur_span(),
             )
+            .with_hint("line filters look like `|= \"error\"` or `|~ \"5\\d\\d\"`")
         })?;
         let pattern = match &pat_tok.token {
             Token::String(s) => s.clone(),
             _ => {
                 return Err(ParseError::new(
                     format!(
-                        "expected quoted string after `{}`, found {:?}",
+                        "expected a quoted string after `{}`, found {}",
                         op.as_str(),
-                        pat_tok.token
+                        pat_tok.token.display()
                     ),
                     pat_tok.span.clone(),
-                ));
+                )
+                .with_hint("line filters look like `|= \"error\"` or `|~ \"5\\d\\d\"`"));
             }
         };
         Ok(Filter {
@@ -295,14 +303,16 @@ impl<'a> Parser<'a> {
         let pipe = self.expect(&Token::Pipe, "`|`")?;
         let name_tok = self.bump().ok_or_else(|| {
             ParseError::new("expected stage name after `|`", pipe.clone())
+                .with_hint("stages: `json`, `logfmt`, `pattern`, `regexp`, `line_format`, `label_format`, `drop`, `keep`, `map`, or a parsed-field filter like `| status >= 500`")
         })?;
         let name = match &name_tok.token {
             Token::Ident(s) => s.clone(),
             _ => {
                 return Err(ParseError::new(
-                    format!("expected stage name after `|`, found {:?}", name_tok.token),
+                    format!("expected stage name after `|`, found {}", name_tok.token.display()),
                     name_tok.span.clone(),
-                ));
+                )
+                .with_hint("stages: `json`, `logfmt`, `pattern`, `regexp`, `line_format`, `label_format`, `drop`, `keep`, `map`, or a parsed-field filter"));
             }
         };
         let span_start = pipe.start;
@@ -428,7 +438,7 @@ impl<'a> Parser<'a> {
         match &tok.token {
             Token::String(s) => Ok(s.clone()),
             _ => Err(ParseError::new(
-                format!("expected {what}, found {:?}", tok.token),
+                format!("expected {what}, found {}", tok.token.display()),
                 tok.span.clone(),
             )),
         }
@@ -444,7 +454,7 @@ impl<'a> Parser<'a> {
                 Token::Ident(s) => out.push(s.clone()),
                 _ => {
                     return Err(ParseError::new(
-                        format!("expected label name, found {:?}", tok.token),
+                        format!("expected label name, found {}", tok.token.display()),
                         tok.span.clone(),
                     ));
                 }
@@ -508,9 +518,10 @@ impl<'a> Parser<'a> {
             Token::Ident(s) => s.clone(),
             _ => {
                 return Err(ParseError::new(
-                    format!("expected field name, found {:?}", tok.token),
+                    format!("expected field name, found {}", tok.token.display()),
                     tok.span.clone(),
-                ));
+                )
+                .with_hint("parsed-field filters look like `| status >= 500` or `| level == \"error\"`"));
             }
         };
         self.parse_field_cmp_with_field(field)
@@ -532,7 +543,8 @@ impl<'a> Parser<'a> {
                         self.cur_repr()
                     ),
                     self.cur_span(),
-                ));
+                )
+                .with_hint("comparison operators: `==`, `!=`, `>`, `>=`, `<`, `<=`, `=~`, `!~`"));
             }
         };
         self.bump();
@@ -545,9 +557,10 @@ impl<'a> Parser<'a> {
             Token::Integer(n) => FieldValue::Number(*n as f64),
             _ => {
                 return Err(ParseError::new(
-                    format!("expected value, found {:?}", val_tok.token),
+                    format!("expected a string or number value, found {}", val_tok.token.display()),
                     val_tok.span.clone(),
-                ));
+                )
+                .with_hint("e.g. `status >= 500` or `level == \"error\"`"));
             }
         };
         Ok(FieldExpr::Cmp { field, op, value })
@@ -570,7 +583,8 @@ impl<'a> Parser<'a> {
             Err(ParseError::new(
                 format!("unknown metric function `{name}`"),
                 self.cur_span(),
-            ))
+            )
+            .with_hint("range functions: `count_over_time`, `rate`, `bytes_over_time`, `bytes_rate`, `absent_over_time`; vector functions: `sum`, `avg`, `min`, `max`, `count`, `stddev`, `stdvar`, `topk`, `bottomk`"))
         }
     }
 
@@ -580,18 +594,20 @@ impl<'a> Parser<'a> {
         let inner = self.parse_log_query()?;
         self.expect(&Token::LBracket, "`[duration]`")?;
         let dur_tok = self.bump().ok_or_else(|| {
-            ParseError::new("expected duration", self.cur_span())
+            ParseError::new("expected a duration inside `[...]`", self.cur_span())
+                .with_hint("durations look like `30s`, `5m`, `1h`, `2d`, `1w`")
         })?;
         let range_ms = match dur_tok.token {
             Token::Duration(ms) => ms,
             _ => {
                 return Err(ParseError::new(
                     format!(
-                        "expected duration like `5m`, found {:?}",
-                        dur_tok.token
+                        "expected a duration like `5m`, found {}",
+                        dur_tok.token.display()
                     ),
                     dur_tok.span.clone(),
-                ));
+                )
+                .with_hint("durations look like `30s`, `5m`, `1h`, `2d`, `1w`"));
             }
         };
         self.expect(&Token::RBracket, "`]`")?;
@@ -617,18 +633,20 @@ impl<'a> Parser<'a> {
                     format!("`{}` requires an integer parameter", func.as_str()),
                     self.cur_span(),
                 )
+                .with_hint("e.g. `topk(5, sum by (service) (rate(...[5m])))`")
             })?;
             match tok.token {
                 Token::Integer(n) => param = Some(n),
                 _ => {
                     return Err(ParseError::new(
                         format!(
-                            "`{}` requires an integer parameter, found {:?}",
+                            "`{}` requires an integer parameter, found {}",
                             func.as_str(),
-                            tok.token
+                            tok.token.display()
                         ),
                         tok.span.clone(),
-                    ));
+                    )
+                    .with_hint("e.g. `topk(5, ...)` — the parameter is the number of series to keep"));
                 }
             }
             self.expect(&Token::Comma, "`,`")?;
@@ -664,9 +682,10 @@ impl<'a> Parser<'a> {
                     Token::Ident(s) => labels.push(s.clone()),
                     _ => {
                         return Err(ParseError::new(
-                            format!("expected label name, found {:?}", tok.token),
+                            format!("expected label name, found {}", tok.token.display()),
                             tok.span.clone(),
-                        ));
+                        )
+                        .with_hint("e.g. `by (server, service)` or `without (instance)`"));
                     }
                 }
                 if !self.eat(&Token::Comma) {

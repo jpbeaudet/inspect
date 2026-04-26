@@ -220,21 +220,53 @@ Goal: implement standards-faithful LogQL query parsing for log and metric modes.
 
 Scope:
 
-- Parser with `chumsky`
+- Parser: hand-written recursive-descent (lexer + parser) over a tokenized stream with explicit byte spans
 - Selector unions (`or`), filters, standard stages, field comparisons
 - Log-query vs metric-query separation
 - Alias substitution before parse
 
+Implementation note - parser strategy:
+
+We deliberately do **not** use a parser-combinator crate (e.g. `chumsky`).
+The grammar in bible §9.13 is small, regular, and stable; a hand-written
+recursive-descent parser gives us:
+
+- Precise byte-spans on every AST node and every error site, enabling
+  rich code-frame diagnostics with caret + hint without an external
+  reporter crate.
+- Full control over keyword vs identifier disambiguation
+  (`or`/`and`/`by`/`without`) and over the log-vs-metric top-level
+  decision via finite lookahead.
+- Targeted, context-aware error messages. Each call site can attach an
+  actionable `hint` (e.g. "label values must be double-quoted, e.g.
+  `service=\"api\"`") rather than relying on a generic "expected one
+  of \[...\]" combinator output.
+- Zero added third-party dependencies on the parsing critical path.
+
+Module layout under `src/logql/`:
+
+- `lexer.rs` - tokenizer with explicit spans (durations, alias refs,
+  string escapes, multi-char ops)
+- `ast.rs` - typed AST (`Query::{Log,Metric}`, selectors, pipeline
+  stages incl. `map`, range/vector aggregations, field-filter
+  boolean tree)
+- `parser.rs` - recursive-descent parser with finite lookahead
+- `alias_subst.rs` - pre-parse `@name` substitution (rejects chaining)
+- `validate.rs` - reserved-label semantics (`server`/`service`/`source`)
+- `error.rs` - `ParseError { message, span, hint }` with line-numbered
+  code-frame rendering
+
 Deliverables:
 
-- AST model and parser error diagnostics
+- AST model and parser error diagnostics (line-numbered code frame +
+  caret + actionable hint on every error)
 - Grammar compliance tests from canonical examples
 - Query type validator and planner input contract
 
 Exit criteria:
 
 - All documented query examples parse correctly
-- Invalid queries produce actionable errors
+- Invalid queries produce actionable errors with carets and hints
 - Log and metric query separation strictly enforced
 
 Estimated duration: 1 sprint
