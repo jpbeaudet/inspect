@@ -81,7 +81,7 @@ impl Profile {
     /// Stable, content-only fingerprint used by drift detection. Excludes
     /// `discovered_at` and `warnings` so spurious changes don't trigger a
     /// drift signal.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();

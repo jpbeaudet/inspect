@@ -15,9 +15,6 @@ use crate::verbs::runtime::RemoteRunner;
 pub struct DiscoveryReader;
 
 impl Reader for DiscoveryReader {
-    fn kind(&self) -> &'static str {
-        "discovery"
-    }
     fn read(
         &self,
         _runner: &dyn RemoteRunner,

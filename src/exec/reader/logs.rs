@@ -13,9 +13,6 @@ use crate::verbs::runtime::RemoteRunner;
 pub struct LogsReader;
 
 impl Reader for LogsReader {
-    fn kind(&self) -> &'static str {
-        "logs"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

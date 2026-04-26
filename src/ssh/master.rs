@@ -4,7 +4,7 @@
 //! (host-key verification, `known_hosts`, ssh-agent integration, ProxyJump,
 //! algorithm negotiation) stays in OpenSSH. We never re-implement any of it.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -403,7 +403,3 @@ fn extra_env_pairs() -> Vec<(OsString, OsString)> {
     Vec::new()
 }
 
-#[allow(dead_code)]
-pub fn ssh_bin() -> &'static OsStr {
-    OsStr::new(SSH_BIN)
-}

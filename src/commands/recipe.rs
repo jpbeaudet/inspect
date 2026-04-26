@@ -39,9 +39,6 @@ struct RecipeDoc {
     pub description: Option<String>,
     #[serde(default)]
     pub mutating: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub correlate: bool,
     pub steps: Vec<String>,
 }
 

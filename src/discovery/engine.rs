@@ -15,10 +15,6 @@ use crate::ssh::SshTarget;
 /// Tunables for a single discovery pass.
 #[derive(Debug, Clone, Default)]
 pub struct DiscoverOptions {
-    /// If `false`, we only refresh fragments that come from cheap probes
-    /// (currently a no-op: all probes run; reserved for Phase 8 tuning).
-    #[allow(dead_code)]
-    pub deep: bool,
     /// Skip the systemd probe even if `systemctl` is available.
     pub skip_systemd: bool,
     /// Skip the host listeners probe even if `ss`/`netstat` are available.

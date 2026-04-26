@@ -25,7 +25,6 @@ pub fn servers_toml() -> PathBuf {
     inspect_home().join("servers.toml")
 }
 
-#[allow(dead_code)]
 pub fn aliases_toml() -> PathBuf {
     inspect_home().join("aliases.toml")
 }
@@ -34,17 +33,14 @@ pub fn groups_toml() -> PathBuf {
     inspect_home().join("groups.toml")
 }
 
-#[allow(dead_code)]
 pub fn sockets_dir() -> PathBuf {
     inspect_home().join("sockets")
 }
 
-#[allow(dead_code)]
 pub fn audit_dir() -> PathBuf {
     inspect_home().join("audit")
 }
 
-#[allow(dead_code)]
 pub fn snapshots_dir() -> PathBuf {
     audit_dir().join("snapshots")
 }

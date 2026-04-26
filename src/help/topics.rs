@@ -92,13 +92,6 @@ pub fn find(id: &str) -> Option<&'static Topic> {
     TOPICS.iter().find(|t| t.id == needle)
 }
 
-/// All known topic ids in canonical order. Used by the index renderer
-/// and by `inspect help all` (HP-6).
-#[allow(dead_code)] // consumed by `inspect help all` in HP-6
-pub fn all_ids() -> impl Iterator<Item = &'static str> {
-    TOPICS.iter().map(|t| t.id)
-}
-
 /// Optional `verbose/<topic>.md` sidecar (HP-6). Returns the sidecar
 /// body when one ships for the given topic, else `None`. Sidecars are
 /// appended after the standard topic body when the user passes
@@ -210,7 +203,6 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
 /// linkage" rather than panicking — keeps the contract resilient when a
 /// new verb is added but its row is forgotten (the test suite catches
 /// the omission).
-#[allow(dead_code)] // consumed by `inspect help --json` (HP-4)
 pub fn topics_for_verb(verb: &str) -> &'static [&'static str] {
     VERB_TOPICS
         .iter()
@@ -222,7 +214,6 @@ pub fn topics_for_verb(verb: &str) -> &'static [&'static str] {
 /// Inverse view: every verb that lists `topic` (in any position).
 /// Produced on demand because the registry is small (≤ 50 verbs) and
 /// this is only called from `--json` and tests.
-#[allow(dead_code)] // consumed by `inspect help --json` (HP-4)
 pub fn verbs_for(topic: &str) -> Vec<&'static str> {
     VERB_TOPICS
         .iter()
@@ -238,7 +229,6 @@ pub fn verbs_for(topic: &str) -> Vec<&'static str> {
 ///   `See also: inspect help <t1>, inspect help <t2>, inspect help <t3>`
 ///
 /// The bible §HP-2 DoD names this exact shape for `inspect grep --help`.
-#[allow(dead_code)] // consumed by the HP-2 contract test and `--json` (HP-4)
 pub fn see_also_line(verb: &str) -> String {
     let topics = topics_for_verb(verb);
     if topics.is_empty() {

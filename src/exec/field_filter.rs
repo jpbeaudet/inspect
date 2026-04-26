@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::exec::record::{value_as_f64, Record};
+use crate::exec::record::Record;
 use crate::logql::ast::{FieldExpr, FieldOp, FieldValue};
 
 pub fn eval(expr: &FieldExpr, rec: &Record) -> bool {
@@ -74,12 +74,6 @@ fn cmp_str(got: &str, want: &str, op: FieldOp) -> bool {
 fn false_if_not_string(_n: &f64, op: FieldOp, _actual: &Option<String>) -> bool {
     // Regex against a numeric literal — undefined; treat as no-match.
     matches!(op, FieldOp::Nre)
-}
-
-// keep clippy happy for unused parser import in a small file
-#[allow(dead_code)]
-fn _silence_unused(v: &serde_json::Value) -> Option<f64> {
-    value_as_f64(v)
 }
 
 #[cfg(test)]

@@ -11,9 +11,6 @@ use crate::verbs::runtime::RemoteRunner;
 pub struct ImageReader;
 
 impl Reader for ImageReader {
-    fn kind(&self) -> &'static str {
-        "image"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

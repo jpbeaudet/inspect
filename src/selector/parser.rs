@@ -26,7 +26,7 @@ pub enum SelectorParseError {
         "alias '@{name}' expansion would loop or chain (alias '{target}' references another alias); \
          alias chaining is not supported in v1"
     )]
-    #[allow(dead_code)] // mirrors AliasError::Chain; reserved for future inline alias resolution.
+    #[allow(dead_code)] // v2: parameterized-aliases — variant is constructed once chained alias resolution lands.
     AliasChain { name: String, target: String },
 
     #[error("server portion of selector '{0}' is empty")]

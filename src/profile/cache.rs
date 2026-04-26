@@ -6,13 +6,18 @@
 //!   re-discovery via `merge_local_edits`.
 //! - TTL: 7 days by default; configurable via `INSPECT_PROFILE_TTL_DAYS`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
 use super::schema::Profile;
 use crate::error::ConfigError;
+
+#[cfg(test)]
+fn rfc3339_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
 use crate::paths;
 
 pub const DEFAULT_TTL_DAYS: u64 = 7;
@@ -155,40 +160,6 @@ pub fn clear_drift_marker(namespace: &str) {
 pub fn read_drift_marker(namespace: &str) -> Option<String> {
     let path = drift_marker_path(namespace);
     std::fs::read_to_string(path).ok()
-}
-
-#[allow(dead_code)]
-pub fn profile_exists(namespace: &str) -> bool {
-    profile_path(namespace).exists()
-}
-
-#[allow(dead_code)]
-pub fn profile_age_secs(profile: &Profile) -> Option<u64> {
-    let then = chrono::DateTime::parse_from_rfc3339(&profile.discovered_at).ok()?;
-    let then_sys: SystemTime = then.into();
-    SystemTime::now().duration_since(then_sys).ok().map(|d| d.as_secs())
-}
-
-#[allow(dead_code)]
-pub fn rfc3339_now() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-#[allow(dead_code)]
-pub fn delete_profile(namespace: &str) -> Result<()> {
-    let path = profile_path(namespace);
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing '{}'", path.display()))?;
-    }
-    clear_drift_marker(namespace);
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn cache_root() -> &'static Path {
-    // Kept for future phases that need a stable cache root.
-    Path::new(PROFILES_DIRNAME)
 }
 
 #[cfg(test)]

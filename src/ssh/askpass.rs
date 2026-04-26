@@ -19,7 +19,7 @@
 //! older clients we fall back to setsid + lacking a TTY, which also makes
 //! ssh use askpass.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -64,7 +64,7 @@ impl AskpassScript {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn script_path(&self) -> &Path {
         &self.script_path
     }
@@ -124,22 +124,6 @@ fn is_safe_var_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// Convenience: turn a list of `(key, value)` env tuples into args usable
-/// with [`std::process::Command::env`].
-#[allow(dead_code)]
-pub fn apply_env<C: AsRef<OsStr>>(
-    cmd: &mut std::process::Command,
-    pairs: &[(OsString, OsString)],
-    extra: &[(C, C)],
-) {
-    for (k, v) in pairs {
-        cmd.env(k, v);
-    }
-    for (k, v) in extra {
-        cmd.env(k, v);
-    }
 }
 
 #[cfg(test)]

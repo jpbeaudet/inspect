@@ -50,3 +50,6 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
+
+[lints.rust]
+dead_code = "deny"

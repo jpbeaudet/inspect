@@ -115,7 +115,7 @@ pub fn render(hits: &[SearchHit], needle: &str) -> String {
 /// Approximate byte size of the static keyword index. Used by the
 /// HP-3 size guard test. Excludes `TOPIC_LINES` (those are corpus,
 /// not "index").
-#[allow(dead_code)] // exercised by the HP-3 size guard test only
+#[cfg(test)]
 pub fn index_byte_size() -> usize {
     KEYWORDS
         .iter()

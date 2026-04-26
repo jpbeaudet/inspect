@@ -100,21 +100,6 @@ impl Medium {
             Medium::Host(p) => format!("host:{p}"),
         }
     }
-
-    /// Stable kind name (what readers register under).
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Medium::Logs => "logs",
-            Medium::File(_) => "file",
-            Medium::Dir(_) => "dir",
-            Medium::Discovery => "discovery",
-            Medium::State => "state",
-            Medium::Volume(_) => "volume",
-            Medium::Image => "image",
-            Medium::Network => "network",
-            Medium::Host(_) => "host",
-        }
-    }
 }
 
 #[cfg(test)]

@@ -14,9 +14,6 @@ pub struct FileReader {
 }
 
 impl Reader for FileReader {
-    fn kind(&self) -> &'static str {
-        "file"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

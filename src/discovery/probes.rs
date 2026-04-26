@@ -690,8 +690,6 @@ pub(crate) struct PsRow {
     pub name: String,
     pub image: String,
     pub status: String,
-    #[allow(dead_code)]
-    pub state: String,
     /// Field pitfall §6.1: value of the `com.docker.compose.service`
     /// label, when present. When non-empty this is preferred over
     /// `name` as the user-facing service identifier.
@@ -723,7 +721,6 @@ pub(crate) fn parse_docker_ps(stdout: &str) -> Vec<PsRow> {
             name: name.to_string(),
             image: cols[2].trim().to_string(),
             status: cols[3].trim().to_string(),
-            state: cols[4].trim().to_string(),
             compose_service,
         });
     }

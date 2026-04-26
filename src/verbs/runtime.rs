@@ -12,7 +12,6 @@
 //! First entry whose `match` substring appears in the command wins.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -126,38 +125,4 @@ pub fn resolve_target(namespace: &str) -> Result<(ResolvedNamespace, SshTarget)>
     let ns = ns_resolver::resolve(namespace)?;
     let target = SshTarget::from_resolved(&ns)?;
     Ok((ns, target))
-}
-
-/// Convenience: run on a namespace using the global runner picked by env.
-#[allow(dead_code)]
-pub fn run_one(namespace: &str, cmd: &str, opts: RunOpts) -> Result<RemoteOutput> {
-    let runner = global_runner();
-    let (_ns, target) = resolve_target(namespace)?;
-    runner.run(namespace, &target, cmd, opts)
-}
-
-#[allow(dead_code)]
-pub fn run_one_with(
-    runner: &dyn RemoteRunner,
-    namespace: &str,
-    cmd: &str,
-    opts: RunOpts,
-) -> Result<RemoteOutput> {
-    let (_ns, target) = resolve_target(namespace)?;
-    runner.run(namespace, &target, cmd, opts)
-}
-
-/// Process-global runner, initialized lazily on first call.
-#[allow(dead_code)]
-fn global_runner() -> &'static dyn RemoteRunner {
-    static R: OnceLock<Box<dyn RemoteRunner + Send + Sync>> = OnceLock::new();
-    R.get_or_init(|| {
-        if let Some(p) = mock_path() {
-            if let Ok(m) = MockRunner::from_file(&p) {
-                return Box::new(m) as Box<dyn RemoteRunner + Send + Sync>;
-            }
-        }
-        Box::new(LiveRunner) as Box<dyn RemoteRunner + Send + Sync>
-    })
-    .as_ref()
 }

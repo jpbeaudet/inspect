@@ -15,9 +15,6 @@ pub struct DirReader {
 }
 
 impl Reader for DirReader {
-    fn kind(&self) -> &'static str {
-        "dir"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

@@ -13,68 +13,6 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Returns the rendering width in columns. Resolution order:
-/// 1. `INSPECT_HELP_WIDTH` (numeric, clamped to `[40, 200]`).
-/// 2. `COLUMNS` (numeric, same clamp).
-/// 3. Detected terminal width via `tput cols` (best-effort, never blocks long).
-/// 4. Fallback `80`.
-//
-// HP-0 ships verbatim topic content (no wrapping), but the renderer
-// publishes the width contract now so HP-6 can adopt it without a
-// signature change. The width is also surfaced via `--json` (HP-4).
-#[allow(dead_code)]
-pub fn render_width() -> usize {
-    if let Some(w) = env_usize("INSPECT_HELP_WIDTH") {
-        return w.clamp(40, 200);
-    }
-    if let Some(w) = env_usize("COLUMNS") {
-        return w.clamp(40, 200);
-    }
-    if let Some(w) = tput_cols() {
-        return w.clamp(40, 200);
-    }
-    80
-}
-
-#[allow(dead_code)]
-fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|s| s.trim().parse().ok())
-}
-
-#[allow(dead_code)]
-fn tput_cols() -> Option<usize> {
-    // Spawn `tput cols` only when there's a tty on stderr; without a
-    // controlling terminal `tput` returns "no value for $TERM".
-    use std::io::IsTerminal;
-    if !std::io::stderr().is_terminal() {
-        return None;
-    }
-    let out = Command::new("tput")
-        .arg("cols")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()
-}
-
-/// Returns true when ANSI color output is allowed.
-#[allow(dead_code)] // HP-6 will consume this when adding highlighting.
-pub fn color_enabled() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    if std::env::var_os("INSPECT_NO_COLOR").is_some() {
-        return false;
-    }
-    use std::io::IsTerminal;
-    std::io::stdout().is_terminal()
-}
-
 /// Returns true when the renderer should attempt to spawn a pager.
 /// Disabled when stdout is not a tty, when `INSPECT_HELP_NO_PAGER` is
 /// set, when `PAGER` is the empty string, or when running in CI
@@ -201,32 +139,6 @@ fn write_direct(text: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn render_width_respects_env_override() {
-        // Use a value far outside the default to make the assertion robust
-        // even if some other test in the same process set COLUMNS.
-        let prev = std::env::var("INSPECT_HELP_WIDTH").ok();
-        std::env::set_var("INSPECT_HELP_WIDTH", "73");
-        assert_eq!(render_width(), 73);
-        match prev {
-            Some(v) => std::env::set_var("INSPECT_HELP_WIDTH", v),
-            None => std::env::remove_var("INSPECT_HELP_WIDTH"),
-        }
-    }
-
-    #[test]
-    fn render_width_clamps_extremes() {
-        let prev = std::env::var("INSPECT_HELP_WIDTH").ok();
-        std::env::set_var("INSPECT_HELP_WIDTH", "5");
-        assert_eq!(render_width(), 40);
-        std::env::set_var("INSPECT_HELP_WIDTH", "9999");
-        assert_eq!(render_width(), 200);
-        match prev {
-            Some(v) => std::env::set_var("INSPECT_HELP_WIDTH", v),
-            None => std::env::remove_var("INSPECT_HELP_WIDTH"),
-        }
-    }
 
     #[test]
     fn pager_disabled_in_ci() {

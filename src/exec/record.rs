@@ -64,13 +64,3 @@ pub fn value_as_string(v: &Value) -> String {
     }
 }
 
-/// Try to coerce a JSON value to f64.
-pub fn value_as_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Null => None,
-        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
-}

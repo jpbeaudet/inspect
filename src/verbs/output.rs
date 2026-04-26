@@ -194,12 +194,6 @@ impl OutputDoc {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_next(mut self, next: Vec<NextStep>) -> Self {
-        self.next = next;
-        self
-    }
-
     pub fn push_next(&mut self, n: NextStep) -> &mut Self {
         self.next.push(n);
         self

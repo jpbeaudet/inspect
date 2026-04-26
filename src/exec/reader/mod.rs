@@ -52,9 +52,6 @@ pub struct ReadStep<'a> {
 
 /// Trait every medium reader implements.
 pub trait Reader: Send + Sync {
-    /// Best-effort kind tag (matches [`Medium::kind`]).
-    fn kind(&self) -> &'static str;
-
     /// Read records for one step.
     fn read(
         &self,
@@ -62,21 +59,6 @@ pub trait Reader: Send + Sync {
         step: &ReadStep<'_>,
         opts: &ReadOpts,
     ) -> Result<Vec<Record>>;
-}
-
-/// Dispatch: pick a reader implementation for a parsed [`Medium`].
-pub fn for_medium(m: &Medium) -> Box<dyn Reader> {
-    match m {
-        Medium::Logs => Box::new(logs::LogsReader),
-        Medium::File(path) => Box::new(file::FileReader { path: path.clone() }),
-        Medium::Dir(path) => Box::new(dir::DirReader { path: path.clone() }),
-        Medium::Discovery => Box::new(discovery::DiscoveryReader),
-        Medium::State => Box::new(state::StateReader),
-        Medium::Volume(name) => Box::new(volume::VolumeReader { filter: name.clone() }),
-        Medium::Image => Box::new(image::ImageReader),
-        Medium::Network => Box::new(network::NetworkReader),
-        Medium::Host(path) => Box::new(host::HostReader { path: path.clone() }),
-    }
 }
 
 /// `Arc`-shareable variant of [`for_medium`] used when the engine

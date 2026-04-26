@@ -11,9 +11,6 @@ use crate::verbs::runtime::RemoteRunner;
 pub struct NetworkReader;
 
 impl Reader for NetworkReader {
-    fn kind(&self) -> &'static str {
-        "network"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

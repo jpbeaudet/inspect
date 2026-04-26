@@ -14,7 +14,7 @@ fn err(input: &str) -> ParseError {
 #[test]
 fn simple_selector_with_filter() {
     let q = ok(r#"{server=~"prod-.*", service="storage", source="logs"} |= "error""#);
-    assert!(q.is_log());
+    assert!(matches!(q, Query::Log(_)));
     let Query::Log(l) = q else { unreachable!() };
     assert_eq!(l.selector.branches.len(), 1);
     let s = &l.selector.branches[0];
@@ -42,7 +42,7 @@ fn json_stage_then_field_filter() {
 #[test]
 fn count_over_time_metric() {
     let q = ok(r#"count_over_time({server="arte", source="logs"} |= "error" [5m])"#);
-    assert!(q.is_metric());
+    assert!(matches!(q, Query::Metric(_)));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn alias_substitution() {
         }
     })
     .unwrap();
-    assert!(q.is_log());
+    assert!(matches!(q, Query::Log(_)));
 }
 
 #[test]

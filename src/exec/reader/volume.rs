@@ -14,9 +14,6 @@ pub struct VolumeReader {
 }
 
 impl Reader for VolumeReader {
-    fn kind(&self) -> &'static str {
-        "volume"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

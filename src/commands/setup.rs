@@ -37,7 +37,6 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     }
 
     let opts = discovery::DiscoverOptions {
-        deep: true,
         skip_systemd: args.skip_systemd,
         skip_host_listeners: args.skip_host_listeners,
     };

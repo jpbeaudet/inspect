@@ -3,9 +3,6 @@
 use super::ast::*;
 use super::error::ParseError;
 
-/// Reserved labels that carry inspect-specific semantics.
-pub const RESERVED_LABELS: &[&str] = &["server", "service", "source"];
-
 pub fn validate(q: &Query) -> Result<(), ParseError> {
     match q {
         Query::Log(l) => validate_log(l),

@@ -139,7 +139,7 @@ pub fn search_rules(server_hint: Option<&str>, services: &[String]) -> Vec<NextS
 
 /// Append a "profile drift detected" suggestion when the namespace
 /// profile is stale. Caller passes the namespace name.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn drift_rules(namespace: &str) -> Vec<NextStep> {
     vec![NextStep::new(
         format!("inspect setup {namespace} --force"),

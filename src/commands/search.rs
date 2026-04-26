@@ -50,7 +50,6 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         since: args.since.clone(),
         until: args.until.clone(),
         tail: args.tail,
-        follow: args.follow,
         // Field pitfall §5.2: an unbounded `inspect search '...'`
         // query against a chatty cluster can saturate SSH and OOM
         // the local process before any output appears. Apply a

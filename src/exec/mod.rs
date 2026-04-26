@@ -12,7 +12,6 @@
 //! Phase 8 enhancement (no protocol break — readers will gain
 //! `read_stream`).
 
-#![allow(dead_code)]
 
 pub mod cancel;
 pub mod engine;
@@ -39,7 +38,6 @@ pub struct ExecOpts {
     pub since: Option<String>,
     pub until: Option<String>,
     pub tail: Option<usize>,
-    pub follow: bool,
     /// Hard cap on records that survive the pipeline (0 = unlimited).
     pub record_limit: usize,
     /// Hard cap on `map` fanout — a runaway sub-query shouldn't fork
@@ -57,7 +55,6 @@ impl Default for ExecOpts {
             since: None,
             until: None,
             tail: None,
-            follow: false,
             record_limit: 0,
             map_max_fanout: 256,
             max_parallel: default_max_parallel(),

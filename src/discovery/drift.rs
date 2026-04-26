@@ -7,25 +7,15 @@
 //! surface the marker as a `NEXT:` hint.
 //!
 //! Phase 2 ships the mechanism. Phases that own user-facing read verbs will
-//! call [`spawn_drift_check`] from their hot paths.
+//! call drift detection from their hot paths.
 
-use std::thread;
 use std::time::Duration;
 
 use crate::profile::cache::{
-    clear_drift_marker, drift_marker_path, load_profile, write_drift_marker,
+    clear_drift_marker, load_profile, write_drift_marker,
 };
 use crate::profile::schema::Profile;
 use crate::ssh::{run_remote, RunOpts, SshTarget};
-
-/// Spawn a background drift check. Returns immediately. Errors are
-/// swallowed; the marker file is the only side effect.
-#[allow(dead_code)]
-pub fn spawn_drift_check(namespace: String, target: SshTarget) {
-    thread::spawn(move || {
-        let _ = run_drift_check(&namespace, &target);
-    });
-}
 
 /// Synchronous drift check. Used in tests and from `inspect setup --check-drift`.
 pub fn run_drift_check(namespace: &str, target: &SshTarget) -> anyhow::Result<DriftStatus> {
@@ -107,8 +97,3 @@ fn baseline_fingerprint(p: &Profile) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Convenience for callers who only need to know if a marker is present.
-#[allow(dead_code)]
-pub fn has_drift_marker(namespace: &str) -> bool {
-    drift_marker_path(namespace).exists()
-}

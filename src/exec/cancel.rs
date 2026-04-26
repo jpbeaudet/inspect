@@ -27,8 +27,8 @@ pub fn is_cancelled() -> bool {
     CANCELLED.load(Ordering::Relaxed)
 }
 
-/// Manually trip the cancel flag. Mostly used by tests; production
-/// code goes through the signal handler.
+/// Manually trip the cancel flag. Test-only.
+#[cfg(test)]
 pub fn cancel() {
     CANCELLED.store(true, Ordering::Relaxed);
 }

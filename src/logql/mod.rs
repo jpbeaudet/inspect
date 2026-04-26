@@ -20,7 +20,6 @@
 
 // Phase 6 ships parsing + validation. Phase 7 wires this into
 // `inspect search`; until then the public surface is allowed dead-code.
-#![allow(dead_code)]
 
 pub mod alias_subst;
 pub mod ast;

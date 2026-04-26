@@ -13,15 +13,6 @@ pub enum Query {
     Metric(MetricQuery),
 }
 
-impl Query {
-    pub fn is_metric(&self) -> bool {
-        matches!(self, Query::Metric(_))
-    }
-    pub fn is_log(&self) -> bool {
-        matches!(self, Query::Log(_))
-    }
-}
-
 /// `selector_union (filter | stage)*`
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogQuery {
@@ -70,16 +61,6 @@ pub enum MatchOp {
     Re,
     /// `!~`
     Nre,
-}
-impl MatchOp {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MatchOp::Eq => "=",
-            MatchOp::Ne => "!=",
-            MatchOp::Re => "=~",
-            MatchOp::Nre => "!~",
-        }
-    }
 }
 
 /// Line filter: `|=`, `!=`, `|~`, `!~`.
@@ -159,20 +140,6 @@ pub enum FieldOp {
     Re,
     Nre,
 }
-impl FieldOp {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FieldOp::Eq => "==",
-            FieldOp::Ne => "!=",
-            FieldOp::Gt => ">",
-            FieldOp::Ge => ">=",
-            FieldOp::Lt => "<",
-            FieldOp::Le => "<=",
-            FieldOp::Re => "=~",
-            FieldOp::Nre => "!~",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
@@ -215,15 +182,6 @@ impl RangeFn {
             "absent_over_time" => RangeFn::AbsentOverTime,
             _ => return None,
         })
-    }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RangeFn::CountOverTime => "count_over_time",
-            RangeFn::Rate => "rate",
-            RangeFn::BytesOverTime => "bytes_over_time",
-            RangeFn::BytesRate => "bytes_rate",
-            RangeFn::AbsentOverTime => "absent_over_time",
-        }
     }
 }
 

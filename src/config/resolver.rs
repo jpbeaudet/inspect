@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::env;
-use super::file::{self, ServersFile};
+use super::file;
 use super::namespace::{NamespaceConfig, NamespaceSource, ResolvedNamespace};
 use crate::error::ConfigError;
 
@@ -53,10 +53,4 @@ pub(crate) fn merge(
             source: NamespaceSource::EnvOverFile,
         }),
     }
-}
-
-/// Convenience: load the on-disk servers file (without env overrides).
-#[allow(dead_code)]
-pub fn load_servers_file() -> Result<ServersFile, ConfigError> {
-    file::load()
 }

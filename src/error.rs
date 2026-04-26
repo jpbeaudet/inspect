@@ -12,7 +12,6 @@ use thiserror::Error;
 
 /// Logical exit kinds that map to documented exit codes.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum ExitKind {
     Success,
     NoMatches,
@@ -294,19 +293,6 @@ pub fn emit(msg: impl AsRef<str>) {
     eprintln!("error: {msg}");
     if let Some(topic) = topic_for_message(msg) {
         eprintln!("  see: inspect help {topic}");
-    }
-}
-
-/// Same as [`emit`] but with an explicit topic — bypasses the catalog
-/// lookup. Use when the message is too generic to match a fragment but
-/// the caller knows the right topic (e.g. wrapping `anyhow::Error`
-/// chains in [`crate::main`]).
-#[allow(dead_code)] // public API for future error sites with explicit topic override
-pub fn emit_with_topic(msg: impl AsRef<str>, topic: Option<&'static str>) {
-    let msg = msg.as_ref();
-    eprintln!("error: {msg}");
-    if let Some(t) = topic {
-        eprintln!("  see: inspect help {t}");
     }
 }
 

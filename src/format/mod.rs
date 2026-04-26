@@ -53,19 +53,6 @@ impl OutputFormat {
             OutputFormat::Human | OutputFormat::Table | OutputFormat::Md
         )
     }
-
-    /// True for the `--json`/`--jsonl` family.
-    #[allow(dead_code)]
-    pub fn is_json(&self) -> bool {
-        matches!(self, OutputFormat::Json)
-    }
-
-    /// True if this format should never emit ANSI color codes regardless
-    /// of TTY / NO_COLOR state.
-    #[allow(dead_code)]
-    pub fn always_plain(&self) -> bool {
-        !matches!(self, OutputFormat::Human)
-    }
 }
 
 /// Reusable clap block. Embed in any command via `#[command(flatten)]`.
@@ -169,40 +156,6 @@ impl FormatArgs {
     }
 }
 
-/// True if the running process should suppress ANSI color codes.
-/// Honors the upstream [`NO_COLOR`](https://no-color.org/) standard,
-/// the `--no-color` flag, and TTY presence.
-#[allow(dead_code)]
-pub fn no_color_active(no_color_flag: bool) -> bool {
-    if no_color_flag {
-        return true;
-    }
-    if std::env::var_os("NO_COLOR").is_some() {
-        return true;
-    }
-    if !is_stdout_tty() {
-        return true;
-    }
-    false
-}
-
-/// Best-effort check whether stdout is attached to a terminal. We avoid
-/// pulling in a new dependency and rely on `isatty(1)` via libc on
-/// unix; on non-unix we return `true` so behavior is unchanged.
-#[allow(dead_code)]
-pub fn is_stdout_tty() -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: `isatty` is a pure check on a file descriptor that
-        // touches no user-visible state.
-        unsafe { libc::isatty(1) == 1 }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,11 +205,5 @@ mod tests {
         let mut a = args();
         a.raw = true;
         assert_eq!(a.resolve().unwrap(), OutputFormat::Raw);
-    }
-
-    #[test]
-    fn no_color_flag_wins() {
-        // We can't safely toggle env in tests; just check the flag path.
-        assert!(no_color_active(true));
     }
 }

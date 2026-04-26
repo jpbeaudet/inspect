@@ -46,7 +46,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, DurationError> {
 }
 
 /// Render a Duration back as the canonical short form (largest fitting unit).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn fmt_short(d: Duration) -> String {
     let s = d.as_secs();
     if s % 86400 == 0 && s >= 86400 {

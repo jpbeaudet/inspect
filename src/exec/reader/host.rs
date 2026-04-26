@@ -13,9 +13,6 @@ pub struct HostReader {
 }
 
 impl Reader for HostReader {
-    fn kind(&self) -> &'static str {
-        "host"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,

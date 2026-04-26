@@ -18,9 +18,6 @@ pub struct StateReader;
 type StateLineParser = fn(&str, &str, &str) -> Option<Record>;
 
 impl Reader for StateReader {
-    fn kind(&self) -> &'static str {
-        "state"
-    }
     fn read(
         &self,
         runner: &dyn RemoteRunner,
