@@ -40,12 +40,12 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // `inspect help all` is reserved for HP-6. Surface a clear
-    // intermediate response rather than treating "all" as a missing
-    // topic — the index page already advertises this name.
+    // `inspect help all` concatenates every topic with a deterministic
+    // separator. HP-6 will additionally suppress the pager when this
+    // mode is invoked under a pipe; HP-1 keeps the renderer's normal
+    // tty-aware behaviour, which already disables the pager on pipes.
     if matches!(args.topic.as_deref(), Some("all")) {
-        eprintln!("error: `inspect help all` is scheduled for HP-6 and not yet implemented");
-        return Ok(ExitKind::Error);
+        return render(&help::all_topics_page());
     }
 
     match args.topic.as_deref() {
@@ -120,8 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_help_all_is_reserved() {
+    fn dispatch_help_all_succeeds() {
         let r = run(args(Some("all"))).unwrap();
-        assert!(matches!(r, ExitKind::Error));
+        assert!(matches!(r, ExitKind::Success));
     }
 }

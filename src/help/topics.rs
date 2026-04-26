@@ -1,9 +1,9 @@
 //! Topic registry for the help system.
 //!
-//! HP-0 ships a single real topic (`quickstart`) plus stub entries for
-//! the eleven other topics named in [`INSPECT_HELP_BIBLE.md`] so the
-//! index page, the "did you mean" hint, and the JSON contract surface
-//! the full final shape from day one. HP-1 fills in the bodies.
+//! HP-0 shipped the registry shape with a single authored body
+//! (`quickstart`); HP-1 fills in the remaining eleven topic bodies.
+//! Every entry in [`TOPICS`] now resolves to a real `.md` file under
+//! `src/help/content/`.
 
 /// One help topic. The `body` is rendered verbatim by [`crate::help::render`].
 #[derive(Debug, Clone, Copy)]
@@ -31,57 +31,57 @@ pub const TOPICS: &[Topic] = &[
     Topic {
         id: "selectors",
         summary: "How to address servers, services, and files",
-        body: None,
+        body: Some(include_str!("content/selectors.md")),
     },
     Topic {
         id: "aliases",
         summary: "Save and reuse selectors with @name",
-        body: None,
+        body: Some(include_str!("content/aliases.md")),
     },
     Topic {
         id: "search",
         summary: "LogQL query syntax for cross-medium search",
-        body: None,
+        body: Some(include_str!("content/search.md")),
     },
     Topic {
         id: "formats",
         summary: "Output format options (--json, --csv, --md, --format, ...)",
-        body: None,
+        body: Some(include_str!("content/formats.md")),
     },
     Topic {
         id: "write",
         summary: "Write verbs, dry-run/apply, safety contract",
-        body: None,
+        body: Some(include_str!("content/write.md")),
     },
     Topic {
         id: "safety",
         summary: "Audit log, snapshots, revert",
-        body: None,
+        body: Some(include_str!("content/safety.md")),
     },
     Topic {
         id: "fleet",
         summary: "Multi-server operations",
-        body: None,
+        body: Some(include_str!("content/fleet.md")),
     },
     Topic {
         id: "recipes",
         summary: "Multi-step diagnostic and remediation runbooks",
-        body: None,
+        body: Some(include_str!("content/recipes.md")),
     },
     Topic {
         id: "discovery",
         summary: "Auto-discovery, profiles, drift detection",
-        body: None,
+        body: Some(include_str!("content/discovery.md")),
     },
     Topic {
         id: "ssh",
         summary: "Persistent connections, ControlMaster, passphrases",
-        body: None,
+        body: Some(include_str!("content/ssh.md")),
     },
     Topic {
         id: "examples",
         summary: "Worked examples and translation guide (grep -> inspect, etc.)",
-        body: None,
+        body: Some(include_str!("content/examples.md")),
     },
 ];
 

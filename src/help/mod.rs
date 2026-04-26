@@ -54,6 +54,29 @@ pub fn index_page() -> String {
     s
 }
 
+/// Render every topic concatenated, in canonical order, with a
+/// deterministic separator. Used by `inspect help all` (HP-1) and by
+/// the JSON dump (HP-4) when callers want the prose alongside the
+/// structured surface. Topics without a body fall back to their stub
+/// renderer so the output is always complete.
+pub fn all_topics_page() -> String {
+    let sep = "\n\n";
+    let bar = "=".repeat(72);
+    let mut out = String::with_capacity(64 * 1024);
+    for (i, t) in TOPICS.iter().enumerate() {
+        if i > 0 {
+            out.push_str(sep);
+            out.push_str(&bar);
+            out.push_str(sep);
+        }
+        out.push_str(&topic_page(t));
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Render a single topic. For topics whose bodies have not yet been
 /// authored (HP-1 follow-up), produce a deterministic stub that names
 /// the topic and points back to the index. This keeps the contract
@@ -120,10 +143,16 @@ mod tests {
     }
 
     #[test]
-    fn topic_page_stubs_unauthored_topics() {
-        let t = find("selectors").unwrap();
-        let body = topic_page(t);
-        assert!(body.starts_with("SELECTORS"));
-        assert!(body.contains("not yet been authored"));
+    fn every_topic_has_an_authored_body() {
+        // HP-1 contract: every topic in the registry now resolves to
+        // a real `.md` file under `src/help/content/`. The stub
+        // renderer (kept for forward compatibility) must never fire.
+        for t in TOPICS {
+            assert!(
+                t.body.is_some(),
+                "topic {:?} has no authored body (HP-1 should have wired it)",
+                t.id
+            );
+        }
     }
 }
