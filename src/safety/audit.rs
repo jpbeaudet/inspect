@@ -5,13 +5,16 @@
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{audit_dir, ensure_home, set_dir_mode_0700, set_file_mode_0600};
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -97,12 +100,7 @@ impl AuditStore {
     pub fn append(&self, entry: &AuditEntry) -> Result<()> {
         let path = self.current_path();
         let line = serde_json::to_string(entry)?;
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        writeln!(f, "{line}").context("writing audit entry")?;
+        append_locked(&path, &line)?;
         let _ = set_file_mode_0600(&path);
         Ok(())
     }
@@ -143,6 +141,77 @@ impl AuditStore {
             .into_iter()
             .find(|e| e.id.starts_with(id_prefix)))
     }
+}
+
+/// Append `line` (no trailing newline) to `path` as a single locked,
+/// newline-terminated write. Audit entries can exceed `PIPE_BUF` (4 KB)
+/// once they include a `diff_summary`, so POSIX `O_APPEND` atomicity is
+/// not enough on its own: two concurrent `inspect edit ... --apply`
+/// processes could otherwise interleave bytes mid-line and corrupt the
+/// JSONL file.
+///
+/// We therefore:
+///   1. open the file `O_APPEND | O_CREAT`,
+///   2. take a blocking exclusive `flock(LOCK_EX)`,
+///   3. issue **one** `write_all` containing the line + `\n`,
+///   4. release the lock implicitly on close (or explicitly on Unix).
+///
+/// `flock` is advisory but every well-behaved process that uses this
+/// helper participates, which is sufficient for inspect's own
+/// concurrent fleet writes.
+fn append_locked(path: &Path, line: &str) -> Result<()> {
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        let fd = f.as_raw_fd();
+        // SAFETY: fd is valid for the lifetime of `f`. flock is a
+        // documented blocking call and returns -1 on EINTR; we retry
+        // a few times then give up so a stuck NFS lock can't hang the
+        // process forever.
+        let mut tries = 0;
+        loop {
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) && tries < 5 {
+                tries += 1;
+                continue;
+            }
+            // Lock acquisition failed (e.g. on a filesystem that does
+            // not implement flock such as some NFS configurations).
+            // Fall through and accept the POSIX append-only guarantee:
+            // entries ≤ PIPE_BUF stay atomic, larger ones may interleave
+            // — but at least we don't refuse to write the audit record.
+            eprintln!(
+                "inspect: warning: flock on audit log failed ({}); falling back to O_APPEND only",
+                err
+            );
+            break;
+        }
+    }
+
+    let mut buf = String::with_capacity(line.len() + 1);
+    buf.push_str(line);
+    buf.push('\n');
+    f.write_all(buf.as_bytes())
+        .context("writing audit entry")?;
+    f.flush().context("flushing audit entry")?;
+
+    #[cfg(unix)]
+    {
+        let fd = f.as_raw_fd();
+        // Best-effort unlock. Closing `f` will release the lock anyway.
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+
+    Ok(())
 }
 
 fn whoami() -> Option<String> {
@@ -214,5 +283,59 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].verb, "edit");
         assert_eq!(all[0].selector, "arte/atlas:/etc/atlas.conf");
+    }
+
+    /// Concurrent `--apply` on the same audit log must not interleave
+    /// bytes mid-line. We hammer the same file with many threads,
+    /// each writing a long entry whose `diff_summary` exceeds
+    /// `PIPE_BUF` (4 KB), then verify every line parses as JSON and
+    /// the count matches.
+    ///
+    /// We deliberately bypass `AuditStore::open()` (which would touch
+    /// the process-wide `INSPECT_HOME` env var and race with other
+    /// tests) and exercise `append_locked` directly, which is the
+    /// actual concurrency surface.
+    #[test]
+    fn concurrent_appends_are_atomic() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = Arc::new(tmp.path().join("audit.jsonl"));
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 25;
+        // 6 KB filler — definitely larger than PIPE_BUF (4 KB on
+        // Linux), the regime where O_APPEND alone is no longer atomic.
+        let big = "x".repeat(6 * 1024);
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let path = Arc::clone(&path);
+            let big = big.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let mut e = AuditEntry::new("edit", &format!("t{t}/i{i}"));
+                    e.diff_summary = big.clone();
+                    let line = serde_json::to_string(&e).unwrap();
+                    append_locked(&path, &line).expect("append");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Read raw lines and verify each one is valid JSON (no
+        // interleaved bytes) and we got every entry.
+        let content = std::fs::read_to_string(&*path).unwrap();
+        let mut count = 0;
+        for line in content.lines() {
+            assert!(!line.is_empty(), "empty line in audit log");
+            serde_json::from_str::<AuditEntry>(line)
+                .unwrap_or_else(|e| panic!("corrupted audit line: {e}\nline: {line:.200}"));
+            count += 1;
+        }
+        assert_eq!(count, THREADS * PER_THREAD);
     }
 }

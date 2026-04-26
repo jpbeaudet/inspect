@@ -1,79 +1,107 @@
+# Inspect Audit Response
 
+Legend: ✅ Covered · 🟡 Partial / harden · ❌ Missing
 
-# Phase 11 + Codebase Audit
+## §1 — Parser & Lexer
 
-Below is everything I'd flag before Phase 12. Each item has a severity and a concrete location. I have **not** changed any code — this is a read-only review.
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 1.1 | Invalid-query negative tests + fuzzing | 🟡 | tests.rs, phase6_logql.rs cover good inputs + a few error envelopes. **Action:** add a negative-test matrix (unclosed `{`, dangling `\|=`, bad `map`, metric-of-metric) and a `cargo-fuzz` target asserting "errors only, no panic". |
+| 1.2 | `and` > `or` precedence | ✅ | `continue_field_or` calls `continue_field_and` in parser.rs; test `field_filter_boolean` confirms grouping. |
+| 1.3 | String escapes (`\"`, `\\`, `\n`, `\t`, `\r`) | ✅ | lexer.rs. **Harden:** no backtick string form yet (LogQL allows `` `…` `` for raw strings) — add if we want full LogQL parity; also add explicit tests for `""`, all-whitespace, and JSON-inside-filter strings. |
+| 1.4 | Duration units / zero / negative | 🟡 | Two parsers: duration.rs (s/m/h/d) and lexer.rs (s/m/h/d/w). Negatives rejected; **`0s` is silently accepted**, no `y`, no compound (`1h30m`). **Action:** reject zero in range aggregations with a clear error; document accepted units. |
+| 1.5 | Label name sanitization on `\| json` | ❌ | parsers.rs inserts raw JSON keys verbatim — `2xx-count`, `response.time` flow through. **Action:** add `sanitize_label_name()` (Prometheus rules) + collision policy (`name_extracted` suffix). |
+| 1.6 | Metric query nesting | ✅ | Recursive `parse_metric_query()` (parser.rs); `topk_with_grouping` test exists. **Nice to have:** test for `rate(...) / rate(...)` and bad nesting `rate(sum(...))`. |
+| 1.7 | Alias substitution error messages | 🟡 | alias_subst.rs names unknown alias and detects chaining, **but** when expansion is parsed and fails, the span points into the expanded text and the alias name is not surfaced. **Action:** wrap expansion errors with "in expansion of `@plogs`: …" and keep both spans. |
+| 1.8 | `map $field$` injection | ✅ | map_stage.rs escapes `"` and `\` before substituting into the quoted sub-query. **Add tests:** value containing `}`, empty value, missing field. |
 
-## High severity
+## §2 — Streaming Pipeline
 
-### H1. Pipe-deadlock risk in fleet child capture
-fleet.rs reads stdout to EOF, then stderr to EOF, on the **same thread**:
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 2.1 | Bounded channels | ✅ | All sites use `tokio::sync::mpsc::channel(N)`; no `unbounded_channel` anywhere in src. |
+| 2.2 | Ctrl+C cancellation / no zombie ssh | ❌ | No `tokio::signal`, no `CancellationToken`, no SIGINT handler anywhere in src. **Action (P1):** install `tokio::signal::ctrl_c()` in `main.rs`, propagate a `CancellationToken` through `exec::pipeline` and `ssh::exec`, send `ssh -O cancel`/SIGTERM to children on shutdown, and add a `ps aux \| grep ssh` post-test. |
+| 2.3 | Multi-source merge ordering | ❌ | pipeline.rs does not k-way merge by timestamp. **Action:** for human/table output, k-way-merge on `__timestamp__`; for `--json` document interleaved order. |
+| 2.4 | `\| json` on non-JSON lines | ❌ | parsers.rs silently returns — the line **survives** but no `__error__` label is added, so users can't filter or even see that parsing failed. **Action (P2):** set `rec.fields["__error__"] = "JSONParserErr"` (and similar for `logfmt`/`pattern`/`regexp`); add `phase7` tests for mixed streams. |
+| 2.5 | Filter pushdown `-F` vs `-E` | ✅ | mod.rs emits `-F`/`-E` correctly and `shquote()`s the pattern. |
 
-```rust
-if let Some(mut s) = child.stdout.take() { let _ = s.read_to_string(&mut stdout); }
-if let Some(mut s) = child.stderr.take() { let _ = s.read_to_string(&mut stderr); }
-```
+## §3 — SSH / ControlMaster
 
-Classic pipe deadlock — if a child writes >64 KB to stderr (Linux default pipe buffer) before exiting, the child blocks on `write(stderr)` while we block on `read(stdout)`. Reproduces with verbose `recipe` or `search --tail` children.
-**Fix**: replace with `cmd.output()` or `child.wait_with_output()`, both of which internally drain both pipes concurrently.
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 3.1 | Stale control sockets | ✅ | `MasterStatus::{Alive,Stale,Missing}` via `ssh -O check` in master.rs; `exit_master` removes the socket. **Verify:** confirm callers always retry on `Stale` (worth one explicit test killing the master with `kill -9`). |
+| 3.2 | Socket dir/file perms 700/600 | ✅ | paths.rs `set_dir_mode_0700` + `set_file_mode_0600`; sockets dir is created via `ensure_sockets_dir`. **Harden:** assert mode 600 on the socket file itself after `ssh` creates it (OpenSSH already does this, but a defensive check + clear error helps NFS users). |
+| 3.3 | `MaxSessions` exhaustion | ❌ | No detection / queueing. **Action:** add per-host semaphore (default 8) configurable via profile, plus stderr-pattern detection of "open failed: administratively prohibited". |
+| 3.4 | `ServerAliveInterval` keepalive | ✅ | **Correction to subagent:** master.rs sets `ServerAliveInterval=30` and `ServerAliveCountMax=3` on the master. **Add:** `last_used` timestamp in `inspect connections`. |
+| 3.5 | ProxyJump / bastion | ✅ | We delegate entirely to OpenSSH + `~/.ssh/config` — no reimplementation, so ProxyJump works automatically. **Verify:** `ControlPath` includes namespace hash so bastion+target collisions are impossible (already true in `paths.rs`). |
 
-### H2. Fleet large-fanout interlock counts namespaces, not targets
-Bible §13 explicitly says *"large-fanout interlock triggers on **total target count**"*. We gate on namespace count (fleet.rs). A user running `fleet --ns prod-1,prod-2 restart '*'` over two big namespaces with 50 services each gets through the parent gate (2 ≤ 10) — only the per-child Phase-5 gate fires (and only on a per-namespace basis). The aggregate "100 targets" is never surfaced as a single confirmation.
-**Fix**: dry-resolve the inner selector against each chosen namespace's profile (cheap, in-memory) to compute the true total before fanout, and gate on that sum.
+## §4 — Write verbs & Safety
 
-### H3. Stdin closure not set on fleet children
-`Stdio::null()` is correctly used for child stdin in fleet.rs, but child verbs like `restart`/`rm` may still attempt `confirm()` flows that read from stdin. We set `INSPECT_NON_INTERACTIVE=1` which causes them to abort with a friendly error rather than block — this works today, but it means **mutating fleet runs always require `--yes` / `--yes-all` on the inner verb**. There is no way to confirm a fleet write interactively. This is a behavioral gap, not a bug, but it isn't documented anywhere user-facing.
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 4.1 | `sed -i` symlink race (CVE-2026-5958) | ✅ | edit.rs reads remote → applies `sed` **locally** → writes via temp+rename. We never invoke `sed -i --follow-symlinks`. **Add:** explicit symlink behaviour doc + a `realpath` check before writing (refuse to clobber if the symlink target changed since snapshot). |
+| 4.2 | Atomic write (same FS) | ✅ | Temp lives in target dir: `format!("{}.inspect.{}.tmp", w.path, …)` (edit.rs, cp.rs). **Harden:** preserve mode/uid/gid of original (`stat` original → `chmod`/`chown` temp before rename); currently the new file inherits the temp's mode. |
+| 4.3 | Snapshot before mutation | ✅ | Order verified in edit.rs: read → diff → snapshot → write → audit. |
+| 4.4 | >10 fanout interlock | ✅ | gate.rs `fanout_threshold = 10`, `--yes-all` bypass. **Clarify in docs:** count = number of `(target, path)` work items, not server×service pairs. |
+| 4.5 | Concurrent audit log writes | 🟡 | audit.rs opens with `O_APPEND` and a single `writeln!`. POSIX guarantees atomicity only ≤ `PIPE_BUF` (4096B). Long JSON entries (large diffs, many fields) can exceed this. **Action:** add `fs2::FileExt::lock_exclusive()` around the write, or buffer the entry and write with a single `write_all` call after `fcntl(F_SETLKW)`. |
 
-## Medium severity
+## §5 — Output & Formats
 
-### M1. `INSPECT_FLEET_FORCE_NS` is an undocumented public footgun
-The selector resolver honors this env var unconditionally (resolve.rs). If a user (or an LLM agent invoking inspect) accidentally exports it, every subsequent `inspect ps`/`status`/`grep` silently overrides their selector to a single namespace with no warning.
-**Fix options**: (a) rename to `INSPECT_INTERNAL_FLEET_FORCE_NS` (private contract), or (b) require a paired sentinel like `INSPECT_FLEET_PARENT_PID` matching the parent's pid before honoring it, or (c) emit a stderr warning on every override.
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 5.1 | CSV formula injection | 🟡 | render.rs handles `,`, `"`, `\n`, `\r` but **not** leading `=`, `+`, `-`, `@`, `\t`. **Action:** prefix `'` (or wrap and prefix) when first char is one of those. |
+| 5.2 | Template sandboxing | ✅ | template.rs is a small custom engine — no fs / exec / env access. |
+| 5.3 | Unicode width in tables | 🟡 | render.rs uses `chars().count()` — CJK/emoji misaligned. **Action:** add `unicode-width = "0.1"`, replace with `UnicodeWidthStr::width`. |
+| 5.4 | Streaming envelope on Ctrl+C | ❌ | No best-effort summary on SIGINT. **Action (ties to 2.2):** in the SIGINT handler, flush a `{"status":"cancelled","summary":{…}}` envelope before exit; document that streaming `--json` may end without an envelope. |
 
-### M2. Subtractive selector atoms are silently bypassed inside fleet
-`fleet --ns 'prod-*' status '~prod-1/_'` resolves the user's `~prod-1` exclusion into a `ServerSpec`, but `INSPECT_FLEET_FORCE_NS` discards `sel.server` entirely (resolve.rs). The user thinks they excluded `prod-1`; fleet still ran it. Should at minimum reject server atoms in the inner selector when force-ns is active, or honor the original spec for filtering.
+## §6 — Discovery & Profiles
 
-### M3. Fleet swallows children's `ExitKind::NoMatches` (exit 1) into a pure-1 collapse
-fleet.rs only returns `NoMatches` when **every** child returned exit 1. A mixed run of (ok, ok, no-match) returns `Error` (2). That's defensible, but it means `inspect fleet grep "needle"` over 5 namespaces where 4 found nothing and 1 found a match returns 2, not 0. This one should have that any resutlt hat were not erro are returned, and a code 0 (as long as one was not an eror) because there may be pattern of looking at thing that are conditionally there and that erro is actually indicatove and expected. 
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 6.1 | `docker` permission denied | ❌ | probes.rs propagates the raw stderr. **Action:** match `permission denied while trying to connect to the Docker daemon socket` and emit "add user to `docker` group, or run with `sudo`". |
+| 6.2 | Podman / rootless / `DOCKER_HOST` / compose v2 | ❌ | Hard-coded `docker` binary. **Action:** probe `which docker \|\| which podman`, honour `DOCKER_HOST`, fall back to `docker compose` for v2 (only matters if we ever shell to compose — currently we don't, so this is mostly a discovery niceness). |
+| 6.3 | Drift compares container IDs | ✅ | drift.rs fingerprints `{{.ID}}\t{{.Image}}` — restart and image-pull both invalidate the profile. |
 
-### M4. SSH master prerequisites for fleet are undocumented
-Each fleet child reuses the per-namespace SSH master if one exists (Phase 1 cache), otherwise tries to start one. With `INSPECT_NON_INTERACTIVE=1` (which fleet always sets), any namespace with `key_passphrase_env` unset and no agent forwarding fails outright. **No `inspect fleet connect` exists** to pre-warm masters. Operators have to script `for ns in ...; inspect connect $ns; done` manually.
-**Fix**: add `setup`/`connect` to a recommended pre-flight, or accept `connect` under fleet (currently it's marked positional-only and works, but not advertised).
+## §7 — Selectors
 
-### M5. Rate-limit / backpressure on remote masters
-With `INSPECT_FLEET_CONCURRENCY=64` and 64 namespaces all spawning a fresh ssh master simultaneously, we hammer the local OpenSSH binary and remote sshd hard. Bible §14 mentions ControlMaster reuse but no per-host connect rate limit. Phase-1 master start has no exponential backoff. Not a Phase-11 regression but exposed by Phase 11.we need contol matser re use or we will get rate limited all the time, this is critical
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 7.1 | Glob vs regex (`/…/`) | ✅ | parser.rs `split_outside_regex` enforces slash delimiters. |
+| 7.2 | `_` reserved as host placeholder | 🟡 | Parser treats `_` as host-level; no warning if a real container is named `_`. **Action:** add discovery warning + doc note. (Low risk in practice.) |
+| 7.3 | Comma in service names | 🟡 | Parser splits unconditionally on `,`. **Action:** in discovery, warn when a container name contains `,`, `/`, `:`, `*`, or `~`. |
 
-### M6. Audit IDs collide under fleet bursts
-audit.rs uses `nanos.wrapping_mul(...).wrapping_add(pid)` masked to 16 bits. With fleet fanout, distinct PIDs save us, but **within a single child** two appends in the same millisecond collide with probability ~1.5% per pair (16-bit space, birthday bound at √65k ≈ 256). Recipes that perform multiple writes per ns can trigger this. Switch to a counter or pull in `getrandom` (pure-Rust, ~20 LOC).
+## §8 — General Rust
 
-## Low severity
+| # | Item | Status | Evidence / Action |
+|---|------|--------|-------------------|
+| 8.1 | `unwrap()`/`expect()` in non-test code | 🟡 | A handful (~5–6) in parser.rs and parser.rs; most are precondition-safe (after `bump()` checks), but worth a sweep. **Action:** `rg -n 'unwrap\(\)\|expect\(' src/ \| rg -v '#\[test\]'` and convert any non-trivial ones to `?`. |
+| 8.2 | Lexer string allocation | 🟡 | lexer.rs builds owned `String` per token even when no escape happened. Fine for queries (small), bad for large JSON-pushed bodies. **Action:** switch to `Cow<'a, str>` returning a borrowed slice when no escape was applied. Defer until profiling shows it. |
+| 8.3 | Error type granularity | ✅ | Per-module enums (`ConfigError`, `ParseError`, `SelectorParseError`); no `Box<dyn Error>` on the public surface. |
 
-### L1. `expand_ns_pattern` has a precedence quirk
-A `--ns` of `@group,extra` is treated as a single comma-list piece `@group` (literal, will not match), not as "group ∪ extra". Documentation implies `@group` is exclusive. Either reject mixed forms or merge them. fleet.rs.
+---
 
-### L2. Fleet human output mangles JSON child output
-When a child runs with `--json`, fleet's human renderer prefixes every line with 4 spaces (fleet.rs) — that breaks `inspect fleet status --ns prod-* --json | jq` (works for our top-level JSON path, but `inspect fleet ... ps --json` indents the inner JSON and the user can't pipe the whole thing). The supported path is "use `inspect fleet --json`, never pass `--json` to the inner verb". Should be documented.
+## Suggested fix order
 
-### L3. Worker pool spawns a thread even when work is empty
-`(0..concurrency.min(total).max(1))` ensures ≥1 worker even when `total == 0`. In practice we error before fanout, but the safety net is wasted. Cosmetic.
+**P0 (correctness / data integrity):**
+1. §2.4 `\| json` `__error__` label (silent data loss today).
+2. §4.5 audit-log `flock` (corruption under concurrency).
+3. §1.5 label sanitization for `\| json` extraction.
 
-### L4. `INSPECT_FLEET_CONCURRENCY` not size-clamped at parse time
-We clamp to `MAX_FLEET_CONCURRENCY` (64) only after the env-var parse. A user can set it to `usize::MAX` and `n.min(64)` saves us — fine, but the validator only rejects 0. Bible says "default 8"; we silently clamp 9999 → 64 with no warning. Add a stderr note when clamped.
+**P1 (production stability):**
+4. §2.2 + §5.4 SIGINT handling, cancellation token, partial envelope.
+5. §3.3 per-host `MaxSessions` semaphore.
+6. §8.1 unwrap sweep on parser/selector hot paths.
 
-### L5. `groups.toml` parser doesn't validate group/member names
-A group entry like `members = ["../../etc/passwd*"]` is accepted; the glob then matches nothing (since known namespaces don't include path traversal), so it's effectively safe, but worth rejecting at parse time to catch typos. groups.rs.
+**P2 (UX / polish):**
+7. §1.7 alias-expansion error wrapping.
+8. §5.1 CSV formula-prefix escaping.
+9. §5.3 `unicode-width` adoption.
+10. §6.1/§6.2 Docker permission-denied / Podman fallback messages.
+11. §1.4 reject `0s` in range aggregations.
+12. §1.1 negative-test matrix + `cargo-fuzz` target.
 
-### L6. `disconnect-all` listed in `DISALLOWED_INNER_VERBS` but `clap` actually emits `disconnect-all` (kebab) — that's correct, but the matching string is one of seven hardcoded entries; if Phase 12 renames any verb the list silently drifts. Move the disallow-list check to a single source-of-truth match against `cli::Command` shape (or cover with an explicit clap-parse round-trip test).
+**P3 (defence in depth):**
+13. §4.2 preserve original mode/uid/gid on atomic rename.
+14. §7.2/§7.3 discovery warnings for reserved/special names.
+15. §8.2 `Cow`-based lexer tokens (only if profiling demands).
 
-### L7. `safety/gate.rs::SafetyGate::confirm` is constructed by hand in fleet.rs
-Phase 5 always uses `SafetyGate::new(...)`. We bypass it in fleet.rs and set fields directly. If `SafetyGate::new` ever gains side-effects (it already reads env), fleet diverges silently. Use the constructor.
-
-## Security-specific findings
-
-### S1. Process env is not sanitized when spawning children
-We only set/remove `INSPECT_NON_INTERACTIVE` and `INSPECT_FLEET_FORCE_NS`. The child inherits the **entire** parent env, including any passphrase env vars (`ARTE_SSH_PASSPHRASE=…`), `ENV_INTERACTIVE_PASSPHRASE` set by Phase 1's interactive prompt, and any third-party secret env vars. For fleet across namespaces with different credentials, namespace `prod-2`'s child sees `ARTE_SSH_PASSPHRASE` even though it doesn't need it. Not a leak per se (env is process-private on Linux), but defense-in-depth would be to scope passphrase env vars per child:
-- collect the set of `key_passphrase_env` names referenced in `servers.toml` for **other** namespaces
-- `cmd.env_remove(...)` each one before spawning
-
-### S2. `INSPECT_FLEET_CONCURRENCY` env-driven thread pool DoS
-If an external process can write `~/.bashrc` or environment, it could set `INSPECT_FLEET_CONCURRENCY=10000`. We clamp to 64 — good. But `MAX_FLEET_CONCURRENCY` is private to 
