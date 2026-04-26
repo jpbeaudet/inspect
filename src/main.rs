@@ -85,9 +85,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Exec(args) => verbs::write::exec::run(args),
         Command::Audit(args) => commands::audit::run(args),
         Command::Revert(args) => commands::revert::run(args),
-        Command::Why(_)
-        | Command::Connectivity(_)
-        | Command::Recipe(_)
-        | Command::Fleet(_) => commands::placeholders::run(cli.command),
+        Command::Why(args) => commands::why::run(args),
+        Command::Connectivity(args) => commands::connectivity::run(args),
+        Command::Recipe(args) => commands::recipe::run(args),
+        Command::Fleet(_) => commands::placeholders::run(cli.command),
     }
 }

@@ -476,6 +476,97 @@ Deliverables:
 - Recipe parser/executor with command sandboxing rules
 - Built-in recipe pack
 
+### Implementation notes (Phase 9 landed)
+
+**`why <selector>`** ([src/commands/why.rs](src/commands/why.rs)).
+Walks `Service.depends_on` from the cached profile via DFS, recording
+pre-order, depth, adjacency, and a `BTreeSet` of unique nodes. A single
+`docker ps --format '{{.Names}}'` per namespace produces the live-running
+set; each node is then labeled `ok` / `unhealthy` / `down` (in profile
+but not running) / `unknown` (no health data) / `missing` (referenced
+but not in the profile). The "likely root cause" is the deepest failing
+node whose own dependencies are all healthy — i.e. the lowest failing
+leaf — which is what an operator wants when triaging a cascade. Exit
+code is `2` when any failing dep is found, `0` otherwise.
+
+**`connectivity <selector>`** ([src/commands/connectivity.rs](src/commands/connectivity.rs)).
+Renders the dependency edge list `from → to:port/proto` from the
+profile. Each dep service's first declared `ports[]` entry supplies the
+port and protocol; missing port info renders as `?`. With `--probe`,
+each edge is verified via the bash builtin `/dev/tcp` (no `nc`/`ncat`
+dependency, since availability is inconsistent across remote distros):
+`bash -c '(echo > /dev/tcp/<host>/<port>) 2>/dev/null && echo open || echo closed'`.
+Output is a per-service block in human mode, line-delimited JSON in
+`--json` mode. Exit `2` when any probed edge is closed.
+
+**Recipe engine** ([src/commands/recipe.rs](src/commands/recipe.rs)).
+Recipes are tiny YAML documents:
+
+```yaml
+name: deploy-check
+description: "Status, health, error scan, and connectivity."
+mutating: false
+steps:
+  - "status $SEL"
+  - "health $SEL"
+  - "search '{server=\"$SEL\", source=\"logs\"} |= \"error\"' --since 5m"
+```
+
+Resolution order: literal path (`/`-containing or `.yaml`/`.yml`-suffixed)
+→ user override at `~/.inspect/recipes/<name>.yaml` → built-in pack.
+Each step string is split with a small POSIX-flavored shell tokenizer
+(`shell_split`) that honors single quotes, double quotes with `\`
+escapes, and rejects unterminated quotes. The token vector is run
+through `$SEL` placeholder substitution before spawn.
+
+Steps execute by spawning `std::env::current_exe()` with the parsed
+argv. Environment is inherited so test mocks
+(`INSPECT_HOME`, `INSPECT_MOCK_REMOTE_FILE`) propagate naturally. Each
+step's stdout/stderr is captured in `--json` mode and surfaced as
+`data.steps[].{argv,exit_code,stdout,stderr}`; in human mode each step
+is announced with a `=== step N/M: inspect <argv> ===` header and its
+output streams to the terminal directly.
+
+**Mutating safeguards.** A recipe with `mutating: true` is dry-run by
+default — operators must pass `--apply` at the recipe level. With
+`--apply`, the runner appends `--apply` to a step **only if** the
+step's first token is in the `MUTATING_VERBS` allowlist
+(`restart`/`stop`/`start`/`reload`/`cp`/`edit`/`rm`/`mkdir`/`touch`/
+`chmod`/`chown`/`exec`). Non-mutating verbs never receive `--apply`,
+so steps like `status` continue to clap-parse cleanly. The per-verb
+safety contract from Phase 5 still applies inside each spawned step.
+
+**Built-in recipe pack** (bible §12.1):
+
+- `deploy-check` — status + health + 5m error scan + connectivity
+- `disk-audit` — volumes + `df -hP` via `exec`
+- `network-audit` — networks + ports + connectivity probe
+- `log-roundup` — 15m error/warn search across the namespace
+- `health-everything` — status + health rollup
+
+**No new dependencies.** `serde_yaml`, `serde_json`, and `serde` were
+already vendored in earlier phases.
+
+### Exit-criteria test references
+
+- Dependency walk + root-cause selection:
+  `tests/phase9_diagnostics.rs::why_walks_dependency_chain_and_marks_root_cause`,
+  `why_marks_missing_container_as_down`,
+  `why_human_output_renders_tree_and_summary`.
+- Connectivity edges + probe:
+  `tests/phase9_diagnostics.rs::connectivity_lists_edges_from_depends_on`,
+  `connectivity_probe_runs_dev_tcp`.
+- Recipe engine (built-in resolution, user override, `$SEL` substitution):
+  `tests/phase9_diagnostics.rs::recipe_runs_user_yaml_with_sel_substitution`,
+  `recipe_resolves_builtin_health_everything`,
+  `unknown_recipe_errors_with_builtin_list`.
+- Mutating safeguards:
+  `tests/phase9_diagnostics.rs::mutating_recipe_dry_run_by_default_does_not_append_apply`,
+  `mutating_recipe_with_apply_appends_apply_to_mutating_steps_only`.
+- Internal correctness: `src/commands/recipe.rs::tests` covers shell
+  splitter (basic, single-quotes, escaped doubles, unterminated) and
+  built-in pack parse round-trip.
+
 Exit criteria:
 
 - Built-in recipes produce deterministic outputs in fixture environments

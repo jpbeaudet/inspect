@@ -13,9 +13,6 @@ pub fn run(cmd: Command) -> anyhow::Result<ExitKind> {
 
 fn describe(cmd: &Command) -> (&'static str, &'static str) {
     match cmd {
-        Command::Why(_) => ("why", "Phase 9"),
-        Command::Connectivity(_) => ("connectivity", "Phase 9"),
-        Command::Recipe(_) => ("recipe", "Phase 9"),
         Command::Fleet(_) => ("fleet", "Phase 11"),
         _ => ("(internal)", "implemented"),
     }

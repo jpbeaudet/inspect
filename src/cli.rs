@@ -87,11 +87,11 @@ pub enum Command {
     /// List listening ports.
     Ports(SimpleSelectorArgs),
     /// Diagnostic walk for a service.
-    Why(SelectorArgs),
+    Why(WhyArgs),
     /// Connectivity matrix.
-    Connectivity(SelectorArgs),
+    Connectivity(ConnectivityArgs),
     /// Run a multi-step diagnostic recipe.
-    Recipe(SelectorArgs),
+    Recipe(RecipeArgs),
 
     // ---- Phase 6/7 search ----------------------------------------------------
     /// LogQL search across mediums and namespaces.
@@ -220,6 +220,44 @@ pub struct SelectorArgs {
     /// Free-form selector or arguments. Validated in later phases.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
+}
+
+// ---- Phase 9 diagnostics + recipes -----------------------------------------
+
+#[derive(Debug, Args)]
+pub struct WhyArgs {
+    /// Selector resolving to one or more services to diagnose.
+    pub selector: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectivityArgs {
+    /// Selector resolving to one or more services.
+    pub selector: String,
+    /// Live-probe each declared edge with `bash -c '</dev/tcp/host/port'`.
+    #[arg(long)]
+    pub probe: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RecipeArgs {
+    /// Recipe name (built-in) or absolute/relative path to a recipe YAML.
+    pub name: String,
+    /// Optional selector forwarded as `$SEL` to recipe steps that use it.
+    #[arg(long)]
+    pub sel: Option<String>,
+    /// Apply mutating steps (default is dry-run).
+    #[arg(long)]
+    pub apply: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
