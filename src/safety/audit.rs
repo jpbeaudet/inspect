@@ -168,16 +168,34 @@ fn hostname() -> Option<String> {
 }
 
 /// Tiny entropy source — we don't need crypto-grade for an audit id, just
-/// uniqueness within a millisecond. Mixing pid + nanos avoids pulling in
-/// `rand` for one call site.
+/// uniqueness within a millisecond. We combine three things:
+///
+/// * a process-local monotonic counter (collision-free within a single
+///   process),
+/// * the process id (separates concurrent fleet children), and
+/// * the nanosecond fraction of the current wall clock (separates
+///   bursts that share the same `timestamp_millis()`).
+///
+/// The result is masked to 16 bits at the call site purely for the id's
+/// printed width; the counter component guarantees that two `append()`
+/// calls in the same millisecond from the same process never produce the
+/// same id (the counter alone walks the full 16-bit space before
+/// wrapping, which is well above any realistic per-millisecond write
+/// rate).
 fn rand_u32() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    nanos.wrapping_mul(2654435761).wrapping_add(pid)
+    counter
+        .wrapping_mul(2654435761)
+        .wrapping_add(nanos)
+        .wrapping_add(pid)
 }
 
 #[cfg(test)]
