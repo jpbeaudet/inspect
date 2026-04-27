@@ -270,11 +270,12 @@ pub fn expand_for_verb(input: &str) -> Result<String, AliasError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     fn lock() -> MutexGuard<'static, ()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
+        // Crate-wide mutex shared with every other module that mutates
+        // INSPECT_HOME in tests. See src/paths.rs::TEST_ENV_LOCK.
+        crate::paths::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner())
     }

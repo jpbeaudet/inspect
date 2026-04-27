@@ -186,11 +186,16 @@ mod tests {
     use super::*;
     use crate::profile::schema::*;
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        // Crate-wide mutex shared with every other module that mutates
+        // INSPECT_HOME in tests. A per-module mutex is not enough:
+        // cargo runs all #[test]s of one binary on a thread pool, so
+        // tests across modules race on the env var and produce flaky
+        // `Option::None` reads where a write just succeeded (CI-only,
+        // not local — local has fewer cores and a slower scheduler).
+        crate::paths::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner())
     }
