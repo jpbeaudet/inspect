@@ -142,6 +142,20 @@ profile is mode `0600` and contains no secrets. Re-run with `--force`
 when the host changes (new container, new mount, etc.) — `inspect`
 will also tell you when it detects drift.
 
+If a single container is wedged (slow daemon socket, hung healthcheck)
+the batched `docker inspect` will time out and the affected services
+are flagged `discovery_incomplete: true` in the profile, with a
+warning summary at the end of `inspect setup`. Re-probe just the
+flagged services with:
+
+```sh
+inspect setup arte --retry-failed
+```
+
+This is cheaper than `--force` because it keeps the rest of the
+profile cached and only re-runs `docker inspect` per-container with
+a 5-second budget each.
+
 ### 3.5 Verify
 
 ```sh
@@ -245,6 +259,58 @@ inspect cat arte/atlas:/etc/atlas.conf
 inspect resolve 'prod-*/storage'
 ```
 
+### 5.1 Logs and grep — line filters and cursors (v0.1.1)
+
+`inspect logs` and `inspect grep` accept two repeatable line-filter
+flags that are pushed down to the remote host as a `grep -E` /
+`grep -vE` pipeline suffix (server-side, so live `--follow` streams
+stay snappy):
+
+- `--match <regex>` / `-g <regex>` — keep lines matching the regex.
+  Multiple flags OR together as `(?:p1)|(?:p2)`.
+- `--exclude <regex>` / `-G <regex>` — drop matching lines.
+
+A resumable cursor is also available:
+
+- `--since-last` — resume from the previous run's start time, kept
+  under `~/.inspect/cursors/<ns>/<svc>.kv` (mode 0600). Cold-start
+  fallback comes from `INSPECT_SINCE_LAST_DEFAULT` (default `5m`).
+  Mutually exclusive with `--since`.
+- `--reset-cursor` — delete the saved cursor for the matched
+  selector(s) and exit.
+
+```sh
+# Tail only error-shaped lines, ignore healthchecks
+inspect logs arte/atlas --follow -g 'ERROR|FATAL' -G '/health'
+
+# Pick up where you left off
+inspect logs arte/atlas --since-last
+```
+
+### 5.2 `--merged` multi-container view (v0.1.1)
+
+When a selector matches more than one service, `inspect logs <sel>
+--merged` interleaves output from every selected service into a
+single `[svc] <line>`-prefixed stream. We inject `--timestamps` into
+the underlying `docker logs` invocation; batch mode k-way merges by
+RFC3339 timestamp, follow mode prints in arrival order.
+
+```sh
+inspect logs 'arte/*' --merged --since 5m
+inspect logs 'arte/*' --merged --follow
+```
+
+Lines whose driver isn't readable via `docker logs` (e.g. `awslogs`,
+`gcplogs`) are skipped with a warning rather than failing the merged
+view.
+
+### 5.3 Progress spinner on slow fetches (v0.1.1)
+
+`inspect logs` and `inspect grep` draw a small spinner to stderr
+when a per-target fetch takes longer than 700ms. The spinner is
+suppressed automatically in JSON mode, when stderr is not a TTY,
+and when `INSPECT_NO_PROGRESS=1` is set in the env.
+
 ---
 
 ## 6. Search — the LogQL DSL
@@ -336,7 +402,11 @@ shows what would happen; you have to add `--apply` to enact it.
 | `edit <sel>:<path> '<sed-expr>'` | in-place atomic edit |
 | `rm` / `mkdir` / `touch` | filesystem operations |
 | `chmod` / `chown` | permission changes |
-| `exec <sel> -- <cmd>` | arbitrary command (gated, see below) |
+| `exec <sel> -- <cmd>` | arbitrary command (audited, see below) |
+
+For read-only ad-hoc commands use `inspect run` instead — same shape
+as `exec`, no audit log, no apply gate, masks secrets in stdout. See
+§7.3.
 
 ### Safety contract
 
@@ -352,24 +422,73 @@ shows what would happen; you have to add `--apply` to enact it.
 6. **Atomic writes.** `edit` writes a tempfile, then renames.
 7. **Large fan-out guard.** More than 10 targets prompts even with
    `--apply`. Skip with `--yes-all`.
-8. **`exec` is special.** It additionally requires `--allow-exec`
-   so a misclick cannot shell out across the fleet.
 
-### A typical hot-fix flow
+### 7.1 `--reason <text>` (v0.1.1)
+
+Every write verb (`restart`/`stop`/`start`/`reload`, `exec`, `cp`,
+`edit`, `rm`, `mkdir`, `touch`, `chmod`, `chown`) accepts
+`--reason <text>` to record *why* the change happened. The reason
+is appended to the audit log alongside the diff and shows up as a
+trailing column in `inspect audit ls` and on its own line in
+`inspect audit show`. 240-character cap; oversize values are
+rejected up-front. Filter by reason with
+`inspect audit ls --reason <substr>` (case-insensitive).
+
+### 7.2 A typical hot-fix flow
 
 ```sh
 # 1. Preview
 inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/'
 
 # 2. Apply
-inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/' --apply
+inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/' \
+  --apply --reason "INC-4421 raise atlas timeout"
 
 # 3. Restart the affected service
-inspect restart arte/atlas --apply
+inspect restart arte/atlas --apply --reason "INC-4421"
 
 # 4. Verify
 inspect logs arte/atlas --since 30s --follow
 ```
+
+### 7.3 `run` vs `exec` (v0.1.1)
+
+`inspect run <sel> -- <cmd>` runs an arbitrary read-only command on
+every selected target and streams stdout line-by-line. It is **not
+audited**, has **no apply gate**, and **no fan-out threshold** — use
+it for ad-hoc inspection (`ps auxww`, `cat /proc/...`, `redis-cli
+info`, etc.). `inspect exec` keeps the same shape but is audited
+and requires `--apply` for state-mutating commands.
+
+Both verbs propagate the remote command's **inner exit code** to
+your shell: `inspect run arte/pulse -- 'exit 7'` returns 7. Mixed
+exits across multiple targets fall back to exit 2.
+
+### 7.4 Secret masking on `run` / `exec` (v0.1.1)
+
+By default, `run` and `exec` scan stdout for `KEY=VALUE` lines and
+mask the value when the key looks like a secret. The mask form is
+`head4****tail2` (values shorter than 8 chars become `****`). The
+`export ` prefix and matching quote pairs are preserved.
+
+Recognized key shapes:
+
+- Suffixes: `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, `_PASS`,
+  `_CREDENTIAL[S]`, `_APIKEY`, `_AUTH`, `_PRIVATE`, `_ACCESS_KEY`,
+  `_DSN`, `_CONNECTION_STRING`.
+- Exact: `DATABASE_URL`, `REDIS_URL`, `MONGO_URL`, `POSTGRES_URL`,
+  `POSTGRESQL_URL`.
+
+Opt-out flags:
+
+- `--show-secrets` — verbatim output. On `exec`, this stamps
+  `[secrets_exposed=true]` into the audit args so reviewers can
+  tell apart verbatim from masked runs.
+- `--redact-all` — mask **every** `KEY=VALUE` pair, not just
+  recognized keys.
+
+When masking actually fired during an `exec`, the audit args
+captures `[secrets_masked=true]`.
 
 For the deep dive: `inspect help write`.
 
