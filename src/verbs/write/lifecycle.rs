@@ -118,6 +118,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         let mut entry = AuditEntry::new(act.as_str(), &format!("{}/{svc}", s.ns.namespace));
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
+        entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&entry)?;
 
         if out.ok() {

@@ -87,6 +87,7 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
         e.args = args.owner.clone();
         e.exit = out.exit_code;
         e.duration_ms = started.elapsed().as_millis() as u64;
+        e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&e)?;
         if out.ok() {
             ok += 1;

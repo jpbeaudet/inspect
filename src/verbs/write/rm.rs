@@ -80,6 +80,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
         let mut e = AuditEntry::new("rm", &label);
         e.exit = out.exit_code;
         e.duration_ms = dur;
+        e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&e)?;
 
         if out.ok() {

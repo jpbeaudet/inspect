@@ -225,6 +225,7 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         entry.diff_summary = diff_summary(&[(prev_text, new_text.clone())]);
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
+        entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&entry)?;
 
         if out.ok() {

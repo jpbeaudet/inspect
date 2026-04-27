@@ -45,6 +45,28 @@ pub fn snapshots_dir() -> PathBuf {
     audit_dir().join("snapshots")
 }
 
+/// P10 (v0.1.1): root for `--since-last` cursors. One small file per
+/// (namespace, service) pair, mode 0600 inside a 0700 directory.
+pub fn cursors_dir() -> PathBuf {
+    inspect_home().join("cursors")
+}
+
+/// Per-(namespace, service) cursor file path. Service name is sanitized
+/// (slashes/colons stripped) so it always fits a single filename.
+pub fn cursor_file(namespace: &str, service: &str) -> PathBuf {
+    let sanitize = |s: &str| {
+        s.chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | ' ' | '\t' | '\n' => '_',
+                c => c,
+            })
+            .collect::<String>()
+    };
+    cursors_dir()
+        .join(sanitize(namespace))
+        .join(format!("{}.kv", sanitize(service)))
+}
+
 /// Ensure the inspect home directory exists with mode 0700 on unix.
 pub fn ensure_home() -> Result<PathBuf, ConfigError> {
     let home = inspect_home();

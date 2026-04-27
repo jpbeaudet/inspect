@@ -12,7 +12,12 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     let store = AuditStore::open()?;
     let entries = store.all()?;
     match args.command {
-        AuditCommand::Ls(o) => list(&entries, o.format.is_json(), Some(o.limit)),
+        AuditCommand::Ls(o) => list(
+            &entries,
+            o.format.is_json(),
+            Some(o.limit),
+            o.reason.as_deref(),
+        ),
         AuditCommand::Show(o) => show(&entries, &o.id, o.format.is_json()),
         AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.format.is_json()),
         AuditCommand::Verify(o) => verify(&entries, o.format.is_json()),
@@ -23,37 +28,65 @@ fn list(
     entries: &[crate::safety::AuditEntry],
     json: bool,
     limit: Option<usize>,
+    reason_filter: Option<&str>,
 ) -> Result<ExitKind> {
-    let n = entries.len();
+    let n_total = entries.len();
     // Newest first.
     let mut sorted: Vec<_> = entries.iter().collect();
     sorted.sort_by_key(|e| std::cmp::Reverse(e.ts));
+
+    // P12: optional case-insensitive substring filter on `reason`.
+    let needle = reason_filter.map(|s| s.to_lowercase());
+    if let Some(needle) = &needle {
+        sorted.retain(|e| {
+            e.reason
+                .as_ref()
+                .map(|r| r.to_lowercase().contains(needle))
+                .unwrap_or(false)
+        });
+    }
+    let n = sorted.len();
     let take = limit.unwrap_or(50).min(sorted.len());
     let view = &sorted[..take];
 
     if json {
         for e in view {
-            JsonOut::write(
-                &Envelope::new(&e.host, "audit", "audit")
-                    .put("id", e.id.clone())
-                    .put("ts", e.ts.to_rfc3339())
-                    .put("verb", e.verb.clone())
-                    .put("selector", e.selector.clone())
-                    .put("exit", e.exit)
-                    .put("diff_summary", e.diff_summary.clone())
-                    .put("is_revert", e.is_revert),
-            );
+            let mut env = Envelope::new(&e.host, "audit", "audit")
+                .put("id", e.id.clone())
+                .put("ts", e.ts.to_rfc3339())
+                .put("verb", e.verb.clone())
+                .put("selector", e.selector.clone())
+                .put("exit", e.exit)
+                .put("diff_summary", e.diff_summary.clone())
+                .put("is_revert", e.is_revert);
+            // P12: always emit `reason` in JSON (null when absent).
+            env = match &e.reason {
+                Some(r) => env.put("reason", r.clone()),
+                None => env.put("reason", serde_json::Value::Null),
+            };
+            JsonOut::write(&env);
         }
         return Ok(ExitKind::Success);
     }
 
     let mut r = Renderer::new();
-    r.summary(format!("{n} audit entry/entries (showing {take})"));
+    let header = match reason_filter {
+        Some(p) => format!(
+            "{n} audit entry/entries matching --reason '{p}' (of {n_total} total; showing {take})"
+        ),
+        None => format!("{n_total} audit entry/entries (showing {take})"),
+    };
+    r.summary(header);
     for e in view {
         let badge = if e.exit == 0 { "ok " } else { "ERR" };
         let revert = if e.is_revert { " (revert)" } else { "" };
+        // P12: append the reason as the trailing column when present.
+        let reason_cell = match &e.reason {
+            Some(text) => format!("  reason: {}", truncate_reason(text, 60)),
+            None => String::new(),
+        };
         r.data_line(format!(
-            "{} [{badge}] {} {} {}{revert} — {}",
+            "{} [{badge}] {} {} {}{revert} — {}{reason_cell}",
             e.id,
             e.ts.format("%Y-%m-%d %H:%M:%S"),
             e.verb,
@@ -69,6 +102,18 @@ fn list(
     r.next("inspect revert <id>");
     r.print();
     Ok(ExitKind::Success)
+}
+
+/// Truncate a `--reason` for the audit-ls human view. Char-aware so a
+/// non-ASCII reason doesn't get sliced mid-codepoint.
+fn truncate_reason(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = chars.into_iter().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> Result<ExitKind> {
@@ -103,6 +148,9 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
     }
     r.data_line(format!("exit:      {}", e.exit));
     r.data_line(format!("duration:  {} ms", e.duration_ms));
+    if let Some(reason) = &e.reason {
+        r.data_line(format!("reason:    {reason}"));
+    }
     if e.is_revert {
         r.data_line("(this entry is a revert)");
     }

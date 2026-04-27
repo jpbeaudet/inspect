@@ -11,12 +11,14 @@
 
 pub mod cat;
 pub mod correlation;
+pub mod cursor;
 pub mod dispatch;
 pub mod duration;
 pub mod find;
 pub mod grep;
 pub mod health;
 pub mod images;
+pub mod line_filter;
 pub mod logs;
 pub mod ls;
 pub mod network;
@@ -24,6 +26,7 @@ pub mod output;
 pub mod ports;
 pub mod ps;
 pub mod quote;
+pub mod run;
 pub mod runtime;
 pub mod status;
 pub mod volumes;

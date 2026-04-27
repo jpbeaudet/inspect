@@ -14,7 +14,7 @@ use crate::verbs::duration::parse_duration;
 use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
-pub fn run(args: LogsArgs) -> Result<ExitKind> {
+pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
@@ -23,10 +23,50 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
     }
 
     let (runner, nses, targets) = plan(&args.selector)?;
+
+    // P10 (v0.1.1): handle --reset-cursor up front -- it does not stream
+    // any logs, just drops the cursor file(s) for every selected target.
+    if args.reset_cursor {
+        let mut deleted = 0usize;
+        for step in iter_steps(&nses, &targets) {
+            let svc = step.service().unwrap_or("_");
+            if crate::verbs::cursor::reset(&step.ns.namespace, svc)? {
+                deleted += 1;
+            }
+        }
+        if !args.format.is_json() {
+            eprintln!("reset {deleted} cursor(s)");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     let mut any_lines = false;
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
+
+        // P10: --since-last expands into --since <unix-ts> from the
+        // saved cursor (or INSPECT_SINCE_LAST_DEFAULT on cold start).
+        // We always rewrite the cursor at the start of the run so a
+        // crash mid-stream still leaves the next call resumable; the
+        // small overlap is acceptable (logs are append-only).
+        if args.since_last {
+            let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
+            let since = match &prev {
+                Some(c) if c.last_call > 0 => c.last_call.to_string(),
+                _ => crate::verbs::cursor::default_since(),
+            };
+            args.since = Some(since);
+            // Persist the new cursor up-front.
+            let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
+            // Best effort: a cursor write failure should not abort
+            // the user's actual log query.
+            if let Err(e) = now.save() {
+                if !args.format.is_json() {
+                    eprintln!("warn: failed to save cursor: {e}");
+                }
+            }
+        }
 
         // Field pitfall §2.3: refuse early when the service is
         // configured with a log driver that ships logs out of the
@@ -144,9 +184,21 @@ fn build_logs(
         (None, _) => {
             // Host-level: tail /var/log/syslog by default.
             let tail = args.tail.unwrap_or(200);
-            format!(
+            let base = format!(
                 "tail -n {tail} /var/log/syslog 2>/dev/null || tail -n {tail} /var/log/messages"
-            )
+            );
+            // Match/exclude wrap: tail's `||` already protects the
+            // empty case, so we splice the filter through an sh -c.
+            let suf = crate::verbs::line_filter::build_suffix(
+                &args.match_re,
+                &args.exclude_re,
+                args.follow,
+            );
+            if suf.is_empty() {
+                base
+            } else {
+                format!("sh -c {}", shquote(&format!("{base}{suf}")))
+            }
         }
     }
 }
@@ -222,6 +274,11 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
     s.push_str(&shquote(svc));
     // docker logs writes to both stderr+stdout; merge for line discipline.
     s.push_str(" 2>&1");
+    s.push_str(&crate::verbs::line_filter::build_suffix(
+        &args.match_re,
+        &args.exclude_re,
+        args.follow,
+    ));
     s
 }
 
@@ -244,6 +301,11 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
     if let Some(tail) = args.tail {
         s.push_str(&format!(" -n {tail}"));
     }
+    s.push_str(&crate::verbs::line_filter::build_suffix(
+        &args.match_re,
+        &args.exclude_re,
+        args.follow,
+    ));
     s
 }
 
@@ -342,9 +404,13 @@ mod tests {
         LogsArgs {
             selector: "x".into(),
             since: None,
+            since_last: false,
+            reset_cursor: false,
             until: None,
             tail: None,
             follow,
+            match_re: Vec::new(),
+            exclude_re: Vec::new(),
             format: FormatArgs::default(),
             follow_timeout_secs: None,
         }

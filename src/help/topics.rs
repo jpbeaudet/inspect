@@ -155,6 +155,7 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("images", &["selectors", "formats", "examples"]),
     ("network", &["selectors", "formats", "examples"]),
     ("ports", &["selectors", "formats", "examples"]),
+    ("run", &["selectors", "formats", "examples"]),
     ("resolve", &["selectors", "aliases", "examples"]),
     // Search.
     ("search", &["search", "selectors", "aliases", "formats"]),

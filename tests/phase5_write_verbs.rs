@@ -273,7 +273,6 @@ fn exec_apply_runs_command() {
             "exec",
             "arte/pulse",
             "--apply",
-            "--allow-exec",
             "--",
             "echo",
             "hi",

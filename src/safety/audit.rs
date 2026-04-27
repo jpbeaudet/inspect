@@ -43,6 +43,12 @@ pub struct AuditEntry {
     /// Optional reference to the audit id this revert restored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverts: Option<String>,
+    /// Free-form operator note attached at invocation time via
+    /// `--reason`. Limited to 240 characters by the CLI layer (see
+    /// [`crate::safety::audit::validate_reason`]); recorded verbatim
+    /// here so audit downstream can grep on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl AuditEntry {
@@ -66,6 +72,36 @@ impl AuditEntry {
             duration_ms: 0,
             is_revert: false,
             reverts: None,
+            reason: None,
+        }
+    }
+}
+
+/// Cap on the length of the `--reason` text (P12, v0.1.1). The audit
+/// log is a per-month JSONL file; runaway --reason payloads would
+/// bloat lines and make `audit ls` unreadable. 240 characters is a
+/// pragmatic upper bound (≈ a tweet) that fits both Jira keys and a
+/// short sentence.
+pub const REASON_MAX_LEN: usize = 240;
+
+/// Validate a `--reason` value. Returns `Ok(Some(text))` for valid
+/// non-empty input, `Ok(None)` for `None`, and `Err(_)` when the text
+/// is too long. The trim is intentional: trailing whitespace from
+/// shells/aliases would otherwise count toward the limit.
+pub fn validate_reason(raw: Option<&str>) -> anyhow::Result<Option<String>> {
+    match raw {
+        None => Ok(None),
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            if trimmed.chars().count() > REASON_MAX_LEN {
+                return Err(anyhow::anyhow!(
+                    "--reason must be ≤ {REASON_MAX_LEN} characters"
+                ));
+            }
+            Ok(Some(trimmed.to_string()))
         }
     }
 }

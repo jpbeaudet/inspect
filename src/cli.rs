@@ -310,14 +310,25 @@ EXAMPLES
   $ inspect stop 'prod-*/atlas' --apply --yes-all";
 
 const LONG_EXEC: &str = "\
-Run a command on the selected targets. Doubly gated: requires both \
-`--apply` and `--allow-exec` because exec is the one verb that shells \
-out free-form code on the remote.
+Run a state-changing command on the selected targets. Audited; \
+`--apply` required to actually execute. For read-only inspection use \
+`inspect run` instead -- it skips the audit log and the apply gate.
 
 EXAMPLES
-  $ inspect exec arte/atlas -- uptime
-  $ inspect exec arte/atlas --apply --allow-exec -- systemctl status atlas
-  $ inspect exec 'prod-*' --apply --allow-exec --yes-all -- df -h";
+  $ inspect exec arte/atlas -- systemctl restart atlas --apply
+  $ inspect exec arte/atlas --apply -- 'touch /var/lib/atlas/.maint'
+  $ inspect exec 'prod-*' --apply --yes-all -- 'rm -f /tmp/lockfile'";
+
+const LONG_RUN: &str = "\
+Run a read-only command on the selected targets. Output is streamed; \
+secrets in `KEY=VALUE` form are masked unless `--show-secrets` is \
+passed. No audit entry, no apply gate -- this is the verb to reach \
+for when you want a quick \"what is the state?\" check.
+
+EXAMPLES
+  $ inspect run arte/atlas -- env
+  $ inspect run arte/atlas -- 'docker ps --format json'
+  $ inspect run 'prod-*' -- 'df -h /var'";
 
 const LONG_PATH_ARG: &str = "\
 File operation on a target path (the verb form chooses: rm / mkdir / \
@@ -543,9 +554,12 @@ pub enum Command {
     /// Change file ownership.
     #[command(long_about = LONG_CHOWN)]
     Chown(ChownArgs),
-    /// Run a command on a target.
+    /// Run a state-changing command on a target. Audited.
     #[command(long_about = LONG_EXEC)]
     Exec(ExecArgs),
+    /// Run a read-only command on a target. Not audited; secrets masked.
+    #[command(long_about = LONG_RUN)]
+    Run(RunArgs),
 
     // ---- Phase 3 alias management --------------------------------------------
     /// Manage selector aliases.
@@ -1161,8 +1175,18 @@ EXAMPLES\n  \
 pub struct LogsArgs {
     pub selector: String,
     /// Show logs since duration (e.g. 30s, 5m, 1h, 2d).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "since_last")]
     pub since: Option<String>,
+    /// Resume from the last `--since-last` cursor for this
+    /// (namespace, service). On a cold start (no cursor yet) falls back
+    /// to the duration in `INSPECT_SINCE_LAST_DEFAULT` (default `5m`).
+    /// Cursors live in `~/.inspect/cursors/` (mode 0600).
+    #[arg(long)]
+    pub since_last: bool,
+    /// Delete the `--since-last` cursor for this (namespace, service)
+    /// and exit. Idempotent.
+    #[arg(long)]
+    pub reset_cursor: bool,
     /// Show logs until duration.
     #[arg(long)]
     pub until: Option<String>,
@@ -1172,6 +1196,16 @@ pub struct LogsArgs {
     /// Stream logs.
     #[arg(short = 'f', long)]
     pub follow: bool,
+    /// Server-side regex filter: keep only lines matching this regex.
+    /// Repeat the flag to OR multiple patterns. Pushed down to the
+    /// remote host as a `grep -E` pipeline; in `--follow` mode uses
+    /// `grep --line-buffered`.
+    #[arg(long = "match", short = 'g', value_name = "REGEX")]
+    pub match_re: Vec<String>,
+    /// Server-side regex filter: drop lines matching this regex.
+    /// Repeat to OR multiple patterns. Applied after `--match`.
+    #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
+    pub exclude_re: Vec<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
     /// Hidden: ssh-side timeout for follow mode (seconds).
@@ -1195,8 +1229,15 @@ pub struct GrepArgs {
     pub pattern: String,
     /// Selector. May include `:path` to grep a file.
     pub selector: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "since_last")]
     pub since: Option<String>,
+    /// Resume from the last `--since-last` cursor for this
+    /// (namespace, service). See `inspect logs --since-last`.
+    #[arg(long)]
+    pub since_last: bool,
+    /// Delete the `--since-last` cursor for this (namespace, service).
+    #[arg(long)]
+    pub reset_cursor: bool,
     #[arg(long)]
     pub until: Option<String>,
     #[arg(long)]
@@ -1235,6 +1276,15 @@ pub struct GrepArgs {
     /// Just count matches per target.
     #[arg(short = 'c', long = "count")]
     pub count: bool,
+
+    /// Server-side regex filter applied AFTER the main grep stage:
+    /// keep only lines matching this regex. Repeat to OR patterns.
+    #[arg(long = "match", short = 'g', value_name = "REGEX")]
+    pub match_re: Vec<String>,
+    /// Server-side regex filter: drop lines matching this regex.
+    /// Repeat to OR patterns. Applied after `--match`.
+    #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
+    pub exclude_re: Vec<String>,
 
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
@@ -1322,17 +1372,22 @@ pub struct LifecycleArgs {
     /// Skip the large-fanout interlock as well.
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Useful for change
+    /// management tickets, incident IDs, or just "why did I run this?".
+    /// Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
 #[command(
-    long_about = "Run a command on the selected targets. Doubly gated: \
-requires both `--apply` and `--allow-exec` because exec is the one verb \
-that shells out free-form code on the remote.\n\n\
+    long_about = "Run a state-changing command on the selected targets. Audited; \
+`--apply` required to actually execute. For read-only inspection use \
+`inspect run` instead -- it skips the audit log and the apply gate.\n\n\
 EXAMPLES\n  \
-  $ inspect exec arte/atlas -- uptime\n  \
-  $ inspect exec arte/atlas --apply --allow-exec -- systemctl status atlas\n  \
-  $ inspect exec 'prod-*' --apply --allow-exec --yes-all -- df -h",
+  $ inspect exec arte/atlas --apply -- systemctl restart atlas\n  \
+  $ inspect exec arte/atlas --apply -- 'touch /var/lib/atlas/.maint'\n  \
+  $ inspect exec 'prod-*' --apply --yes-all -- 'rm -f /tmp/lockfile'",
     after_help = SEE_ALSO_WRITE,
 )]
 pub struct ExecArgs {
@@ -1343,12 +1398,6 @@ pub struct ExecArgs {
     pub cmd: Vec<String>,
     #[arg(long)]
     pub apply: bool,
-    /// Field pitfall §3.2: `exec` runs free-form code on the remote and
-    /// is not symmetric with the predictable write verbs. Require this
-    /// extra flag in addition to `--apply` so a misclick or muscle-
-    /// memory `--apply` cannot silently shell out across the fleet.
-    #[arg(long)]
-    pub allow_exec: bool,
     #[arg(short = 'y', long)]
     pub yes: bool,
     #[arg(long)]
@@ -1356,6 +1405,38 @@ pub struct ExecArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_RUN,
+    after_help = SEE_ALSO_READ,
+)]
+pub struct RunArgs {
+    /// Selector.
+    pub selector: String,
+    /// Command and arguments after `--`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub cmd: Vec<String>,
+    /// Override the per-target timeout (seconds).
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+    /// Server-side line filter (extended regex). Equivalent to piping
+    /// the remote command through `grep -E <pattern>`. Quote shell
+    /// metacharacters.
+    #[arg(long, value_name = "REGEX")]
+    pub filter_line_pattern: Option<String>,
+    /// Free-form note. `inspect run` is not audited, so this is purely
+    /// informational -- it is echoed once to stderr at the start of
+    /// the run so the operator's terminal/shell history captures the
+    /// intent. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1377,6 +1458,9 @@ pub struct PathArgArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1400,6 +1484,9 @@ pub struct ChmodArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1423,6 +1510,9 @@ pub struct ChownArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1450,6 +1540,9 @@ pub struct CpArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1475,6 +1568,9 @@ pub struct EditArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1516,6 +1612,10 @@ pub struct AuditLsArgs {
     /// Maximum entries to show.
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
+    /// Filter to entries whose `reason` field contains this substring
+    /// (case-insensitive).
+    #[arg(long, value_name = "PATTERN")]
+    pub reason: Option<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

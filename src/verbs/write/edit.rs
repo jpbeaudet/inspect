@@ -152,6 +152,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         entry.diff_summary = diff_summary(&[(w.original.clone(), w.new_text.clone())]);
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
+        entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&entry)?;
 
         if out.ok() {
