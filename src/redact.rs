@@ -158,7 +158,10 @@ mod tests {
     #[test]
     fn show_secrets_passes_through() {
         let m = EnvSecretMasker::new(true, false);
-        assert_eq!(m.mask_line("API_KEY=sk-abcdefgh12").as_ref(), "API_KEY=sk-abcdefgh12");
+        assert_eq!(
+            m.mask_line("API_KEY=sk-abcdefgh12").as_ref(),
+            "API_KEY=sk-abcdefgh12"
+        );
         assert!(!m.was_active());
     }
 
@@ -177,7 +180,10 @@ mod tests {
     fn passes_through_non_secret_keys() {
         let m = EnvSecretMasker::new(false, false);
         assert_eq!(m.mask_line("FOO=bar").as_ref(), "FOO=bar");
-        assert_eq!(m.mask_line("PATH=/usr/bin:/bin").as_ref(), "PATH=/usr/bin:/bin");
+        assert_eq!(
+            m.mask_line("PATH=/usr/bin:/bin").as_ref(),
+            "PATH=/usr/bin:/bin"
+        );
         assert!(!m.was_active());
     }
 

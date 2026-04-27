@@ -57,8 +57,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             let svc_name = step.service().unwrap_or("_").to_string();
             let mut step_args = args.clone();
             if step_args.since_last {
-                let prev =
-                    crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
+                let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
                 let since = match &prev {
                     Some(c) if c.last_call > 0 => c.last_call.to_string(),
                     _ => crate::verbs::cursor::default_since(),
@@ -126,10 +125,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                     crate::verbs::merged::print_json(
                         // The MergeSource borrows namespace as &str; we
                         // re-derive it from svc_idx into the source list.
-                        sources
-                            .get(m.svc_idx)
-                            .map(|s| s.namespace)
-                            .unwrap_or("_"),
+                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
                         &m.svc,
                         &m.line,
                     );
@@ -141,10 +137,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             crate::verbs::merged::batch_merged(runner.as_ref(), &sources, timeout, |m| {
                 if json {
                     crate::verbs::merged::print_json(
-                        sources
-                            .get(m.svc_idx)
-                            .map(|s| s.namespace)
-                            .unwrap_or("_"),
+                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
                         &m.svc,
                         &m.line,
                     );

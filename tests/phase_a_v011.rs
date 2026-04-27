@@ -294,8 +294,8 @@ fn p1_follow_json_emits_one_envelope_per_line() {
         lines.len()
     );
     for line in &lines {
-        let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("not JSON: {line:?}: {e}"));
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON: {line:?}: {e}"));
         assert_eq!(v["server"], "arte");
         assert_eq!(v["_source"], "logs");
         assert_eq!(v["_medium"], "logs");

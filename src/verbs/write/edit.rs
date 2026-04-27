@@ -137,7 +137,11 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         // rename (audit §4.2). See `verbs::write::atomic`.
         let inner = super::atomic::write_then_rename(&b64, &tmp, &w.path);
         let cmd = match w.container.as_deref() {
-            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
+            Some(container) => format!(
+                "docker exec {} sh -c {}",
+                shquote(container),
+                shquote(&inner)
+            ),
             None => format!("sh -c {}", shquote(&inner)),
         };
         let started = Instant::now();
@@ -247,7 +251,11 @@ fn read_remote(
 ) -> Option<String> {
     let inner = format!("cat -- {}", shquote(path));
     let cmd = match s.container() {
-        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
+        Some(container) => format!(
+            "docker exec {} sh -c {}",
+            shquote(container),
+            shquote(&inner)
+        ),
         None => inner,
     };
     let out = runner

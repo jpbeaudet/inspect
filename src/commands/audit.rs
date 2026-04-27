@@ -111,7 +111,10 @@ fn truncate_reason(s: &str, max_chars: usize) -> String {
     if chars.len() <= max_chars {
         return s.to_string();
     }
-    let mut out: String = chars.into_iter().take(max_chars.saturating_sub(1)).collect();
+    let mut out: String = chars
+        .into_iter()
+        .take(max_chars.saturating_sub(1))
+        .collect();
     out.push('…');
     out
 }

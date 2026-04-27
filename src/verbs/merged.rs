@@ -24,8 +24,8 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -185,12 +185,8 @@ pub fn follow_merged(
                 let opts = RunOpts::with_timeout(timeout_secs);
                 let mut seq: u64 = 0;
                 let svc = src.svc.clone();
-                let _ = runner.run_streaming(
-                    src.namespace,
-                    src.target,
-                    &src.cmd,
-                    opts,
-                    &mut |line| {
+                let _ =
+                    runner.run_streaming(src.namespace, src.target, &src.cmd, opts, &mut |line| {
                         if crate::exec::cancel::is_cancelled() {
                             return;
                         }
@@ -205,8 +201,7 @@ pub fn follow_merged(
                         seq += 1;
                         // Receiver gone == main thread aborted; drop.
                         let _ = tx.send(m);
-                    },
-                );
+                    });
             });
         }
         // Drop our own clone so the channel closes when the last
@@ -227,10 +222,8 @@ pub fn follow_merged(
 /// Print one merged line in human format with a `[svc]` prefix. Kept
 /// out of the merger so callers can route to JSON instead.
 pub fn print_human(prefix_svc: &str, body: &str) {
-    let safe = crate::format::safe::safe_terminal_line(
-        body,
-        crate::format::safe::DEFAULT_MAX_LINE_BYTES,
-    );
+    let safe =
+        crate::format::safe::safe_terminal_line(body, crate::format::safe::DEFAULT_MAX_LINE_BYTES);
     println!("[{prefix_svc}] {safe}");
 }
 
@@ -254,11 +247,7 @@ mod tests {
 
     fn line(ts: Option<&str>, svc_idx: usize, seq: u64, body: &str) -> MergeLine {
         MergeLine {
-            ts: ts.map(|s| {
-                DateTime::parse_from_rfc3339(s)
-                    .unwrap()
-                    .with_timezone(&Utc)
-            }),
+            ts: ts.map(|s| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)),
             svc_idx,
             seq,
             svc: format!("svc{svc_idx}"),
@@ -298,13 +287,8 @@ mod tests {
 
     #[test]
     fn k_way_merge_preserves_source_order_for_undated_lines() {
-        let a = vec![
-            line(None, 0, 0, "a-first"),
-            line(None, 0, 1, "a-second"),
-        ];
-        let b = vec![
-            line(None, 1, 0, "b-first"),
-        ];
+        let a = vec![line(None, 0, 0, "a-first"), line(None, 0, 1, "a-second")];
+        let b = vec![line(None, 1, 0, "b-first")];
         let mut got: Vec<String> = Vec::new();
         k_way_merge(vec![a, b], |m| got.push(m.line.clone()));
         // No timestamps → svc_idx then seq decides order.

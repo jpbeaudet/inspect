@@ -69,7 +69,11 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     for s in &steps {
         let cmd = match s.container() {
             Some(container) => {
-                format!("docker exec {} sh -c {}", shquote(container), shquote(&user_cmd))
+                format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&user_cmd)
+                )
             }
             None => user_cmd.clone(),
         };

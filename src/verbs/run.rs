@@ -61,7 +61,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // Apply server-side line filter (--filter-line-pattern) by piping
         // through `grep -E`, mirroring the same pushdown logs/grep use.
         let inner = match s.container() {
-            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&user_cmd)),
+            Some(container) => format!(
+                "docker exec {} sh -c {}",
+                shquote(container),
+                shquote(&user_cmd)
+            ),
             None => user_cmd.clone(),
         };
         let cmd = match &args.filter_line_pattern {
