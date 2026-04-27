@@ -133,3 +133,9 @@ pub fn check_file_mode_0600(path: &Path) -> Result<(), ConfigError> {
     let _ = path;
     Ok(())
 }
+
+/// Shared mutex for tests that mutate the process-wide `INSPECT_HOME`
+/// env var. Without this, tests in different modules run in parallel,
+/// clobber each other's tempdir, and produce flaky CI failures.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

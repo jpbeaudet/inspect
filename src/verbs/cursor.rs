@@ -136,9 +136,16 @@ pub fn default_since() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::TEST_ENV_LOCK;
+
+    // Both tests mutate the process-wide INSPECT_HOME env var. cargo test
+    // runs them on different threads in parallel, which used to clobber
+    // each other and produce flaky `Option::unwrap()` panics in CI. Serialize
+    // via a crate-wide mutex shared with other modules that touch INSPECT_HOME.
 
     #[test]
     fn round_trip_load_save() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Use a sandboxed INSPECT_HOME so we don't pollute the user's.
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("INSPECT_HOME", tmp.path());
@@ -157,6 +164,7 @@ mod tests {
 
     #[test]
     fn reset_removes_file() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("INSPECT_HOME", tmp.path());
 

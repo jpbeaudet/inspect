@@ -300,6 +300,9 @@ mod tests {
 
     #[test]
     fn roundtrip_append_and_read() {
+        let _guard = crate::paths::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("INSPECT_HOME", tmp.path());
         let s = AuditStore::open().unwrap();
