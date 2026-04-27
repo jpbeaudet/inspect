@@ -241,6 +241,7 @@ mod tests {
             mounts: vec![],
             kind: ServiceKind::Container,
             depends_on: vec![],
+            discovery_incomplete: false,
         });
         save_profile(&incoming).unwrap();
         let back = load_profile("arte").unwrap().unwrap();

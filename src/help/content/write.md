@@ -14,7 +14,29 @@ WRITE VERBS
   edit <sel>:<path> '<sed-expr>'     in-place content edit (atomic)
   rm / mkdir / touch                 file operations
   chmod / chown                      permission changes
-  exec <sel> -- <cmd>                arbitrary command (requires --allow-exec)
+  exec <sel> -- <cmd>                arbitrary command (audited; requires --apply)
+
+RUN vs EXEC
+  run    Read-only, NOT audited, no apply gate. Use for ad-hoc
+         inspection: `inspect run arte/pulse -- ps auxww`.
+  exec   Audited write verb. Same shape as run but every --apply
+         lands in the audit log with a --reason. Use when the command
+         mutates state OR when you need a forensic record.
+
+SECRET MASKING (P4)
+  By default, `run` and `exec` mask secret-shaped KEY=VALUE pairs in
+  the output (head4****tail2). Recognized keys include the standard
+  *_KEY/*_SECRET/*_TOKEN/*_PASSWORD/*_PASS suffixes plus DATABASE_URL,
+  REDIS_URL, MONGO_URL and friends.
+    --show-secrets    print verbatim (audit args is stamped
+                      [secrets_exposed=true] on `exec`).
+    --redact-all      mask every KEY=VALUE pair, not just recognized
+                      keys.
+
+INNER EXIT CODE (P11)
+  `run` and `exec` propagate the remote command's exit code to your
+  shell. `inspect run arte/pulse -- 'exit 7'` returns 7. Mixed exits
+  across multiple targets fall back to 2.
 
 SAFETY CONTRACT
   1. DRY-RUN BY DEFAULT    No mutation without --apply. Ever.

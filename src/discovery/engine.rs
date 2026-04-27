@@ -93,6 +93,7 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
                 mounts: vec![],
                 kind: ServiceKind::HostListener,
                 depends_on: vec![],
+                discovery_incomplete: false,
             });
         }
         profile.warnings.extend(r.warnings);

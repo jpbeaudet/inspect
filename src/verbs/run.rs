@@ -46,6 +46,9 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let timeout_secs = args.timeout_secs.unwrap_or(120);
     let mut ok = 0usize;
     let mut bad = 0usize;
+    let mut last_inner: Option<i32> = None;
+    let mut all_same = true;
+    let masker = crate::redact::EnvSecretMasker::new(args.show_secrets, args.redact_all);
 
     for s in &steps {
         if crate::exec::cancel::is_cancelled() {
@@ -71,18 +74,19 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let ns_name = s.ns.namespace.clone();
 
         let exit = runner.run_streaming(&ns_name, &s.ns.target, &cmd, opts, &mut |line| {
+            let masked = masker.mask_line(line);
             if json {
                 JsonOut::write(
                     &Envelope::new(&ns_name, "run", "run")
                         .with_service(&svc_name)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
                 println!("{label} | {safe}");
@@ -90,15 +94,25 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         });
 
         match exit {
-            Ok(0) => ok += 1,
             Ok(code) => {
-                bad += 1;
-                if !json {
-                    eprintln!("{label}: exit {code}");
+                if code == 0 {
+                    ok += 1;
+                } else {
+                    bad += 1;
+                    if !json {
+                        eprintln!("{label}: exit {code}");
+                    }
                 }
+                if let Some(prev) = last_inner {
+                    if prev != code {
+                        all_same = false;
+                    }
+                }
+                last_inner = Some(code);
             }
             Err(e) => {
                 bad += 1;
+                all_same = false;
                 if !json {
                     eprintln!("{label}: {e}");
                 }
@@ -110,6 +124,16 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let mut r = Renderer::new();
         r.summary(format!("run: {ok} ok, {bad} failed"));
         r.print();
+    }
+
+    // P11 (v0.1.1): surface the remote command's exit code on
+    // single-target / uniform multi-target runs so shell idioms like
+    // `inspect run arte/api -- 'exit 7'` behave the way they would
+    // for a direct ssh.
+    if let Some(inner_code) = last_inner {
+        if all_same {
+            return Ok(ExitKind::Inner(crate::error::clamp_inner_exit(inner_code)));
+        }
     }
     Ok(if bad == 0 {
         ExitKind::Success

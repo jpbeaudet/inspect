@@ -42,6 +42,124 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     let mut any_lines = false;
 
+    // P5 (v0.1.1): merged multi-container view. We honor --since-last
+    // and the log-driver gate per source, then dispatch to the merger
+    // module which fans out execution and re-orders by RFC3339
+    // timestamp (batch) or arrival order (follow).
+    let merged_steps: Vec<_> = iter_steps(&nses, &targets).collect();
+    if args.merged && merged_steps.len() > 1 {
+        // Per-step preflight: cursor handling + log-driver rejection.
+        let mut sources: Vec<crate::verbs::merged::MergeSource> = Vec::new();
+        // Stash a per-step `args` clone so each source can have its own
+        // expanded `--since` from --since-last without poisoning peers.
+        let mut per_step_args: Vec<LogsArgs> = Vec::new();
+        for step in &merged_steps {
+            let svc_name = step.service().unwrap_or("_").to_string();
+            let mut step_args = args.clone();
+            if step_args.since_last {
+                let prev =
+                    crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
+                let since = match &prev {
+                    Some(c) if c.last_call > 0 => c.last_call.to_string(),
+                    _ => crate::verbs::cursor::default_since(),
+                };
+                step_args.since = Some(since);
+                let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
+                if let Err(e) = now.save() {
+                    if !args.format.is_json() {
+                        eprintln!("warn: failed to save cursor: {e}");
+                    }
+                }
+            }
+            // Driver gate.
+            if let Some(svc_def) = step.service_def() {
+                if let Some(driver) = svc_def.log_driver {
+                    if !driver.is_readable_via_docker_logs() {
+                        if !args.format.is_json() {
+                            eprintln!(
+                                "{}/{}: log driver `{}` is not readable via `docker logs` -- skipped in merged view",
+                                step.ns.namespace,
+                                svc_name,
+                                driver.as_str(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
+            per_step_args.push(step_args);
+        }
+        // Build the source list with command strings derived from each
+        // step's args clone.
+        let live_steps: Vec<_> = merged_steps
+            .iter()
+            .filter(|step| {
+                step.service_def()
+                    .and_then(|s| s.log_driver)
+                    .map(|d| d.is_readable_via_docker_logs())
+                    .unwrap_or(true)
+            })
+            .collect();
+        for (step, step_args) in live_steps.iter().zip(per_step_args.iter()) {
+            let cmd = build_logs(
+                step.service_def(),
+                step.service(),
+                step.container(),
+                step_args,
+            );
+            sources.push(crate::verbs::merged::MergeSource {
+                namespace: step.ns.namespace.as_str(),
+                target: &step.ns.target,
+                svc: step.service().unwrap_or("_").to_string(),
+                cmd,
+            });
+        }
+        let json = args.format.is_json();
+        let timeout = if args.follow {
+            args.follow_timeout_secs.unwrap_or(60 * 60 * 8)
+        } else {
+            60
+        };
+        let total = if args.follow {
+            crate::verbs::merged::follow_merged(runner.as_ref(), &sources, timeout, |m| {
+                if json {
+                    crate::verbs::merged::print_json(
+                        // The MergeSource borrows namespace as &str; we
+                        // re-derive it from svc_idx into the source list.
+                        sources
+                            .get(m.svc_idx)
+                            .map(|s| s.namespace)
+                            .unwrap_or("_"),
+                        &m.svc,
+                        &m.line,
+                    );
+                } else {
+                    crate::verbs::merged::print_human(&m.svc, &m.line);
+                }
+            })?
+        } else {
+            crate::verbs::merged::batch_merged(runner.as_ref(), &sources, timeout, |m| {
+                if json {
+                    crate::verbs::merged::print_json(
+                        sources
+                            .get(m.svc_idx)
+                            .map(|s| s.namespace)
+                            .unwrap_or("_"),
+                        &m.svc,
+                        &m.line,
+                    );
+                } else {
+                    crate::verbs::merged::print_human(&m.svc, &m.line);
+                }
+            })?
+        };
+        return Ok(if total > 0 {
+            ExitKind::Success
+        } else {
+            ExitKind::NoMatches
+        });
+    }
+
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
 
@@ -123,7 +241,11 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         }
 
         let opts = RunOpts::with_timeout(60);
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)?;
+        let label = format!("logs {}/{}", step.ns.namespace, svc_name);
+        let show_progress = !args.format.is_json();
+        let out = crate::verbs::progress::with_progress(&label, show_progress, || {
+            runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)
+        })?;
         if !out.ok() && out.stdout.is_empty() {
             if !args.format.is_json() {
                 eprintln!(
@@ -253,6 +375,11 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
     };
     if args.follow {
         s.push_str(" -f");
+    }
+    if args.merged {
+        // P5: required so the merger has a parseable RFC3339 prefix
+        // on every line. The merger strips it before printing.
+        s.push_str(" --timestamps");
     }
     if reconnect {
         // After a rotation we don't want the full history again.
@@ -409,6 +536,7 @@ mod tests {
             until: None,
             tail: None,
             follow,
+            merged: false,
             match_re: Vec::new(),
             exclude_re: Vec::new(),
             format: FormatArgs::default(),

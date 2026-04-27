@@ -189,6 +189,16 @@ pub struct Service {
     pub kind: ServiceKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// P13: when a per-container `docker inspect` timed out at
+    /// discovery time we surface a partial entry (name + container_id
+    /// only) and flag it here so `inspect setup --retry-failed` and
+    /// downstream verbs can detect incomplete data.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub discovery_incomplete: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Service {
@@ -343,6 +353,7 @@ mod tests {
             }],
             kind: ServiceKind::Container,
             depends_on: vec![],
+            discovery_incomplete: false,
         });
         p.remote_tooling.rg = true;
         p.remote_tooling.docker = true;
@@ -375,6 +386,7 @@ mod tests {
             mounts: vec![],
             kind: ServiceKind::Container,
             depends_on: vec![],
+            discovery_incomplete: false,
         });
         assert_ne!(a.fingerprint(), b.fingerprint());
     }

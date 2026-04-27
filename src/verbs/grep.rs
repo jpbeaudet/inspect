@@ -61,12 +61,16 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
             }
         }
         let cmd = build_grep_cmd(&step, &args, case_insensitive, step.ns.profile.as_ref());
-        let out = runner.run(
-            &step.ns.namespace,
-            &step.ns.target,
-            &cmd,
-            RunOpts::with_timeout(60),
-        )?;
+        let label = format!("grep {}/{}", step.ns.namespace, svc_for_cursor);
+        let show_progress = !args.format.is_json();
+        let out = crate::verbs::progress::with_progress(&label, show_progress, || {
+            runner.run(
+                &step.ns.namespace,
+                &step.ns.target,
+                &cmd,
+                RunOpts::with_timeout(60),
+            )
+        })?;
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
             if !args.format.is_json() {

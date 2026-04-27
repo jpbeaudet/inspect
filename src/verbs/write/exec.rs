@@ -62,6 +62,9 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut ok = 0usize;
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
+    let masker = crate::redact::EnvSecretMasker::new(args.show_secrets, args.redact_all);
+    let mut last_inner: Option<i32> = None;
+    let mut all_same = true;
 
     for s in &steps {
         let cmd = match s.container() {
@@ -87,11 +90,28 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
                 s.service().map(|x| format!("/{x}")).unwrap_or_default()
             ),
         );
-        e.args = user_cmd.clone();
+        // P4: stamp audit args with whether the operator opted into
+        // `--show-secrets` AND whether masking actually fired during
+        // this run, so post-hoc reviewers can distinguish verbatim
+        // output from masked output.
+        e.args = if args.show_secrets {
+            format!("{user_cmd} [secrets_exposed=true]")
+        } else if masker.was_active() {
+            format!("{user_cmd} [secrets_masked=true]")
+        } else {
+            user_cmd.clone()
+        };
         e.exit = out.exit_code;
         e.duration_ms = dur;
         e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&e)?;
+
+        if let Some(prev) = last_inner {
+            if prev != out.exit_code {
+                all_same = false;
+            }
+        }
+        last_inner = Some(out.exit_code);
 
         let label = format!(
             "{}{}",
@@ -103,7 +123,8 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             renderer.data_line(format!("{label}: ok ({}ms)", dur));
             if !out.stdout.trim().is_empty() {
                 for line in out.stdout.lines() {
-                    renderer.data_line(format!("  {line}"));
+                    let masked = masker.mask_line(line);
+                    renderer.data_line(format!("  {}", masked));
                 }
             }
         } else {
@@ -133,6 +154,15 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         .summary(format!("exec: {ok} ok, {bad} failed"))
         .next("inspect audit ls");
     renderer.print();
+
+    // P11: surface the remote command's exit code when the run was
+    // single-target or every target returned the same code. Mixed
+    // exits collapse to ExitKind::Error to keep `set -e` scripts safe.
+    if let Some(inner_code) = last_inner {
+        if all_same {
+            return Ok(ExitKind::Inner(crate::error::clamp_inner_exit(inner_code)));
+        }
+    }
     Ok(if bad == 0 {
         ExitKind::Success
     } else {

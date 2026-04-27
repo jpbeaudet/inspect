@@ -991,6 +991,12 @@ pub struct SetupArgs {
     /// without re-discovering.
     #[arg(long, conflicts_with_all = ["force", "skip_systemd", "skip_host_listeners"])]
     pub check_drift: bool,
+    /// P13: re-probe only the services flagged `discovery_incomplete`
+    /// in the cached profile (i.e. those whose `docker inspect` timed
+    /// out on the previous run). Cheaper than `--force` when only one
+    /// or two containers are wedged.
+    #[arg(long, conflicts_with_all = ["force", "check_drift"])]
+    pub retry_failed: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1161,7 +1167,7 @@ pub struct PsArgs {
     pub format: crate::format::FormatArgs,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 #[command(
     long_about = "Tail or view container logs. With `--follow`, streams new \
 records until interrupted; the inner SSH session auto-resumes on transient \
@@ -1196,6 +1202,12 @@ pub struct LogsArgs {
     /// Stream logs.
     #[arg(short = 'f', long)]
     pub follow: bool,
+    /// Merge logs from multiple matched services into a single stream
+    /// with `[svc]` prefixes. In batch mode (no `--follow`) lines are
+    /// k-way-merged by timestamp; in follow mode they arrive in
+    /// observed order (clock-skew caveat applies).
+    #[arg(long)]
+    pub merged: bool,
     /// Server-side regex filter: keep only lines matching this regex.
     /// Repeat the flag to OR multiple patterns. Pushed down to the
     /// remote host as a `grep -E` pipeline; in `--follow` mode uses
@@ -1405,6 +1417,13 @@ pub struct ExecArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+    /// Print KEY=VALUE secret values verbatim instead of masking them.
+    /// Off by default so log captures and screenshots are safe.
+    #[arg(long)]
+    pub show_secrets: bool,
+    /// Mask every line that looks like KEY=VALUE, regardless of key name.
+    #[arg(long)]
+    pub redact_all: bool,
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
@@ -1424,6 +1443,15 @@ pub struct RunArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+    /// Print KEY=VALUE secret values verbatim instead of masking them.
+    /// Off by default so log captures and screenshots are safe.
+    #[arg(long)]
+    pub show_secrets: bool,
+    /// Mask every line that looks like KEY=VALUE, regardless of the
+    /// key name. Useful when the remote command emits config blobs
+    /// you have not vetted.
+    #[arg(long)]
+    pub redact_all: bool,
     /// Server-side line filter (extended regex). Equivalent to piping
     /// the remote command through `grep -E <pattern>`. Quote shell
     /// metacharacters.

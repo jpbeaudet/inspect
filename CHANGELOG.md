@@ -5,6 +5,69 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — Phase C field-feedback patches
+
+Phase C of `INSPECT_v0.1.1_PATCH_SPEC.md`. Builds on Phases A + B;
+same v0.1.1 release.
+
+### Added
+
+- **P4 — Secret masking on `run`/`exec` stdout.** Lines that look like
+  `KEY=VALUE` and whose key matches a known secret pattern (suffixes
+  `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, `_PASS`, `_CREDENTIAL(S)`,
+  `_APIKEY`, `_AUTH`, `_PRIVATE`, `_ACCESS_KEY`, `_DSN`,
+  `_CONNECTION_STRING`; exact: `DATABASE_URL`, `REDIS_URL`, `MONGO_URL`,
+  `POSTGRES_URL`, `POSTGRESQL_URL`) are masked to `head4****tail2` by
+  default. Values shorter than 8 characters become `****`. The
+  `export ` prefix and matching quote pairs are preserved so the
+  output remains paste-friendly. Opt-out flags: `--show-secrets`
+  (verbatim, also stamps `[secrets_exposed=true]` into the audit
+  args on `exec`) and `--redact-all` (mask every KEY=VALUE line, not
+  just keys we recognize). When masking actually fired during an
+  `exec`, the audit args is stamped with `[secrets_masked=true]` so
+  reviewers can tell verbatim runs apart from masked ones.
+- **P5 — `--merged` multi-container log view.** `inspect logs <sel>
+  --merged` interleaves output from every selected service into a
+  single `[svc] <line>`-prefixed stream sorted by RFC3339 timestamp
+  (we inject `--timestamps` into the underlying `docker logs`
+  invocation). Batch mode does a parallel fan-out via
+  `std::thread::scope` then k-way merges the per-source buffers
+  through a `BinaryHeap<Reverse<MergeLine>>`. Follow mode pipes every
+  stream through a single `mpsc::channel` and prints in arrival
+  order. Lines without a parseable timestamp sink below dated lines
+  but preserve their per-source order.
+- **P9 — Progress spinner on slow log/grep fetches.** Hand-rolled
+  100ms-frame Unicode spinner drawn to stderr after a 700ms warm-up.
+  Suppressed automatically in JSON mode, when stderr is not a TTY,
+  and when `INSPECT_NO_PROGRESS=1` is set (used by CI and the
+  acceptance tests). No new dependencies.
+- **P11 — Inner exit code surfacing.** `ExitKind::Inner(u8)` is the
+  fourth process exit category, alongside `Success`/`NoMatches`/
+  `Error`. `inspect run -- 'exit 7'` and `inspect exec --apply --
+  'exit 9'` now propagate the remote command's exit code to the
+  shell. Multi-target invocations with mixed inner exits still fall
+  back to the generic `Error` (=2). High bits of the inner code are
+  clamped to the low 8 via `clamp_inner_exit`.
+- **P13 — Discovery `docker inspect` per-container fallback.** A
+  single wedged container used to take the entire host's
+  `inspect setup` down with it: the batched `docker inspect` would
+  hit the 30s budget and the whole result was discarded. We now
+  budget the batch call at 10s and on failure (timeout, partial JSON,
+  daemon hiccup) re-probe each container individually with a 5s
+  budget. Containers whose individual probe also fails are recorded
+  as a warning AND the corresponding `Service.discovery_incomplete`
+  bit is set in the persisted profile so later verbs can detect
+  partial data. `inspect setup --retry-failed` re-runs discovery and
+  merges in only the previously-incomplete services, leaving the
+  rest of the profile cached.
+
+### Acceptance
+
+- New `tests/phase_c_v011.rs`: 6 acceptance tests pinning P4 (Anthropic
+  key masking + `--show-secrets` audit breadcrumb), P9 (no spinner in
+  JSON mode), P11 (run + exec inner-exit propagation), P13
+  (`discovery_incomplete` round-trips through YAML).
+
 ## [0.1.1] — Phase B field-feedback patches
 
 Phase B of `INSPECT_v0.1.1_PATCH_SPEC.md`. Builds on Phase A; same
