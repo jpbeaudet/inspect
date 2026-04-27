@@ -84,13 +84,44 @@ verbs, and a tightened audit schema.
 - **`inspect audit ls`** gains `--bundle <id>` to filter to a single
   bundle invocation.
 
+### Defensive hardening (post-implementation audit pass)
+
+A code-reality audit of the whole tree (independent of phase
+numbering) surfaced and fixed five hardening items before release:
+
+- **`bundle/exec.rs::run_parallel_matrix`**: matrix workers now run
+  inside `std::panic::catch_unwind`. A panic inside a single branch
+  converts to a normal failure recorded in `first_err` with
+  `stop_flag` set, so rollback fires correctly instead of the panic
+  unwinding the scope and bypassing rollback semantics.
+- **`bundle/exec.rs`** (4 sites): replaced `.expect()`/`.unwrap()`
+  on validated invariants (matrix presence, watch body presence)
+  with `?` returning `anyhow!()` errors. Defense in depth — if
+  validation ever regresses, the operator sees a clean error
+  instead of a panic.
+- **`safety/audit.rs::append`**: append now calls `f.sync_data()`
+  after `flush()`. Audit entries survive power loss on conformant
+  filesystems. Best-effort: warns and continues on filesystems that
+  don't implement `fsync` (some FUSE/network mounts) rather than
+  refusing to write the record.
+- **`bundle/checks.rs::http_ok`**: `curl` invocation gains
+  `--connect-timeout 5 --max-time 15`. A stuck HTTP endpoint can no
+  longer pin SSH for the full per-check timeout budget.
+- **`verbs/watch.rs::probe_http`** + `WatchArgs.insecure` +
+  `WatchStep.insecure`: same `curl` timeout guards, plus an opt-in
+  `--insecure` flag for self-signed staging endpoints. Disabled by
+  default; documented as not-for-production.
+
 ### Notes
 
 - New CLI surface: `inspect watch --help`, `inspect bundle --help`,
   `inspect bundle plan --help`, `inspect bundle apply --help`.
   All carry the canonical `See also: inspect help …` footer.
 - 27 test suites, 555+ tests. CI gates (`cargo fmt --all -- --check`,
-  `cargo build --locked`, `cargo test --locked`) all green.
+  `cargo build --locked`, `cargo test --locked`) all green. Clippy
+  reports only the pre-existing `result_large_err` advisories,
+  which are intentional for an SRE tool that maps services and
+  errors as first-class values.
 
 ## [0.1.1] — Phase C field-feedback patches
 

@@ -517,6 +517,12 @@ The audit log is **forensic, not tamper-proof**. A user with file
 access can edit or delete entries. For regulated environments,
 forward audit entries to an external log system.
 
+Every audit entry is `fdatasync(2)`'d after write, so it survives
+power loss on conformant filesystems. On filesystems that do not
+implement `fsync` (some FUSE/network mounts) `inspect` warns once
+and continues — it would rather record the entry than refuse the
+operation.
+
 ---
 
 ## 9. Output formats and scripting
@@ -659,6 +665,9 @@ Knobs that apply to all predicates:
 - `--interval <dur>` — poll interval (default `2s`).
 - `--timeout <dur>` — overall ceiling. Exits **124** when reached.
 - `--quiet` — suppress the per-tick status line.
+- `--insecure` (only with `--until-http`) — disables TLS
+  verification for self-signed staging endpoints. **Never use
+  against production.**
 
 Exit codes: **0** condition met, **124** timeout, **130** Ctrl-C,
 **2** invalid arguments. Each completed watch writes one audit

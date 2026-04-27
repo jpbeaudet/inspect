@@ -59,6 +59,10 @@ inspect watch arte/api \
 # Wait for a health endpoint to return 200, then exit.
 inspect watch arte/api --until-http http://localhost/health --match 'status == 200'
 
+# Same against a self-signed staging endpoint.
+inspect watch staging/api --until-http https://10.0.0.5/health \
+  --insecure --match 'status == 200' --timeout 2m
+
 # Wait for a deploy to settle (output unchanged for 30 seconds).
 inspect watch arte/api --until-cmd 'docker ps --format "{{.Status}}" -f name=api' \
   --stable-for 30s --timeout 5m
