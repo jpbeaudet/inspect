@@ -10,7 +10,7 @@ use crate::config::namespace::validate_namespace_name;
 use crate::config::resolver;
 use crate::discovery::{
     self,
-    drift::{run_drift_check, DriftStatus},
+    drift::{format_diff_human, format_diff_json, run_drift_check, DriftStatus},
 };
 use crate::error::ExitKind;
 use crate::profile::cache::{is_stale, load_profile};
@@ -35,6 +35,8 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     if args.retry_failed {
         let prev = load_profile(&resolved.name)?
             .context("--retry-failed: no cached profile found; run `inspect setup` first")?;
+        // B1: fail fast on auth before re-probing.
+        precheck_or_bail(&resolved.name, &target)?;
         let opts = discovery::DiscoverOptions {
             skip_systemd: args.skip_systemd,
             skip_host_listeners: args.skip_host_listeners,
@@ -64,6 +66,10 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
         skip_host_listeners: args.skip_host_listeners,
     };
 
+    // B1: fail fast on auth instead of producing a half-empty profile
+    // full of "Permission denied" warnings.
+    precheck_or_bail(&resolved.name, &target)?;
+
     let profile = discovery::discover(&resolved.name, &target, opts)
         .with_context(|| format!("setup '{}'", resolved.name))?;
 
@@ -76,6 +82,13 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
 }
 
 fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Result<ExitKind> {
+    // Skip the SSH precheck when there's no cached profile: drift_only
+    // will short-circuit to NoCache without ever touching the network,
+    // and we shouldn't burn an ssh round-trip (or fail tests on hosts
+    // that aren't reachable) for a path that is fully local.
+    if load_profile(namespace)?.is_some() {
+        precheck_or_bail(namespace, target)?;
+    }
     let status = run_drift_check(namespace, target)?;
     let label = match &status {
         DriftStatus::NoCache => "no-cache",
@@ -85,12 +98,19 @@ fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Res
     };
     if as_json {
         let body = match &status {
-            DriftStatus::Drifted { current, cached } => format!(
-                "{{\"schema_version\":1,\"namespace\":{ns},\"drift\":{lbl},\"current_fingerprint\":{c},\"cached_fingerprint\":{p}}}",
+            DriftStatus::Drifted {
+                current,
+                cached,
+                diff,
+            } => format!(
+                "{{\"schema_version\":1,\"namespace\":{ns},\"drift\":{lbl},\
+                 \"current_fingerprint\":{c},\"cached_fingerprint\":{p},\
+                 \"diff\":{d}}}",
                 ns = json_string(namespace),
                 lbl = json_string(label),
                 c = json_string(current),
                 p = json_string(cached),
+                d = format_diff_json(diff),
             ),
             _ => format!(
                 "{{\"schema_version\":1,\"namespace\":{ns},\"drift\":{lbl}}}",
@@ -101,10 +121,9 @@ fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Res
         println!("{body}");
     } else {
         println!("SUMMARY: drift check for '{namespace}': {label}");
-        if let DriftStatus::Drifted { current, cached } = &status {
+        if let DriftStatus::Drifted { diff, .. } = &status {
             println!("DATA:");
-            println!("  cached:  {cached}");
-            println!("  current: {current}");
+            println!("{}", format_diff_human(diff));
             println!("NEXT:    inspect setup {namespace} --force");
         }
     }
@@ -268,4 +287,36 @@ fn merge_retry(prev: &Profile, fresh: &Profile) -> Profile {
     merged.warnings.extend(fresh.warnings.iter().cloned());
     merged.discovered_at = fresh.discovered_at.clone();
     merged
+}
+
+/// B1 (v0.1.2): run [`discovery::ssh_precheck`] and translate any
+/// failure into a fatal `anyhow::Error` carrying a chained,
+/// human-readable hint. The error message is shaped so that
+/// `error::topic_for_message()` will append `see: inspect help ssh`.
+fn precheck_or_bail(namespace: &str, target: &SshTarget) -> anyhow::Result<()> {
+    use crate::discovery::ssh_precheck::{
+        auth_failed_hint, host_key_changed_hint, run as run_precheck, unreachable_hint,
+        PrecheckOutcome,
+    };
+    match run_precheck(target) {
+        PrecheckOutcome::Ok => Ok(()),
+        PrecheckOutcome::AuthFailed { .. } => {
+            Err(anyhow::anyhow!(auth_failed_hint(namespace, target)))
+        }
+        PrecheckOutcome::HostKeyChanged { .. } => {
+            Err(anyhow::anyhow!(host_key_changed_hint(namespace, target)))
+        }
+        PrecheckOutcome::Unreachable { .. } => {
+            Err(anyhow::anyhow!(unreachable_hint(namespace, target)))
+        }
+        PrecheckOutcome::Other { stderr, exit_code } => Err(anyhow::anyhow!(
+            "ssh precheck for '{ns}' failed (exit {exit_code}): {stderr}\n  \
+             → check: ssh {host} (manual connection)\n  \
+             → then retry: inspect setup {ns}",
+            ns = namespace,
+            host = target.host,
+            exit_code = exit_code,
+            stderr = stderr.trim()
+        )),
+    }
 }

@@ -15,7 +15,7 @@ pub mod options;
 pub mod ttl;
 
 #[allow(unused_imports)]
-pub use exec::{run_remote, RemoteOutput, RunOpts};
+pub use exec::{run_remote, run_remote_streaming_capturing, RemoteOutput, RunOpts};
 #[allow(unused_imports)]
 pub use master::{
     check_socket, ensure_sockets_dir, exit_master, list_sockets, socket_path, start_master,

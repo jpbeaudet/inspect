@@ -32,6 +32,7 @@ pub mod run;
 pub mod runtime;
 pub mod status;
 pub mod volumes;
+pub mod watch;
 pub mod write;
 
 #[allow(unused_imports)]

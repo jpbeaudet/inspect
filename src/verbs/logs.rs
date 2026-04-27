@@ -148,6 +148,14 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         };
         return Ok(if total > 0 {
             ExitKind::Success
+        } else if !args.match_re.is_empty() && !args.follow {
+            // B3 (v0.1.2): same exit-0-with-notice contract as the
+            // non-merged path. We don't bother distinguishing per
+            // source here — the merged view is one logical stream.
+            if !args.format.is_json() {
+                eprintln!("{}", no_match_notice(&args));
+            }
+            ExitKind::Success
         } else {
             ExitKind::NoMatches
         });
@@ -240,6 +248,18 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)
         })?;
         if !out.ok() && out.stdout.is_empty() {
+            // B3 (v0.1.2): when `--match` is in play, the remote
+            // pipeline ends in `grep -E '<pat>'`, which exits 1 when
+            // it finds zero lines. That is the predicate doing its
+            // job, not a real failure. Suppress the spurious "logs
+            // failed" line in that case; the post-loop summary will
+            // emit a single, clear `(no matches …)` notice for the
+            // whole run instead.
+            let is_grep_no_match =
+                !args.match_re.is_empty() && out.exit_code == 1 && out.stderr.trim().is_empty();
+            if is_grep_no_match {
+                continue;
+            }
             if !args.format.is_json() {
                 eprintln!(
                     "{}/{}: logs failed (exit {}): {}",
@@ -274,9 +294,45 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     Ok(if any_lines {
         ExitKind::Success
+    } else if !args.match_re.is_empty() && !args.follow {
+        // B3 (v0.1.2): treat `inspect logs --match <pat>` with zero
+        // hits as a successful narrowing of the log view, not an
+        // error. Mirrors how operators read this flag ("filter the
+        // stream, tell me if there's anything") rather than how grep
+        // models it ("selector that fails when nothing matches").
+        // `inspect grep` keeps the grep convention. `--follow` paths
+        // never reach this branch — the stream stays open until the
+        // user cancels or the upstream times out.
+        if !args.format.is_json() {
+            eprintln!("{}", no_match_notice(&args));
+        }
+        ExitKind::Success
     } else {
         ExitKind::NoMatches
     })
+}
+
+/// B3 (v0.1.2): build the human-readable "(no matches for X in
+/// <window>)" line printed when `inspect logs --match` produces zero
+/// hits. Pulled out so the same message is reachable from both the
+/// per-step and merged code paths.
+fn no_match_notice(args: &LogsArgs) -> String {
+    let pats = args
+        .match_re
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let window = if let Some(s) = &args.since {
+        format!("{s} window")
+    } else if args.since_last {
+        "--since-last window".to_string()
+    } else if let Some(n) = args.tail {
+        format!("last {n} lines")
+    } else {
+        "current window".to_string()
+    };
+    format!("(no matches for {pats} in {window})")
 }
 
 fn build_logs(
@@ -568,5 +624,59 @@ mod tests {
         assert!(!s.contains("rm -rf /;"), "unquoted injection: {s}");
         // Still must mention the service name literally inside quotes.
         assert!(s.contains("svc;rm -rf /") || s.contains("'svc;rm -rf /'"));
+    }
+
+    // --- B3 (v0.1.2): friendly "(no matches ...)" notice ---
+
+    #[test]
+    fn no_match_notice_single_pattern_with_since() {
+        let mut a = args(false);
+        a.match_re = vec!["xyzzy".into()];
+        a.since = Some("5m".into());
+        assert_eq!(no_match_notice(&a), "(no matches for 'xyzzy' in 5m window)");
+    }
+
+    #[test]
+    fn no_match_notice_multiple_patterns_or_separated() {
+        let mut a = args(false);
+        a.match_re = vec!["foo".into(), "bar".into()];
+        a.since = Some("1h".into());
+        assert_eq!(
+            no_match_notice(&a),
+            "(no matches for 'foo' or 'bar' in 1h window)"
+        );
+    }
+
+    #[test]
+    fn no_match_notice_falls_back_to_tail_when_no_since() {
+        let mut a = args(false);
+        a.match_re = vec!["pat".into()];
+        a.tail = Some(50);
+        assert_eq!(
+            no_match_notice(&a),
+            "(no matches for 'pat' in last 50 lines)"
+        );
+    }
+
+    #[test]
+    fn no_match_notice_uses_since_last_label() {
+        let mut a = args(false);
+        a.match_re = vec!["pat".into()];
+        a.since_last = true;
+        assert_eq!(
+            no_match_notice(&a),
+            "(no matches for 'pat' in --since-last window)"
+        );
+    }
+
+    #[test]
+    fn no_match_notice_default_window_label() {
+        let mut a = args(false);
+        a.match_re = vec!["pat".into()];
+        // No since / since_last / tail -> generic label.
+        assert_eq!(
+            no_match_notice(&a),
+            "(no matches for 'pat' in current window)"
+        );
     }
 }

@@ -62,7 +62,7 @@ pub enum SelectorError {
          servers tried: {servers}\n  \
          services available: {services}\n  \
          groups available: {groups}\n  \
-         aliases available: {aliases}\n  \
+         aliases available: {aliases}{note}\n  \
          hint: run 'inspect profile <ns>' to see what was discovered, \
          or 'inspect setup <ns> --force' to refresh the cache"
     )]
@@ -72,6 +72,12 @@ pub enum SelectorError {
         services: String,
         groups: String,
         aliases: String,
+        /// B2 (v0.1.2): optional one-line migration breadcrumb when
+        /// the selector text looks like a pre-v0.1.1 long Docker
+        /// container name (e.g. `luminary-worker`) and a matching
+        /// short service name exists. Empty string when no
+        /// breadcrumb applies, so the format string is unconditional.
+        note: String,
     },
 }
 
@@ -153,12 +159,16 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
             .collect();
         let combined_aliases: BTreeSet<String> =
             all_pf_aliases.union(&global_aliases).cloned().collect();
+        let note = legacy_selector_note(sel, &all_services)
+            .map(|n| format!("\n  note: {n}"))
+            .unwrap_or_default();
         return Err(SelectorError::NoMatches {
             selector: sel.source.clone(),
             servers: fmt_set(&chosen_namespaces.iter().cloned().collect()),
             services: fmt_set(&all_services),
             groups: fmt_set(&all_groups),
             aliases: fmt_set(&combined_aliases),
+            note,
         });
     }
     Ok(targets)
@@ -170,6 +180,57 @@ fn fmt_set(s: &BTreeSet<String>) -> String {
     } else {
         s.iter().cloned().collect::<Vec<_>>().join(", ")
     }
+}
+
+/// B2 (v0.1.2): build a one-line migration breadcrumb when the user's
+/// selector text looks like a pre-v0.1.1 long Docker container name
+/// (e.g. `luminary-worker`) AND a matching short service name (e.g.
+/// `worker`) is present in the discovered profile. The note appears
+/// alongside the existing "services available" list so operators
+/// migrating from v0.1.0 immediately see *why* the old name stopped
+/// working.
+///
+/// Detection rules (deliberately narrow to avoid false positives):
+///   - applies only to literal `ServiceAtom::Pattern` atoms (no globs,
+///     no regex, no excludes)
+///   - the literal must contain at least one `-` (so plain short names
+///     never trigger)
+///   - the suffix after the last `-` must be a known short service
+///     name in the profile
+///
+/// When multiple atoms match the rule we surface only the first one,
+/// keeping the error compact. Returns `None` when no atom qualifies.
+///
+/// Removal target: drop in v0.3.0 once migration from v0.1.0 is old
+/// news (also tracked in the v0.1.2 backlog under B2).
+fn legacy_selector_note(sel: &Selector, services: &BTreeSet<String>) -> Option<String> {
+    let atoms = match sel.service.as_ref()? {
+        ServiceSpec::Atoms(a) => a,
+        ServiceSpec::Host | ServiceSpec::All => return None,
+    };
+    for atom in atoms {
+        let lit = match atom {
+            ServiceAtom::Pattern(p) => p,
+            ServiceAtom::Regex(_) | ServiceAtom::Exclude(_) => continue,
+        };
+        // Skip globs: a pattern like `luminary-*` is operator intent,
+        // not a leftover container name.
+        if lit.contains('*') || lit.contains('?') || lit.contains('[') {
+            continue;
+        }
+        let Some((_prefix, suffix)) = lit.rsplit_once('-') else {
+            continue;
+        };
+        if suffix.is_empty() {
+            continue;
+        }
+        if services.contains(suffix) {
+            return Some(format!(
+                "v0.1.1 uses discovered service names. '{lit}' is now '{suffix}'."
+            ));
+        }
+    }
+    None
 }
 
 /// Internal env-var pair set by `inspect fleet` to pin selector
@@ -459,5 +520,100 @@ mod tests {
         let mut got = match_servers(&spec, &all);
         got.sort();
         assert_eq!(got, vec!["prod-1".to_string(), "prod-2".to_string()]);
+    }
+
+    // --- B2 (v0.1.2): legacy selector migration breadcrumb ---
+
+    fn services(set: &[&str]) -> BTreeSet<String> {
+        set.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn sel_with_service(text: &str, atoms: Vec<ServiceAtom>) -> Selector {
+        Selector {
+            server: ServerSpec::Atoms(vec![ServerAtom::Pattern("arte".into())]),
+            service: Some(ServiceSpec::Atoms(atoms)),
+            path: None,
+            source: text.into(),
+        }
+    }
+
+    #[test]
+    fn b2_note_fires_when_long_name_suffix_matches_short_service() {
+        // Pre-v0.1.1 muscle memory: `luminary-worker` was the docker
+        // container name; v0.1.1 renames it to its short form `worker`.
+        let sel = sel_with_service(
+            "arte/luminary-worker",
+            vec![ServiceAtom::Pattern("luminary-worker".into())],
+        );
+        let services = services(&["worker", "api", "scheduler"]);
+        let note = legacy_selector_note(&sel, &services).expect("note expected");
+        assert_eq!(
+            note,
+            "v0.1.1 uses discovered service names. 'luminary-worker' is now 'worker'."
+        );
+    }
+
+    #[test]
+    fn b2_note_silent_when_suffix_is_not_a_known_service() {
+        let sel = sel_with_service(
+            "arte/luminary-frobnicator",
+            vec![ServiceAtom::Pattern("luminary-frobnicator".into())],
+        );
+        let services = services(&["worker", "api"]);
+        assert!(legacy_selector_note(&sel, &services).is_none());
+    }
+
+    #[test]
+    fn b2_note_silent_for_plain_short_name() {
+        // No `-` in the literal -> nothing to suggest.
+        let sel = sel_with_service("arte/worker", vec![ServiceAtom::Pattern("worker".into())]);
+        let services = services(&["worker"]);
+        assert!(legacy_selector_note(&sel, &services).is_none());
+    }
+
+    #[test]
+    fn b2_note_silent_for_globs_and_regex() {
+        // Globs and regex are operator intent, not legacy names.
+        let sel_glob = sel_with_service(
+            "arte/luminary-*",
+            vec![ServiceAtom::Pattern("luminary-*".into())],
+        );
+        let sel_regex = sel_with_service(
+            "arte/luminary-worker-1",
+            vec![ServiceAtom::Regex("luminary-\\w+".into())],
+        );
+        let services = services(&["worker"]);
+        assert!(legacy_selector_note(&sel_glob, &services).is_none());
+        assert!(legacy_selector_note(&sel_regex, &services).is_none());
+    }
+
+    #[test]
+    fn b2_note_silent_when_service_portion_is_host_or_all() {
+        let mk = |spec: ServiceSpec| Selector {
+            server: ServerSpec::Atoms(vec![ServerAtom::Pattern("arte".into())]),
+            service: Some(spec),
+            path: None,
+            source: "arte/_".into(),
+        };
+        let services = services(&["worker"]);
+        assert!(legacy_selector_note(&mk(ServiceSpec::Host), &services).is_none());
+        assert!(legacy_selector_note(&mk(ServiceSpec::All), &services).is_none());
+    }
+
+    #[test]
+    fn b2_note_picks_first_qualifying_atom() {
+        // If the user types two hyphenated names and both have a known
+        // short suffix, surface only the first one (compact error).
+        let sel = sel_with_service(
+            "arte/luminary-worker,nexus-api",
+            vec![
+                ServiceAtom::Pattern("luminary-worker".into()),
+                ServiceAtom::Pattern("nexus-api".into()),
+            ],
+        );
+        let services = services(&["worker", "api"]);
+        let note = legacy_selector_note(&sel, &services).expect("note expected");
+        assert!(note.contains("'luminary-worker' is now 'worker'"));
+        assert!(!note.contains("nexus-api"));
     }
 }

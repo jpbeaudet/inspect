@@ -50,8 +50,12 @@ pub fn safe_terminal_line(s: &str, max_bytes: usize) -> Cow<'_, str> {
     }
 
     // Build a sanitized copy. Bound the buffer to `max_bytes` (plus
-    // truncation marker) so a 100 MiB line cannot OOM us.
-    let cap = if needs_trunc { max_bytes + 64 } else { s.len() };
+    // truncation marker, ~128 bytes) so a 100 MiB line cannot OOM us.
+    let cap = if needs_trunc {
+        max_bytes + 128
+    } else {
+        s.len()
+    };
     let mut out = String::with_capacity(cap);
     let mut over_budget = false;
     let original_len = s.len();
@@ -75,7 +79,14 @@ pub fn safe_terminal_line(s: &str, max_bytes: usize) -> Cow<'_, str> {
         }
     }
     if over_budget {
-        out.push_str(&format!("... [truncated, full line: {original_len} bytes]"));
+        // B8 (v0.1.2): the previous marker `... [truncated, full line: N
+        // bytes]` was easy for a tired operator to miss when scanning
+        // tabular output (the cut row read like a normal continuation).
+        // The new marker uses bracket sigils that don't appear in
+        // typical log output and front-loads the word "TRUNCATED".
+        out.push_str(&format!(
+            " ⟪TRUNCATED: {max_bytes} of {original_len} bytes shown — pass --no-truncate to disable⟫",
+        ));
     }
     Cow::Owned(out)
 }
@@ -151,9 +162,10 @@ mod tests {
     fn safe_line_truncates_long_input() {
         let big = "x".repeat(10_000);
         let out = safe_terminal_line(&big, 4096);
-        assert!(out.len() <= 4096 + 64);
-        assert!(out.contains("truncated"));
+        assert!(out.len() <= 4096 + 200, "len was {}", out.len());
+        assert!(out.contains("TRUNCATED"));
         assert!(out.contains("10000 bytes"));
+        assert!(out.contains("--no-truncate"));
     }
 
     #[test]
@@ -164,7 +176,16 @@ mod tests {
         // Whatever we kept must be valid UTF-8 (test will panic
         // earlier if not).
         assert!(out.starts_with("🦀"));
-        assert!(out.contains("truncated"));
+        assert!(out.contains("TRUNCATED"));
+    }
+
+    #[test]
+    fn no_truncation_when_budget_is_max() {
+        // B8: callers pass usize::MAX to opt out of per-line truncation.
+        let big = "x".repeat(50_000);
+        let out = safe_terminal_line(&big, usize::MAX);
+        assert_eq!(out.len(), 50_000);
+        assert!(!out.contains("TRUNCATED"));
     }
 
     #[test]
