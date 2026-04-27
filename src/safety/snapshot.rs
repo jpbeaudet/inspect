@@ -76,6 +76,9 @@ mod tests {
 
     #[test]
     fn dedups_identical_content() {
+        let _guard = crate::paths::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("INSPECT_HOME", tmp.path());
         let s = SnapshotStore::open().unwrap();
