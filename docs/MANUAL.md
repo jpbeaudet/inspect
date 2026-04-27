@@ -1,0 +1,594 @@
+# `inspect` — User Manual
+
+> A hands-on manual for everyday use. The same material is also
+> available offline inside the binary via `inspect help <topic>`.
+> If anything in this file disagrees with `inspect help`, the in-binary
+> copy is authoritative — please open an issue.
+
+This manual is organized so you can read it top-to-bottom on day one and
+then come back to a single section when you need it.
+
+- [1. Install](#1-install)
+- [2. Concepts in 90 seconds](#2-concepts-in-90-seconds)
+- [3. First-time setup](#3-first-time-setup)
+- [4. Selectors — addressing servers and services](#4-selectors--addressing-servers-and-services)
+- [5. Read verbs — looking at things](#5-read-verbs--looking-at-things)
+- [6. Search — the LogQL DSL](#6-search--the-logql-dsl)
+- [7. Write verbs — changing things safely](#7-write-verbs--changing-things-safely)
+- [8. Audit and revert](#8-audit-and-revert)
+- [9. Output formats and scripting](#9-output-formats-and-scripting)
+- [10. Recipes](#10-recipes)
+- [11. Aliases and groups](#11-aliases-and-groups)
+- [12. Fleet operations](#12-fleet-operations)
+- [13. SSH lifecycle, ControlMaster, passphrases](#13-ssh-lifecycle-controlmaster-passphrases)
+- [14. Configuration reference](#14-configuration-reference)
+- [15. Troubleshooting](#15-troubleshooting)
+- [16. Translation guide (grep / stern / ssh / sed)](#16-translation-guide-grep--stern--ssh--sed)
+
+---
+
+## 1. Install
+
+The recommended path is the one-line installer. Every step is local,
+verifies a SHA-256 sum (and a cosign signature if `cosign` is on
+`$PATH`), and installs atomically.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jpbeaudet/inspect/main/scripts/install.sh | sh
+```
+
+You can pin a version, change the destination, or skip signature
+verification:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --version v0.1.0 --prefix /usr/local
+curl -fsSL .../install.sh | sh -s -- --no-verify
+```
+
+After installation, confirm the binary works:
+
+```sh
+inspect --version
+inspect help
+```
+
+If `~/.local/bin` is not on `$PATH` (the default install root), the
+installer prints a reminder. Add it to your shell profile.
+
+Other install paths (Homebrew tap, `cargo install inspect-cli`, or a
+direct download from GitHub Releases) are documented in the
+[README](../README.md#install).
+
+---
+
+## 2. Concepts in 90 seconds
+
+There are five things to know.
+
+1. **Namespace.** A short name (e.g. `arte`, `prod-eu-1`) that maps to
+   one host you reach over SSH. Configured once via `inspect add`,
+   stored in `~/.inspect/`, and used as the first part of every
+   selector.
+2. **Profile.** A cached snapshot of what is on a host (containers,
+   volumes, networks, listening ports). Built by `inspect setup
+   <namespace>` and stored at `~/.inspect/profiles/<ns>.yaml`. Profiles
+   make selectors fast and offline-friendly.
+3. **Selector.** A short string that addresses one or more targets:
+   `arte/atlas`, `arte/_:/etc/foo`, `prod-*/storage`. See §4.
+4. **Verb.** What you want to do — `ps`, `logs`, `grep`, `edit`,
+   `restart`, `search`. Read verbs run immediately. Write verbs are
+   dry-run by default and require `--apply` to take effect.
+5. **Audit / revert.** Every `--apply` is recorded under
+   `~/.inspect/audit/` along with a snapshot of the original. Anything
+   you change you can roll back with `inspect revert <audit-id>`.
+
+That is the entire mental model. The rest of the manual is detail.
+
+---
+
+## 3. First-time setup
+
+### 3.1 Make sure SSH already works
+
+`inspect` shells out to your system `ssh`, so it inherits your
+`~/.ssh/config`. Before adding a namespace, verify that the host is
+reachable:
+
+```sh
+ssh arte hostname
+```
+
+If that fails, fix it the usual way (key, host entry, jump host, etc.)
+before going further. `inspect` will not paper over a broken SSH setup.
+
+### 3.2 Register the namespace
+
+```sh
+inspect add arte
+```
+
+This is interactive. It walks you through host, user, key path, and
+optional Docker socket location, and writes the result to your local
+config. You can also pre-set everything via environment variables —
+useful for headless setups:
+
+```sh
+INSPECT_ARTE_HOST=arte.example.com \
+INSPECT_ARTE_USER=ops \
+INSPECT_ARTE_KEY_PATH=~/.ssh/id_ed25519 \
+inspect add arte --non-interactive
+```
+
+### 3.3 Open a persistent session
+
+```sh
+inspect connect arte
+```
+
+This unlocks the SSH agent / key once and keeps a `ControlMaster`
+socket open for the rest of the shell, so subsequent `inspect`
+invocations do not prompt for a passphrase. See §13 for the full
+SSH lifecycle.
+
+### 3.4 Discover the topology
+
+```sh
+inspect setup arte
+```
+
+This walks the remote host with low-impact probes (no `apt`, no
+`systemctl restart`) and writes `~/.inspect/profiles/arte.yaml`. The
+profile is mode `0600` and contains no secrets. Re-run with `--force`
+when the host changes (new container, new mount, etc.) — `inspect`
+will also tell you when it detects drift.
+
+### 3.5 Verify
+
+```sh
+inspect ps arte           # what containers are running
+inspect status arte       # health summary
+inspect list              # all namespaces you've registered
+inspect show arte         # one namespace's details
+```
+
+If `ps` is empty but the host has containers, the SSH user probably
+cannot talk to the Docker socket. Re-run `inspect add arte` and adjust
+the `docker_socket` (or add the user to the `docker` group on the
+remote).
+
+---
+
+## 4. Selectors — addressing servers and services
+
+Every read or write verb takes a selector as its primary argument. The
+grammar is small and consistent.
+
+```
+<selector> ::= <server>[/<service>][:<path>]   |   @<alias>
+```
+
+| Form | Meaning |
+|---|---|
+| `arte` | every service on `arte` |
+| `arte/atlas` | one service |
+| `arte/atlas,pulse` | two services |
+| `arte/storage` | a profile group (see §11) |
+| `'prod-*/storage'` | glob across servers (quote it!) |
+| `'arte/^pulse-.*$'` | regex (slashes optional, must quote) |
+| `arte/_` | host scope — for ports, host files, systemd units |
+| `arte/atlas:/etc/atlas.conf` | one file inside a container |
+| `arte/_:/var/log/syslog` | a host-level file |
+| `@plogs` | a saved alias (see §11) |
+
+### Resolution order
+
+1. Container short name (`pulse`, `atlas`).
+2. Aliases declared in the profile.
+3. Groups declared in the profile.
+4. Globs (`*`) and regex (`/.../` or quoted `^...$`).
+5. Subtractive (`~name`) — exclude after match.
+
+If a name matches both a service and a group, the service wins and a
+warning is emitted.
+
+### Empty resolution is not silent
+
+A selector that matches nothing prints the available servers, services,
+groups, and aliases for the addressed namespace. There is no silent
+no-op — if you don't see what you expect, the diagnostic is right
+there.
+
+### Quoting
+
+Globs and regex must be single-quoted to keep your shell from
+expanding them: `'prod-*'`, `'arte/^pulse-.*$'`. The colon path
+separator does not need quoting unless the path itself has shell-
+special characters.
+
+For a deeper reference: `inspect help selectors`.
+
+---
+
+## 5. Read verbs — looking at things
+
+| Verb | What it does |
+|---|---|
+| `ps` | running containers / services |
+| `status` | one-line health per service |
+| `health` | detailed health probe results |
+| `logs` | container or host logs |
+| `cat` | a file (container or host) |
+| `grep <pattern>` | grep across logs and/or files |
+| `find` | find files by name/glob |
+| `ls` | list a directory |
+| `network` | container networks |
+| `images` | container images |
+| `volumes` | mounted volumes |
+| `ports` | host listening ports |
+| `resolve <selector>` | print what a selector matches without running anything |
+
+Common flags that work on most read verbs:
+
+- `--since 1h --until 5m` — time window
+- `--tail 100` — last N records
+- `--follow` / `-f` — stream as new records arrive
+- `--json` / `--jsonl` / `--csv` / `--md` / `--table` / `--format <go>` — output (see §9)
+- `--timeout 30s` — give up if a host doesn't answer
+- `--no-color` — for log capture
+
+Examples:
+
+```sh
+inspect logs arte/atlas --since 30m --tail 200 --follow
+inspect grep -i 'oom' arte/_ --since 1h
+inspect cat arte/atlas:/etc/atlas.conf
+inspect resolve 'prod-*/storage'
+```
+
+---
+
+## 6. Search — the LogQL DSL
+
+`inspect search` is the cross-medium query engine. It uses the same
+syntax as Grafana Loki's LogQL and runs over logs, files, and host
+state.
+
+```sh
+inspect search '{server="arte", source="logs"} |= "error"' --since 1h
+```
+
+### 6.1 Reserved labels
+
+| Label | Meaning |
+|---|---|
+| `server` | namespace (`arte`, `prod-eu`) |
+| `service` | container/service tag, or `_` for host-scoped |
+| `source` | medium: `logs`, `file:/path`, `dir:/path`, `discovery`, `state`, `volume:name`, `image`, `network`, `host:/path` |
+
+### 6.2 Selector matchers
+
+Inside `{ ... }` use `=`, `!=`, `=~` (regex), `!~` (not regex). Combine
+multiple sources with `or`:
+
+```
+{server="arte", service="pulse", source="logs"} or {server="arte", service="atlas", source="file:/etc/atlas.conf"}
+```
+
+### 6.3 Line filters
+
+| Operator | Meaning |
+|---|---|
+| `\|= "x"` | line contains `x` |
+| `!= "x"` | line does not contain `x` |
+| `\|~ "rx"` | regex match |
+| `!~ "rx"` | regex not match |
+
+### 6.4 Pipeline stages (log queries)
+
+Streaming, applied record-by-record:
+
+```
+| json
+| logfmt
+| pattern "<pattern>"
+| regexp "<regex>"
+| line_format "{{.field}}"
+| label_format new=expr
+| <field> <op> <value>     # ==, !=, >, >=, <, <=, =~, !~
+| drop label1, label2
+| keep label1, label2
+| map { <sub-query> }      # cross-medium chain ($field$ interpolation)
+```
+
+### 6.5 Metric queries
+
+Whole-window aggregates (a query is **either** a log query **or** a
+metric query, never both):
+
+```
+count_over_time({...} |= "..." [5m])
+rate({...} [5m])
+sum by (service) (count_over_time({...} |= "error" [5m]))
+topk(5, sum by (service) (rate({...} [1h])))
+```
+
+Plus `avg`, `min`, `max`, `bottomk`, `quantile_over_time`,
+`bytes_over_time`, `bytes_rate`, `absent_over_time`, with
+`by`/`without` grouping.
+
+### 6.6 Reference
+
+For the full reference: `inspect help search` and Loki's docs at
+<https://grafana.com/docs/loki/latest/query/>. Behavior parity is the
+goal — please file mismatches.
+
+---
+
+## 7. Write verbs — changing things safely
+
+Write verbs are **dry-run by default**. The first invocation always
+shows what would happen; you have to add `--apply` to enact it.
+
+| Verb | What it changes |
+|---|---|
+| `restart` / `stop` / `start` / `reload` | container/service lifecycle |
+| `cp <src> <dst>` | push or pull a file (dry-run shows the diff) |
+| `edit <sel>:<path> '<sed-expr>'` | in-place atomic edit |
+| `rm` / `mkdir` / `touch` | filesystem operations |
+| `chmod` / `chown` | permission changes |
+| `exec <sel> -- <cmd>` | arbitrary command (gated, see below) |
+
+### Safety contract
+
+1. **Dry-run by default.** No mutation happens without `--apply`.
+2. **Diff first.** `edit` and `cp` print a unified diff before any
+   change.
+3. **Audit log.** Every `--apply` is appended to
+   `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
+4. **Snapshots.** The original content is saved under
+   `~/.inspect/audit/snapshots/<sha>` before mutation.
+5. **Confirmation prompts.** `rm`, `chmod`, and `chown` prompt
+   interactively even with `--apply`. Skip with `--yes`.
+6. **Atomic writes.** `edit` writes a tempfile, then renames.
+7. **Large fan-out guard.** More than 10 targets prompts even with
+   `--apply`. Skip with `--yes-all`.
+8. **`exec` is special.** It additionally requires `--allow-exec`
+   so a misclick cannot shell out across the fleet.
+
+### A typical hot-fix flow
+
+```sh
+# 1. Preview
+inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/'
+
+# 2. Apply
+inspect edit arte/atlas:/etc/atlas.conf 's/timeout=30/timeout=60/' --apply
+
+# 3. Restart the affected service
+inspect restart arte/atlas --apply
+
+# 4. Verify
+inspect logs arte/atlas --since 30s --follow
+```
+
+For the deep dive: `inspect help write`.
+
+---
+
+## 8. Audit and revert
+
+```sh
+inspect audit ls --limit 20          # recent mutations
+inspect audit show <id>              # one entry with diff summary
+inspect audit grep "atlas"           # search audit entries
+inspect revert <audit-id>            # preview the reverse diff
+inspect revert <audit-id> --apply    # restore the original
+```
+
+Audit entries record: timestamp, user, host, verb, selector, args,
+diff summary, previous and new SHA-256, snapshot path, exit code,
+duration. Mode `0600`.
+
+If the file changed since your edit (hash mismatch), `revert` warns
+and refuses without `--force`. That is a feature — it stops you from
+clobbering a more recent change.
+
+The audit log is **forensic, not tamper-proof**. A user with file
+access can edit or delete entries. For regulated environments,
+forward audit entries to an external log system.
+
+---
+
+## 9. Output formats and scripting
+
+Every command supports the same output flags:
+
+| Flag | Output |
+|---|---|
+| `--json` | `summary | data | next` envelope, single JSON object |
+| `--jsonl` | one JSON record per line (good for streaming) |
+| `--csv` | comma-separated, with header |
+| `--table` | aligned ASCII table (default for TTYs) |
+| `--md` | Markdown table (great for issue comments) |
+| `--format '<go-template>'` | Go-template over each record |
+| `--raw` | unformatted (e.g. raw log lines) |
+
+The JSON envelope has a `schema_version` field. New fields are
+non-breaking; renames or removals bump the major. See
+[docs/RUNBOOK.md](RUNBOOK.md) §4.
+
+A few common patterns:
+
+```sh
+# Top 10 services by error count over 1h
+inspect search 'topk(10, sum by (service) (count_over_time({source="logs"} |= "error" [1h])))' --json | jq
+
+# Restart everything that errored in the last 5 minutes
+inspect search '{source="logs"} |= "OOM"' --since 5m --json \
+  | jq -r '.service' | sort -u \
+  | xargs -I{} inspect restart arte/{} --apply
+
+# Markdown status block for a GitHub issue
+inspect fleet --ns 'prod-*' status --md
+```
+
+For the full reference: `inspect help formats`.
+
+---
+
+## 10. Recipes
+
+A recipe is a named sequence of `inspect` invocations — a runbook in
+data form. Two flavors ship:
+
+- **Built-ins.** Compiled into the binary. List them with
+  `inspect recipe list`.
+- **User recipes.** YAML files under `~/.inspect/recipes/`. They follow
+  the same dry-run/apply contract as the verbs they call.
+
+```sh
+inspect recipe list
+inspect recipe run why-noisy arte/atlas
+inspect recipe run rotate-cert prod-eu/atlas --apply
+```
+
+Mutating recipe steps respect `--apply` exactly the way the
+underlying verbs do. For more detail: `inspect help recipes`.
+
+---
+
+## 11. Aliases and groups
+
+### Aliases
+
+Save a selector under a short name and reuse it everywhere:
+
+```sh
+inspect alias add @plogs 'arte/pulse,atlas/_:/var/log/*.log'
+inspect alias ls
+inspect logs @plogs --since 1h
+```
+
+Aliases work both as raw arguments and inside LogQL queries.
+
+### Groups
+
+Groups are defined inside a profile (`~/.inspect/profiles/<ns>.yaml`)
+or in a shared config:
+
+```yaml
+groups:
+  storage: [postgres, milvus, redis, minio]
+  edge:    [nginx, envoy]
+```
+
+Use them in selectors: `inspect status arte/storage`.
+
+For the full reference: `inspect help aliases`.
+
+---
+
+## 12. Fleet operations
+
+`inspect fleet` is the orchestrator for multi-namespace operations.
+
+```sh
+inspect fleet --ns 'prod-*' status
+inspect fleet --ns arte,beta ps
+inspect fleet --ns 'prod-*' restart atlas --apply --yes-all
+```
+
+Concurrency is bounded (default 4, override with
+`INSPECT_MAX_PARALLEL` or `--max-parallel`). The output is grouped per
+namespace; partial failures do not abort the rest. The JSON envelope's
+`summary.failed` and `data[*].namespace` fields make scripted handling
+predictable.
+
+The large-fan-out prompt fires here too. Always do a `--ns ... status`
+or `--ns ... resolve` first to confirm the blast radius.
+
+For more: `inspect help fleet`.
+
+---
+
+## 13. SSH lifecycle, ControlMaster, passphrases
+
+`inspect` does **not** read your passphrase. It uses your system
+`ssh`, which is configured to use `ControlMaster` so you only unlock
+your key once per shell.
+
+```sh
+inspect connect arte             # opens the master socket
+inspect connections              # show open masters
+inspect disconnect arte          # close one
+inspect disconnect-all           # close all
+```
+
+If something looks wrong:
+
+- Ports tied up: `inspect disconnect-all`, then `inspect connect <ns>`.
+- "ssh: connection refused": check `~/.ssh/config` for the namespace
+  host. `inspect` does not invent connection info.
+- Hung command: send `SIGINT` once; the run cancels and emits a
+  partial-result envelope (no orphan SSH children).
+
+For the full reference: `inspect help ssh` (and `inspect help ssh
+--verbose` for the deep details on `ControlMaster`).
+
+---
+
+## 14. Configuration reference
+
+| Path | Purpose |
+|---|---|
+| `~/.inspect/config.toml` | namespaces, defaults, global aliases |
+| `~/.inspect/profiles/<ns>.yaml` | discovered topology per namespace, mode 0600 |
+| `~/.inspect/recipes/*.yaml` | user-defined recipes |
+| `~/.inspect/audit/<YYYY-MM>-<user>.jsonl` | audit log |
+| `~/.inspect/audit/snapshots/<sha>` | original-content snapshots for revert |
+
+Useful environment variables:
+
+| Variable | Effect |
+|---|---|
+| `INSPECT_<NS>_HOST` / `_USER` / `_KEY_PATH` | non-interactive `add` |
+| `INSPECT_MAX_PARALLEL` | fleet concurrency cap (default 4) |
+| `INSPECT_PREFIX` | install root for the one-line installer |
+| `INSPECT_VERSION` | pin a version for the installer |
+| `NO_COLOR` | disable ANSI in output |
+
+---
+
+## 15. Troubleshooting
+
+| Symptom | First check | Likely cause |
+|---|---|---|
+| `inspect` exits 2 with `ssh: connection refused` | `~/.ssh/config` has the namespace host | namespace not configured locally |
+| Empty `ps` output, no error | `inspect setup <ns> --force` | stale or missing profile, or Docker socket not reachable |
+| `cargo build` failure on a fresh clone | rust-toolchain pin (1.75 minimum) | MSRV drift |
+| Hung command, no output | `SIGINT` once; check `inspect why <selector>` | SSH ControlMaster stall |
+| Slow first results across many servers | `INSPECT_MAX_PARALLEL=8 inspect …` | concurrency cap |
+| Secrets visible in `--json` output | open a P0 issue | redactor bug — this is a contract |
+| Selector "matches nothing" | the diagnostic lists what is available | typo, drifted profile, or wrong namespace |
+
+For maintainer-side incident handling, see [RUNBOOK.md](RUNBOOK.md) §3.
+
+---
+
+## 16. Translation guide (grep / stern / ssh / sed)
+
+You probably already know the shape of the work. Here's how it maps.
+
+| You usually do | With `inspect` |
+|---|---|
+| `grep -i "error" file.log` | `inspect grep "error" arte/atlas:/var/log/atlas.log -i` |
+| `stern --since 30m pulse` | `inspect logs arte/pulse --since 30m` |
+| `kubectl logs <pod> --since=30m \| grep -i error` | `inspect grep "error" arte/pulse --since 30m -i` |
+| `ssh box "docker logs pulse --since 30m \| grep error"` | `inspect grep "error" arte/pulse --since 30m` |
+| `ssh box "sudo sed -i 's/old/new/' /etc/foo.conf"` | `inspect edit arte/_:/etc/foo.conf 's/old/new/' --apply` |
+| `scp ./file.conf box:/etc/file.conf` | `inspect cp ./file.conf arte/_:/etc/file.conf --apply` |
+| `ssh box "docker restart pulse"` | `inspect restart arte/pulse --apply` |
+| Loki: `{job="varlogs"} \|= "error"` | `inspect search '{server="arte", source="logs"} \|= "error"'` |
+
+For a longer cookbook (and worked metric queries):
+`inspect help examples`.

@@ -90,9 +90,7 @@ pub fn safe_machine_line(s: &str) -> Cow<'_, str> {
     }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' {
-            out.push('?');
-        } else if c == '\u{7F}' {
+        if ((c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r') || c == '\u{7F}' {
             out.push('?');
         } else {
             out.push(c);

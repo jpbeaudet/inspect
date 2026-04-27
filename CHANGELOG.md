@@ -5,6 +5,29 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — documentation
+
+- `docs/MANUAL.md`: end-user manual covering install, concepts, every
+  verb, the LogQL DSL, recipes, fleet ops, configuration, and
+  troubleshooting. Mirrors the in-binary `inspect help <topic>` content.
+- `docs/RELEASING.md`: maintainer notes for cutting a tag, hosting the
+  install script, hotfix flow, and updating the Homebrew tap.
+- `CONTRIBUTING.md`, `SECURITY.md`: standard public-repo files
+  documenting the dev loop, quality gates, and the vulnerability
+  disclosure process.
+- `archives/README.md`: marks the planning archive as historical and
+  points readers at the active docs.
+
+### Changed — documentation
+
+- Root `README.md` rewritten for the public release: clearer pitch,
+  table of contents, "How it works" diagram, documentation map, and
+  an explicit note that the install URL is served by GitHub directly
+  (no separate server to deploy).
+- `.gitignore` extended to cover common editor/OS artifacts.
+
 ## [0.1.0] — 2026-04-26
 
 First public release.

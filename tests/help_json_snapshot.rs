@@ -53,7 +53,7 @@ fn top_level_keys_are_pinned() {
         "source_types",
         "topics",
     ];
-    let expected: Vec<&str> = expected.iter().copied().collect();
+    let expected: Vec<&str> = expected.to_vec();
     assert_eq!(
         keys, expected,
         "top-level JSON keys drifted; bump schema_version intentionally if this is on purpose"
@@ -70,7 +70,7 @@ fn topic_envelope_keys_are_pinned() {
         let obj = t.as_object().expect("topic is object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
-        let exp: Vec<&str> = expected.iter().copied().collect();
+        let exp: Vec<&str> = expected.to_vec();
         assert_eq!(keys, exp, "topic envelope keys drifted: {:?}", t);
     }
 }
@@ -97,7 +97,7 @@ fn command_envelope_keys_are_pinned() {
         let obj = c.as_object().expect("command is object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
-        let exp: Vec<&str> = expected.iter().copied().collect();
+        let exp: Vec<&str> = expected.to_vec();
         assert_eq!(keys, exp, "command envelope for {verb} drifted");
     }
 }
@@ -124,7 +124,7 @@ fn flag_envelope_keys_are_pinned() {
         let obj = f.as_object().expect("flag is object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
-        let exp: Vec<&str> = expected.iter().copied().collect();
+        let exp: Vec<&str> = expected.to_vec();
         assert_eq!(keys, exp, "flag envelope for grep drifted: {f:?}");
     }
 }
@@ -192,7 +192,7 @@ fn topic_envelope_for_quickstart() {
     let obj = v["topic"].as_object().unwrap();
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort();
-    let exp: Vec<&str> = expected.iter().copied().collect();
+    let exp: Vec<&str> = expected.to_vec();
     assert_eq!(keys, exp);
 }
 
@@ -215,7 +215,7 @@ fn errors_catalog_shape_is_pinned() {
         let obj = e.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
-        let exp: Vec<&str> = expected.iter().copied().collect();
+        let exp: Vec<&str> = expected.to_vec();
         assert_eq!(keys, exp);
     }
 }

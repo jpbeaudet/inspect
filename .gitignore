@@ -1,4 +1,14 @@
+# Build output
 /target
 Cargo.lock.bak
+
+# Editor / OS junk
 *.swp
+*.swo
 .DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Local inspect state (only relevant if you run inspect inside the repo)
+.inspect/

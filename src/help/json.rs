@@ -88,10 +88,7 @@ pub fn render_full(pretty: bool) -> String {
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>(),
         );
-        w.field_array_of_strings(
-            "see_also",
-            &topics_for_verb(name).iter().copied().collect::<Vec<_>>(),
-        );
+        w.field_array_of_strings("see_also", topics_for_verb(name));
         w.kv_string("see_also_line", &see_also_line(name));
         w.begin_array_field("flags");
         for arg in sub.get_arguments() {
@@ -259,11 +256,8 @@ fn command_examples(sub: &clap::Command) -> Vec<String> {
     long.lines()
         .filter_map(|l| {
             let t = l.trim_start();
-            if let Some(rest) = t.strip_prefix("$ inspect ") {
-                Some(format!("inspect {}", rest))
-            } else {
-                None
-            }
+            t.strip_prefix("$ inspect ")
+                .map(|rest| format!("inspect {}", rest))
         })
         .collect()
 }

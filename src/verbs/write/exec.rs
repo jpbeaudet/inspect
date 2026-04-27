@@ -118,11 +118,10 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             // the operator knows to either install a shell in the
             // image or use `docker cp` for file IO.
             let stderr_msg = if looks_like_no_shell(&out.stderr) {
-                format!(
-                    "container has no `sh` (distroless/scratch image): \
-                     `inspect exec` requires a shell on the target. \
-                     Use `inspect cp` for file transfer, or rebuild the image with a busybox/alpine layer."
-                )
+                "container has no `sh` (distroless/scratch image): \
+                 `inspect exec` requires a shell on the target. \
+                 Use `inspect cp` for file transfer, or rebuild the image with a busybox/alpine layer."
+                    .to_string()
             } else {
                 out.stderr.trim().to_string()
             };

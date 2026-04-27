@@ -45,7 +45,13 @@ pub fn nofile_soft_limit() -> Option<u64> {
         if libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) != 0 {
             return None;
         }
-        Some(rlim.assume_init().rlim_cur as u64)
+        // `rlim_cur` is `rlim_t`, which is `u64` on every Tier-1 target
+        // (glibc/musl Linux x86_64+aarch64, macOS x86_64+aarch64). The
+        // explicit cast was redundant on those platforms; if a future
+        // target ships a narrower `rlim_t`, this widening conversion is
+        // the right thing to add back.
+        #[allow(clippy::useless_conversion)]
+        Some(u64::from(rlim.assume_init().rlim_cur))
     }
     #[cfg(not(unix))]
     {
