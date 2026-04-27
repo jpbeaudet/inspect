@@ -3,6 +3,15 @@
 [![ci](https://github.com/jpbeaudet/inspect/actions/workflows/ci.yml/badge.svg)](https://github.com/jpbeaudet/inspect/actions/workflows/ci.yml)
 [![release](https://github.com/jpbeaudet/inspect/actions/workflows/release.yml/badge.svg)](https://github.com/jpbeaudet/inspect/actions/workflows/release.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#stability)
+
+> ⚠️ **Experimental until v0.2.0.** The CLI surface, profile schema, and
+> audit format may break between patch releases while the tool is shaped
+> against real-world usage. That said, **it is already in active use on
+> live production systems** for SRE and agent-driven debugging — it
+> works, it's safe (dry-run by default, full audit trail), it's just
+> not yet API-stable. Pin a release tag and read the
+> [CHANGELOG](CHANGELOG.md) before upgrading until v0.2.0 ships.
 
 `inspect` is an operational debugging CLI for fleets of servers reached
 over SSH. It gives you one tool to **search** logs and config across
