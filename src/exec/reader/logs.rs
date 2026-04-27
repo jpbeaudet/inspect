@@ -58,6 +58,12 @@ fn build_logs_cmd(step: &ReadStep<'_>, opts: &ReadOpts) -> String {
             s
         }
         (Some(name), _) => {
+            // P2: use real container name (Service.container_name) for docker logs,
+            // not the user-facing service token.
+            let container = step
+                .service_def
+                .map(|s| s.container_name.as_str())
+                .unwrap_or(name);
             let mut s = String::from("docker logs");
             if let Some(since) = &opts.since {
                 s.push_str(" --since ");
@@ -71,7 +77,7 @@ fn build_logs_cmd(step: &ReadStep<'_>, opts: &ReadOpts) -> String {
                 s.push_str(&format!(" --tail {n}"));
             }
             s.push(' ');
-            s.push_str(&shquote(name));
+            s.push_str(&shquote(container));
             // docker logs writes to stderr by default; merge.
             s.push_str(" 2>&1");
             s

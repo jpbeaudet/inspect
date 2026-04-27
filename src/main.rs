@@ -115,6 +115,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Chmod(args) => verbs::write::chmod::run(args),
         Command::Chown(args) => verbs::write::chown::run(args),
         Command::Exec(args) => verbs::write::exec::run(args),
+        Command::Run(args) => verbs::run::run(args),
         Command::Audit(args) => commands::audit::run(args),
         Command::Revert(args) => commands::revert::run(args),
         Command::Why(args) => commands::why::run(args),

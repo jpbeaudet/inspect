@@ -70,7 +70,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
             label,
             ns: s.ns.namespace.clone(),
             target: s.ns.target.clone(),
-            service: s.service().map(str::to_string),
+            container: s.container().map(str::to_string),
             path,
             original,
             new_text,
@@ -136,8 +136,8 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         // Preserve mode/uid/gid of the original file across the
         // rename (audit §4.2). See `verbs::write::atomic`.
         let inner = super::atomic::write_then_rename(&b64, &tmp, &w.path);
-        let cmd = match w.service.as_deref() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+        let cmd = match w.container.as_deref() {
+            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
             None => format!("sh -c {}", shquote(&inner)),
         };
         let started = Instant::now();
@@ -152,6 +152,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         entry.diff_summary = diff_summary(&[(w.original.clone(), w.new_text.clone())]);
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
+        entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&entry)?;
 
         if out.ok() {
@@ -183,7 +184,7 @@ struct EditWork {
     label: String,
     ns: String,
     target: crate::ssh::options::SshTarget,
-    service: Option<String>,
+    container: Option<String>,
     path: String,
     original: String,
     new_text: String,
@@ -245,8 +246,8 @@ fn read_remote(
     path: &str,
 ) -> Option<String> {
     let inner = format!("cat -- {}", shquote(path));
-    let cmd = match s.service() {
-        Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+    let cmd = match s.container() {
+        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
         None => inner,
     };
     let out = runner

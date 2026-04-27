@@ -27,6 +27,29 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
         return drift_only(&resolved.name, &target, args.format.is_json());
     }
 
+    // P13: --retry-failed re-runs discovery and merges *only* services
+    // that were previously flagged `discovery_incomplete`. Containers
+    // whose previous probe succeeded keep their cached entry, so we
+    // don't pay the cost of a full re-discovery just to fix one
+    // wedged container.
+    if args.retry_failed {
+        let prev = load_profile(&resolved.name)?
+            .context("--retry-failed: no cached profile found; run `inspect setup` first")?;
+        let opts = discovery::DiscoverOptions {
+            skip_systemd: args.skip_systemd,
+            skip_host_listeners: args.skip_host_listeners,
+        };
+        let fresh = discovery::discover(&resolved.name, &target, opts)
+            .with_context(|| format!("setup --retry-failed '{}'", resolved.name))?;
+        let merged = merge_retry(&prev, &fresh);
+        if args.format.is_json() {
+            print_json(&merged, "retry-failed");
+        } else {
+            print_human(&merged, "retry-failed");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     // Honor TTL unless --force.
     if !args.force {
         if let Ok(Some(prev)) = load_profile(&resolved.name) {
@@ -142,6 +165,23 @@ fn print_human(p: &Profile, status: &str) {
             println!("  - {w}");
         }
     }
+    let incomplete: Vec<&str> = p
+        .services
+        .iter()
+        .filter(|s| s.discovery_incomplete)
+        .map(|s| s.name.as_str())
+        .collect();
+    if !incomplete.is_empty() {
+        println!(
+            "INCOMPLETE: {} service(s) flagged discovery_incomplete (per-container `docker inspect` failed): {}",
+            incomplete.len(),
+            incomplete.join(", "),
+        );
+        println!(
+            "HINT:    inspect setup {} --retry-failed   # re-probe just the flagged services",
+            p.namespace
+        );
+    }
     println!(
         "NEXT:    inspect profile {}    inspect setup {} --check-drift",
         p.namespace, p.namespace
@@ -190,4 +230,42 @@ fn b(x: bool) -> char {
     } else {
         'n'
     }
+}
+
+/// P13: build a merged profile for `--retry-failed`. We start from
+/// `prev` and, for every service that was flagged
+/// `discovery_incomplete`, swap in the corresponding entry from
+/// `fresh` if (and only if) the fresh probe succeeded for that
+/// container. Services not flagged incomplete in `prev` are kept
+/// verbatim. Warnings from `fresh` are appended.
+fn merge_retry(prev: &Profile, fresh: &Profile) -> Profile {
+    let mut merged = prev.clone();
+    let fresh_by_id: std::collections::HashMap<&str, &crate::profile::schema::Service> = fresh
+        .services
+        .iter()
+        .filter_map(|s| s.container_id.as_deref().map(|id| (id, s)))
+        .collect();
+    let fresh_by_name: std::collections::HashMap<&str, &crate::profile::schema::Service> = fresh
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s))
+        .collect();
+    for svc in &mut merged.services {
+        if !svc.discovery_incomplete {
+            continue;
+        }
+        let candidate = svc
+            .container_id
+            .as_deref()
+            .and_then(|id| fresh_by_id.get(id).copied())
+            .or_else(|| fresh_by_name.get(svc.name.as_str()).copied());
+        if let Some(repl) = candidate {
+            if !repl.discovery_incomplete {
+                *svc = repl.clone();
+            }
+        }
+    }
+    merged.warnings.extend(fresh.warnings.iter().cloned());
+    merged.discovered_at = fresh.discovered_at.clone();
+    merged
 }

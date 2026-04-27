@@ -19,24 +19,58 @@ use crate::verbs::duration::parse_duration;
 use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
-pub fn run(args: GrepArgs) -> Result<ExitKind> {
+pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
 
     let (runner, nses, targets) = plan(&args.selector)?;
 
+    // P10 (v0.1.1): --reset-cursor and --since-last mirror the logs verb.
+    if args.reset_cursor {
+        let mut deleted = 0usize;
+        for step in iter_steps(&nses, &targets) {
+            let svc = step.service().unwrap_or("_");
+            if crate::verbs::cursor::reset(&step.ns.namespace, svc)? {
+                deleted += 1;
+            }
+        }
+        if !args.format.is_json() {
+            eprintln!("reset {deleted} cursor(s)");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     let case_insensitive = resolve_case(&args);
     let mut matches = 0usize;
 
     for step in iter_steps(&nses, &targets) {
+        let svc_for_cursor = step.service().unwrap_or("_").to_string();
+        if args.since_last {
+            let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_for_cursor)?;
+            let since = match &prev {
+                Some(c) if c.last_call > 0 => c.last_call.to_string(),
+                _ => crate::verbs::cursor::default_since(),
+            };
+            args.since = Some(since);
+            let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_for_cursor);
+            if let Err(e) = now.save() {
+                if !args.format.is_json() {
+                    eprintln!("warn: failed to save cursor: {e}");
+                }
+            }
+        }
         let cmd = build_grep_cmd(&step, &args, case_insensitive, step.ns.profile.as_ref());
-        let out = runner.run(
-            &step.ns.namespace,
-            &step.ns.target,
-            &cmd,
-            RunOpts::with_timeout(60),
-        )?;
+        let label = format!("grep {}/{}", step.ns.namespace, svc_for_cursor);
+        let show_progress = !args.format.is_json();
+        let out = crate::verbs::progress::with_progress(&label, show_progress, || {
+            runner.run(
+                &step.ns.namespace,
+                &step.ns.target,
+                &cmd,
+                RunOpts::with_timeout(60),
+            )
+        })?;
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
             if !args.format.is_json() {
@@ -151,9 +185,10 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
         }
     }
     let tool_bin = tool.bin();
+    let suf = crate::verbs::line_filter::build_suffix(&args.match_re, &args.exclude_re, false);
 
     if let Some(path) = step.path.as_deref() {
-        let inner = format!("{tool_bin}{flags} -- {pat} {}", shquote(path));
+        let inner = format!("{tool_bin}{flags} -- {pat} {}{suf}", shquote(path));
         return match step.service() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
             None => inner,
@@ -189,11 +224,11 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
             s.push_str(" 2>&1");
             s
         };
-        return format!("{logs} | {tool_bin}{flags} -- {pat} || true");
+        return format!("{logs} | {tool_bin}{flags} -- {pat}{suf} || true");
     }
     // Host-level fallback.
     let _ = &mut tool;
-    format!("{tool_bin}{flags} -- {pat} /var/log/syslog 2>/dev/null || {tool_bin}{flags} -- {pat} /var/log/messages")
+    format!("{tool_bin}{flags} -- {pat} /var/log/syslog{suf} 2>/dev/null || {tool_bin}{flags} -- {pat} /var/log/messages{suf}")
 }
 
 #[derive(PartialEq, Eq)]

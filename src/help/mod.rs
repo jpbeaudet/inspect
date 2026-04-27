@@ -17,7 +17,7 @@ pub mod render;
 pub mod search;
 pub mod topics;
 
-pub use topics::{find, suggest, verbose_body, Topic, TOPICS};
+pub use topics::{find, is_verb, suggest, verbose_body, Topic, TOPICS};
 
 /// Render the index page (the output of bare `inspect help`).
 ///

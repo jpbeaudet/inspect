@@ -100,11 +100,12 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
 
     for s in &steps {
         let svc = s.service().unwrap_or("?");
+        let container = s.container().unwrap_or(svc);
         let kind = s
             .service_def()
             .map(|d| d.kind)
             .unwrap_or(ServiceKind::Container);
-        let cmd = build_cmd(act, svc, kind);
+        let cmd = build_cmd(act, svc, container, kind);
         let started = Instant::now();
         let out = runner.run(
             &s.ns.namespace,
@@ -117,6 +118,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         let mut entry = AuditEntry::new(act.as_str(), &format!("{}/{svc}", s.ns.namespace));
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
+        entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&entry)?;
 
         if out.ok() {
@@ -148,8 +150,12 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
     })
 }
 
-fn build_cmd(act: Action, svc: &str, kind: ServiceKind) -> String {
+fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> String {
+    // For systemd / host-listener we operate on the user-facing name
+    // (the unit name). For containers we operate on the real
+    // container name to defeat the v0.1.0 phantom-service bug.
     let svc_q = shquote(svc);
+    let cont_q = shquote(container);
     match (kind, act) {
         // systemd unit → systemctl
         (ServiceKind::Systemd, Action::Restart) => format!("systemctl restart {svc_q}"),
@@ -161,12 +167,12 @@ fn build_cmd(act: Action, svc: &str, kind: ServiceKind) -> String {
             format!("pkill -HUP -f {svc_q} || true")
         }
         // container default
-        (_, Action::Restart) => format!("docker restart {svc_q}"),
-        (_, Action::Stop) => format!("docker stop {svc_q}"),
-        (_, Action::Start) => format!("docker start {svc_q}"),
+        (_, Action::Restart) => format!("docker restart {cont_q}"),
+        (_, Action::Stop) => format!("docker stop {cont_q}"),
+        (_, Action::Start) => format!("docker start {cont_q}"),
         (_, Action::Reload) => {
             // Best-effort SIGHUP into the container.
-            format!("docker kill -s HUP {svc_q}")
+            format!("docker kill -s HUP {cont_q}")
         }
     }
 }

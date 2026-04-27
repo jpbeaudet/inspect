@@ -11,11 +11,17 @@
 use thiserror::Error;
 
 /// Logical exit kinds that map to documented exit codes.
+///
+/// `Inner(u8)` (P11, v0.1.1) carries through the remote command's own
+/// exit code on `inspect run` / `inspect exec`. Shells truncate to 8
+/// bits, so we store the bottom byte; callers should pass
+/// `(remote_exit_code & 0xff) as u8`.
 #[derive(Debug, Clone, Copy)]
 pub enum ExitKind {
     Success,
     NoMatches,
     Error,
+    Inner(u8),
 }
 
 impl ExitKind {
@@ -24,8 +30,14 @@ impl ExitKind {
             ExitKind::Success => 0,
             ExitKind::NoMatches => 1,
             ExitKind::Error => 2,
+            ExitKind::Inner(n) => n,
         }
     }
+}
+
+/// Clamp a remote i32 exit code to a u8, the way a shell would.
+pub fn clamp_inner_exit(code: i32) -> u8 {
+    (code & 0xff) as u8
 }
 
 /// Errors raised by the namespace configuration subsystem.

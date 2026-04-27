@@ -92,6 +92,15 @@ pub fn find(id: &str) -> Option<&'static Topic> {
     TOPICS.iter().find(|t| t.id == needle)
 }
 
+/// Returns true if `name` matches a top-level verb listed in
+/// [`VERB_TOPICS`]. Used by `inspect help <verb>` (P8) to fall back
+/// to clap's long-help renderer when there is no editorial topic of
+/// the same id.
+pub fn is_verb(name: &str) -> bool {
+    let needle = name.trim().to_ascii_lowercase();
+    VERB_TOPICS.iter().any(|(v, _)| *v == needle)
+}
+
 /// Optional `verbose/<topic>.md` sidecar (HP-6). Returns the sidecar
 /// body when one ships for the given topic, else `None`. Sidecars are
 /// appended after the standard topic body when the user passes
@@ -146,6 +155,7 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("images", &["selectors", "formats", "examples"]),
     ("network", &["selectors", "formats", "examples"]),
     ("ports", &["selectors", "formats", "examples"]),
+    ("run", &["selectors", "formats", "examples"]),
     ("resolve", &["selectors", "aliases", "examples"]),
     // Search.
     ("search", &["search", "selectors", "aliases", "formats"]),
@@ -279,6 +289,20 @@ pub fn suggest(needle: &str) -> Option<&'static str> {
         match best {
             None => best = Some((t.id, d)),
             Some((_, bd)) if d < bd => best = Some((t.id, d)),
+            _ => {}
+        }
+    }
+    // P8: also consider verbs, so `inspect help serch` suggests
+    // `search` even though no topic by that id exists in the
+    // editorial registry.
+    for (verb, _) in VERB_TOPICS {
+        let d = edit_distance(&needle, verb, MAX_DISTANCE);
+        if d > MAX_DISTANCE {
+            continue;
+        }
+        match best {
+            None => best = Some((*verb, d)),
+            Some((_, bd)) if d < bd => best = Some((*verb, d)),
             _ => {}
         }
     }

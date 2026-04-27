@@ -36,6 +36,38 @@ hot-fixes with a built-in audit + revert trail.
 > See [Known limitations](#known-limitations) for what is intentionally
 > out of scope for this version.
 
+### What's new in v0.1.1 (field-feedback patches)
+
+- **Phantom-service fix** — discovery now records the *real* container
+  name, so `inspect logs ns/svc` no longer targets a service that
+  doesn't exist on the host.
+- **Streaming `--follow`** — `logs` and `grep` no longer buffer
+  forever; lines arrive as the remote emits them.
+- **`inspect run`** — read-only counterpart to `exec`, no audit, no
+  apply gate. Use for ad-hoc `ps`, `cat /proc/...`, etc.
+- **`--reason <text>` on every write verb** — recorded in the audit
+  log and filterable via `inspect audit ls --reason <substr>`.
+- **`--match` / `--exclude` regex pushdown** on `logs` and `grep`,
+  with `--line-buffered` in follow mode.
+- **`--since-last` resumable cursor** for `logs` and `grep`.
+- **`--merged` multi-container log view** that interleaves output
+  from every selected service by RFC3339 timestamp.
+- **Secret masking** on `run` / `exec` stdout (`head4****tail2` on
+  recognised KEY=VALUE pairs); opt-out with `--show-secrets` or
+  `--redact-all`. Auditing records which mode was used.
+- **Inner exit code surfacing** — `inspect run -- 'exit 7'` now
+  returns 7 instead of 0.
+- **Discovery `docker inspect` per-container fallback** — one wedged
+  container no longer takes down the whole host's discovery; affected
+  services are flagged `discovery_incomplete: true` and re-probed by
+  `inspect setup --retry-failed`.
+- **`--allow-exec` removed** from `inspect exec`; the `--apply` gate
+  is sufficient now that read-only commands have a dedicated verb.
+- **Progress spinner** on slow log/grep fetches in TTY mode (silent
+  in `--json`).
+
+See [CHANGELOG.md](CHANGELOG.md) for the full per-patch breakdown.
+
 ---
 
 ## Table of contents

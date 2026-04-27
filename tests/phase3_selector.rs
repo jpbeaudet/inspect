@@ -75,7 +75,7 @@ fn write_profile(
     let mut svc_yaml = String::new();
     for s in services {
         svc_yaml.push_str(&format!(
-            "  - name: {s}\n    container_id: cid-{s}\n    image: example/{s}:latest\n    ports: []\n    mounts: []\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
+            "  - name: {s}\n    container_name: {s}\n    container_id: cid-{s}\n    image: example/{s}:latest\n    ports: []\n    mounts: []\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
         ));
     }
     let mut groups_yaml = String::new();

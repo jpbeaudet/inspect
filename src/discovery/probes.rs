@@ -188,24 +188,38 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
 
     // 2) Collect ports + mounts + log driver via a single `docker inspect`
     //    on all the IDs. Output is JSON; we use `serde_json` to parse.
+    //
+    // P13: if the batch call times out we fall back to inspecting each
+    // container individually with a tighter per-call timeout. A single
+    // wedged container (e.g. one whose Docker daemon socket is slow,
+    // or whose health check is hung) used to take the entire host's
+    // discovery down with it; now we record a warning, mark just that
+    // service as `discovery_incomplete`, and keep going.
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    let mut incomplete_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let inspect_cmd = format!(
         "docker inspect --format '{{{{json .}}}}' {} 2>/dev/null",
         ids.join(" ")
     );
-    let details = match run_remote(ns, target, &inspect_cmd, RunOpts::with_timeout(30)) {
+    let details = match run_remote(ns, target, &inspect_cmd, RunOpts::with_timeout(10)) {
         Ok(o) if o.ok() => parse_docker_inspect(&o.stdout),
+        // Batched call failed (timeout, partial JSON, daemon hiccup) --
+        // probe each container individually with a 5s budget so a
+        // single wedged container can't block the rest.
         Ok(o) => {
             r.warnings.push(format!(
-                "docker inspect exited {}: {}",
+                "docker inspect (batched) exited {}: {} -- falling back to per-container probe",
                 o.exit_code,
                 o.stderr.trim()
             ));
-            std::collections::HashMap::new()
+            inspect_per_container(ns, target, &ids, &mut r, &mut incomplete_ids)
         }
         Err(e) => {
-            r.warnings.push(format!("docker inspect failed: {e}"));
-            std::collections::HashMap::new()
+            r.warnings.push(format!(
+                "docker inspect (batched) failed: {e} -- falling back to per-container probe"
+            ));
+            inspect_per_container(ns, target, &ids, &mut r, &mut incomplete_ids)
         }
     };
 
@@ -227,7 +241,14 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         // Field pitfall §6.1: prefer the compose service label when
         // present, but fall back to the container name. We only swap
         // when the label is unambiguous within this host (see
-        // `seen_compose` above).
+        // `seen_compose` above). The user-facing `name` is what
+        // selectors match against; the *real* container name (always
+        // `row.name`) is preserved separately as `container_name` and
+        // is what every `docker logs|exec|restart` actually targets.
+        // Without this split, a profile with `name: api` would
+        // resolve in `inspect logs arte/api` but then run
+        // `docker logs api` on a host whose container is actually
+        // `luminary-api` — that's the v0.1.0 phantom-service bug.
         let svc_name = match &row.compose_service {
             Some(label) if !seen_compose.contains(label) => {
                 seen_compose.insert(label.clone());
@@ -250,6 +271,7 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
             ));
         }
         let det = details.get(&row.id);
+        let incomplete = incomplete_ids.contains(&row.id);
         let (ports, mounts, log_driver) = det
             .map(|d| (d.ports.clone(), d.mounts.clone(), d.log_driver))
             .unwrap_or_default();
@@ -269,6 +291,8 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         }
         r.services.push(Service {
             name: svc_name,
+            container_name: row.name.clone(),
+            compose_service: row.compose_service.clone(),
             container_id: Some(row.id),
             image: Some(row.image),
             ports,
@@ -279,6 +303,7 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
             mounts,
             kind: ServiceKind::Container,
             depends_on: Vec::new(),
+            discovery_incomplete: incomplete,
         });
     }
     r
@@ -469,7 +494,9 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
             continue;
         }
         r.services.push(Service {
-            name,
+            name: name.clone(),
+            container_name: name,
+            compose_service: None,
             container_id: None,
             image: None,
             ports: vec![],
@@ -480,6 +507,7 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
             mounts: vec![],
             kind: ServiceKind::Systemd,
             depends_on: vec![],
+            discovery_incomplete: false,
         });
     }
     if skipped > 0 {
@@ -747,6 +775,46 @@ pub(crate) struct InspectDetail {
     /// log on the daemon's host filesystem (`LogPath` from
     /// `docker inspect`). Used to size-warn at discovery time.
     pub log_path: Option<String>,
+}
+
+/// P13: per-container `docker inspect` fallback used when the batched
+/// call timed out or otherwise failed. Each id gets its own 5-second
+/// budget; ids whose individual probe also fails are recorded in
+/// `incomplete_ids` so the caller can flag the corresponding service
+/// with `discovery_incomplete = true`. Returns the merged
+/// detail-by-id map of every container we *did* successfully inspect.
+fn inspect_per_container(
+    ns: &str,
+    target: &SshTarget,
+    ids: &[&str],
+    r: &mut ProbeResult,
+    incomplete_ids: &mut std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, InspectDetail> {
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        let cmd = format!("docker inspect --format '{{{{json .}}}}' {id} 2>/dev/null");
+        match run_remote(ns, target, &cmd, RunOpts::with_timeout(5)) {
+            Ok(o) if o.ok() => {
+                let part = parse_docker_inspect(&o.stdout);
+                out.extend(part);
+            }
+            Ok(o) => {
+                r.warnings.push(format!(
+                    "docker inspect for container {id} exited {}: {} -- service marked incomplete",
+                    o.exit_code,
+                    o.stderr.trim()
+                ));
+                incomplete_ids.insert((*id).to_string());
+            }
+            Err(e) => {
+                r.warnings.push(format!(
+                    "docker inspect for container {id} failed: {e} -- service marked incomplete"
+                ));
+                incomplete_ids.insert((*id).to_string());
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn parse_docker_inspect(

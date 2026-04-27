@@ -49,7 +49,12 @@ fn build_cat(step: &ReadStep<'_>, path: &str) -> String {
                 .unwrap_or(ServiceKind::Container)
                 == ServiceKind::Container =>
         {
-            format!("docker exec {} cat {qpath}", shquote(svc))
+            // P2: use real container name for docker exec, not the user-facing token.
+            let container = step
+                .service_def
+                .map(|s| s.container_name.as_str())
+                .unwrap_or(svc);
+            format!("docker exec {} cat {qpath}", shquote(container))
         }
         _ => format!("cat {qpath}"),
     }

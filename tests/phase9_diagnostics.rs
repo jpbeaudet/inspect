@@ -90,7 +90,7 @@ impl Sandbox {
                 d
             };
             svc_yaml.push_str(&format!(
-                "  - name: {n}\n    container_id: cid-{n}\n    image: ex/{n}:1\n    ports: {ports}\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: {deps}\n",
+                "  - name: {n}\n    container_name: {n}\n    container_id: cid-{n}\n    image: ex/{n}:1\n    ports: {ports}\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: {deps}\n",
                 n = s.name,
                 ports = ports_yaml,
                 hs = s.health,

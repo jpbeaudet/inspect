@@ -771,3 +771,60 @@ fn help_no_pager_env_is_honored() {
         .stdout(str::contains("QUICKSTART"))
         .stderr(str::contains("xyzzy").not());
 }
+
+// ---------------------------------------------------------------------
+// P8 (v0.1.1): `inspect help <verb>` falls back to clap's long help
+// when there is no editorial topic of the same id. This eliminates the
+// dead-end seen in v0.1.0 where users typed `inspect help logs` (the
+// natural reflex) and got "unknown help topic".
+// ---------------------------------------------------------------------
+
+#[test]
+fn p8_help_verb_falls_back_to_clap_long_help() {
+    inspect()
+        .args(["help", "logs"])
+        .assert()
+        .success()
+        // Clap's long-help renders the per-flag block; `--follow` is
+        // unique to logs and stable.
+        .stdout(str::contains("--follow"))
+        .stdout(str::contains("Usage:"));
+}
+
+#[test]
+fn p8_help_every_top_level_verb_resolves() {
+    // Every entry in VERB_TOPICS must produce non-empty output via
+    // either an editorial topic or clap's long-help fallback. The list
+    // is the user-facing surface area; an unhandled verb is a regression.
+    for verb in [
+        "logs", "status", "ps", "grep", "search", "restart", "stop",
+        "exec", "edit", "rm", "cp", "mkdir", "audit", "revert",
+        "fleet", "why", "recipe", "connectivity", "add", "list",
+        "show", "test", "setup", "discover", "profile", "connect",
+        "alias", "help",
+    ] {
+        let out = inspect()
+            .args(["help", verb])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert!(
+            !out.is_empty(),
+            "`inspect help {verb}` produced no output"
+        );
+    }
+}
+
+#[test]
+fn p8_unknown_verb_typo_suggests_real_verb() {
+    // "serch" is 1 edit from "search": the suggester must consider
+    // verbs (not just editorial topic ids) so the user gets a hint.
+    inspect()
+        .args(["help", "serch"])
+        .assert()
+        .code(1)
+        .stderr(str::contains("unknown help topic"))
+        .stderr(str::contains("did you mean: search?"));
+}

@@ -17,7 +17,7 @@ use anyhow::Result;
 use serde::Deserialize;
 
 use crate::config::namespace::ResolvedNamespace;
-use crate::ssh::exec::{run_remote, RemoteOutput, RunOpts};
+use crate::ssh::exec::{run_remote, run_remote_streaming, RemoteOutput, RunOpts};
 use crate::ssh::options::SshTarget;
 
 /// Trait every verb uses to talk to a remote host. Lets the test suite
@@ -30,6 +30,28 @@ pub trait RemoteRunner: Send + Sync {
         cmd: &str,
         opts: RunOpts,
     ) -> Result<RemoteOutput>;
+
+    /// Streaming variant (P1, v0.1.1). Default implementation buffers
+    /// via [`Self::run`] and delivers lines after the command exits —
+    /// correct for mocks and replay-based tests. Live runners should
+    /// override to pump output as it arrives.
+    ///
+    /// Returns the remote exit code. `on_line` receives each output
+    /// line (newline-stripped).
+    fn run_streaming(
+        &self,
+        namespace: &str,
+        target: &SshTarget,
+        cmd: &str,
+        opts: RunOpts,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<i32> {
+        let out = self.run(namespace, target, cmd, opts)?;
+        for line in out.stdout.lines() {
+            on_line(line);
+        }
+        Ok(out.exit_code)
+    }
 }
 
 /// Production runner: real ssh through the inspect master socket.
@@ -44,6 +66,17 @@ impl RemoteRunner for LiveRunner {
         opts: RunOpts,
     ) -> Result<RemoteOutput> {
         run_remote(namespace, target, cmd, opts)
+    }
+
+    fn run_streaming(
+        &self,
+        namespace: &str,
+        target: &SshTarget,
+        cmd: &str,
+        opts: RunOpts,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<i32> {
+        run_remote_streaming(namespace, target, cmd, opts, on_line)
     }
 }
 

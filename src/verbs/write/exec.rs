@@ -30,22 +30,16 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // Field pitfall §3.2: `exec` is the only write verb whose payload
-    // is opaque user-supplied shell — `--apply` alone is not a strong
-    // enough signal. Require `--allow-exec` as a second confirmation
-    // when the operator actually intends to run the command. Tighten
-    // the large-fanout interlock from the default 10 down to 3 so a
-    // typo cannot shell out across more than a couple of hosts before
-    // the prompt fires.
+    // Field pitfall §3.2: `exec` is the one write verb whose payload
+    // is opaque user-supplied shell. The large-fanout interlock fires
+    // at a tighter threshold (3 instead of 10) so a stray glob in the
+    // selector cannot silently shell out across more than a couple of
+    // hosts before the prompt fires. v0.1.1 dropped the separate
+    // `--allow-exec` second-confirmation flag in favour of the read/
+    // write split (`inspect run` for read, `inspect exec --apply`
+    // for write); see [INSPECT_v0.1.1_PATCH_SPEC.md] P6/P7.
     let mut gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     gate.fanout_threshold = exec_fanout_threshold();
-    if gate.should_apply() && !args.allow_exec {
-        eprintln!(
-            "error: `inspect exec` is opaque, free-form remote shell. \
-             Pass `--allow-exec` in addition to `--apply` to confirm intent."
-        );
-        return Ok(ExitKind::Error);
-    }
     if !gate.should_apply() {
         let mut r = Renderer::new();
         r.summary(format!("DRY RUN. Would exec on {} target(s):", steps.len()));
@@ -53,7 +47,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             let svc = s.service().map(|x| format!("/{x}")).unwrap_or_default();
             r.data_line(format!("{}{svc}: {user_cmd}", s.ns.namespace));
         }
-        r.next("Re-run with --apply --allow-exec to execute");
+        r.next("Re-run with --apply to execute");
         r.print();
         return Ok(ExitKind::Success);
     }
@@ -68,10 +62,15 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut ok = 0usize;
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
+    let masker = crate::redact::EnvSecretMasker::new(args.show_secrets, args.redact_all);
+    let mut last_inner: Option<i32> = None;
+    let mut all_same = true;
 
     for s in &steps {
-        let cmd = match s.service() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&user_cmd)),
+        let cmd = match s.container() {
+            Some(container) => {
+                format!("docker exec {} sh -c {}", shquote(container), shquote(&user_cmd))
+            }
             None => user_cmd.clone(),
         };
         let started = Instant::now();
@@ -91,10 +90,28 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
                 s.service().map(|x| format!("/{x}")).unwrap_or_default()
             ),
         );
-        e.args = user_cmd.clone();
+        // P4: stamp audit args with whether the operator opted into
+        // `--show-secrets` AND whether masking actually fired during
+        // this run, so post-hoc reviewers can distinguish verbatim
+        // output from masked output.
+        e.args = if args.show_secrets {
+            format!("{user_cmd} [secrets_exposed=true]")
+        } else if masker.was_active() {
+            format!("{user_cmd} [secrets_masked=true]")
+        } else {
+            user_cmd.clone()
+        };
         e.exit = out.exit_code;
         e.duration_ms = dur;
+        e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&e)?;
+
+        if let Some(prev) = last_inner {
+            if prev != out.exit_code {
+                all_same = false;
+            }
+        }
+        last_inner = Some(out.exit_code);
 
         let label = format!(
             "{}{}",
@@ -106,7 +123,8 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             renderer.data_line(format!("{label}: ok ({}ms)", dur));
             if !out.stdout.trim().is_empty() {
                 for line in out.stdout.lines() {
-                    renderer.data_line(format!("  {line}"));
+                    let masked = masker.mask_line(line);
+                    renderer.data_line(format!("  {}", masked));
                 }
             }
         } else {
@@ -136,6 +154,15 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         .summary(format!("exec: {ok} ok, {bad} failed"))
         .next("inspect audit ls");
     renderer.print();
+
+    // P11: surface the remote command's exit code when the run was
+    // single-target or every target returned the same code. Mixed
+    // exits collapse to ExitKind::Error to keep `set -e` scripts safe.
+    if let Some(inner_code) = last_inner {
+        if all_same {
+            return Ok(ExitKind::Inner(crate::error::clamp_inner_exit(inner_code)));
+        }
+    }
     Ok(if bad == 0 {
         ExitKind::Success
     } else {

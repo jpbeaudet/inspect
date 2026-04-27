@@ -54,8 +54,8 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
     for (s, path) in &planned {
         let inner = format!("touch -- {}", shquote(path));
-        let cmd = match s.service() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+        let cmd = match s.container() {
+            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
             None => inner,
         };
         let started = Instant::now();
@@ -73,6 +73,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
         let mut e = AuditEntry::new("touch", &label);
         e.exit = out.exit_code;
         e.duration_ms = started.elapsed().as_millis() as u64;
+        e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
         store.append(&e)?;
         if out.ok() {
             ok += 1;

@@ -14,7 +14,7 @@ use crate::verbs::duration::parse_duration;
 use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
-pub fn run(args: LogsArgs) -> Result<ExitKind> {
+pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
@@ -23,10 +23,168 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
     }
 
     let (runner, nses, targets) = plan(&args.selector)?;
+
+    // P10 (v0.1.1): handle --reset-cursor up front -- it does not stream
+    // any logs, just drops the cursor file(s) for every selected target.
+    if args.reset_cursor {
+        let mut deleted = 0usize;
+        for step in iter_steps(&nses, &targets) {
+            let svc = step.service().unwrap_or("_");
+            if crate::verbs::cursor::reset(&step.ns.namespace, svc)? {
+                deleted += 1;
+            }
+        }
+        if !args.format.is_json() {
+            eprintln!("reset {deleted} cursor(s)");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     let mut any_lines = false;
+
+    // P5 (v0.1.1): merged multi-container view. We honor --since-last
+    // and the log-driver gate per source, then dispatch to the merger
+    // module which fans out execution and re-orders by RFC3339
+    // timestamp (batch) or arrival order (follow).
+    let merged_steps: Vec<_> = iter_steps(&nses, &targets).collect();
+    if args.merged && merged_steps.len() > 1 {
+        // Per-step preflight: cursor handling + log-driver rejection.
+        let mut sources: Vec<crate::verbs::merged::MergeSource> = Vec::new();
+        // Stash a per-step `args` clone so each source can have its own
+        // expanded `--since` from --since-last without poisoning peers.
+        let mut per_step_args: Vec<LogsArgs> = Vec::new();
+        for step in &merged_steps {
+            let svc_name = step.service().unwrap_or("_").to_string();
+            let mut step_args = args.clone();
+            if step_args.since_last {
+                let prev =
+                    crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
+                let since = match &prev {
+                    Some(c) if c.last_call > 0 => c.last_call.to_string(),
+                    _ => crate::verbs::cursor::default_since(),
+                };
+                step_args.since = Some(since);
+                let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
+                if let Err(e) = now.save() {
+                    if !args.format.is_json() {
+                        eprintln!("warn: failed to save cursor: {e}");
+                    }
+                }
+            }
+            // Driver gate.
+            if let Some(svc_def) = step.service_def() {
+                if let Some(driver) = svc_def.log_driver {
+                    if !driver.is_readable_via_docker_logs() {
+                        if !args.format.is_json() {
+                            eprintln!(
+                                "{}/{}: log driver `{}` is not readable via `docker logs` -- skipped in merged view",
+                                step.ns.namespace,
+                                svc_name,
+                                driver.as_str(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
+            per_step_args.push(step_args);
+        }
+        // Build the source list with command strings derived from each
+        // step's args clone.
+        let live_steps: Vec<_> = merged_steps
+            .iter()
+            .filter(|step| {
+                step.service_def()
+                    .and_then(|s| s.log_driver)
+                    .map(|d| d.is_readable_via_docker_logs())
+                    .unwrap_or(true)
+            })
+            .collect();
+        for (step, step_args) in live_steps.iter().zip(per_step_args.iter()) {
+            let cmd = build_logs(
+                step.service_def(),
+                step.service(),
+                step.container(),
+                step_args,
+            );
+            sources.push(crate::verbs::merged::MergeSource {
+                namespace: step.ns.namespace.as_str(),
+                target: &step.ns.target,
+                svc: step.service().unwrap_or("_").to_string(),
+                cmd,
+            });
+        }
+        let json = args.format.is_json();
+        let timeout = if args.follow {
+            args.follow_timeout_secs.unwrap_or(60 * 60 * 8)
+        } else {
+            60
+        };
+        let total = if args.follow {
+            crate::verbs::merged::follow_merged(runner.as_ref(), &sources, timeout, |m| {
+                if json {
+                    crate::verbs::merged::print_json(
+                        // The MergeSource borrows namespace as &str; we
+                        // re-derive it from svc_idx into the source list.
+                        sources
+                            .get(m.svc_idx)
+                            .map(|s| s.namespace)
+                            .unwrap_or("_"),
+                        &m.svc,
+                        &m.line,
+                    );
+                } else {
+                    crate::verbs::merged::print_human(&m.svc, &m.line);
+                }
+            })?
+        } else {
+            crate::verbs::merged::batch_merged(runner.as_ref(), &sources, timeout, |m| {
+                if json {
+                    crate::verbs::merged::print_json(
+                        sources
+                            .get(m.svc_idx)
+                            .map(|s| s.namespace)
+                            .unwrap_or("_"),
+                        &m.svc,
+                        &m.line,
+                    );
+                } else {
+                    crate::verbs::merged::print_human(&m.svc, &m.line);
+                }
+            })?
+        };
+        return Ok(if total > 0 {
+            ExitKind::Success
+        } else {
+            ExitKind::NoMatches
+        });
+    }
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
+
+        // P10: --since-last expands into --since <unix-ts> from the
+        // saved cursor (or INSPECT_SINCE_LAST_DEFAULT on cold start).
+        // We always rewrite the cursor at the start of the run so a
+        // crash mid-stream still leaves the next call resumable; the
+        // small overlap is acceptable (logs are append-only).
+        if args.since_last {
+            let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_name)?;
+            let since = match &prev {
+                Some(c) if c.last_call > 0 => c.last_call.to_string(),
+                _ => crate::verbs::cursor::default_since(),
+            };
+            args.since = Some(since);
+            // Persist the new cursor up-front.
+            let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
+            // Best effort: a cursor write failure should not abort
+            // the user's actual log query.
+            if let Err(e) = now.save() {
+                if !args.format.is_json() {
+                    eprintln!("warn: failed to save cursor: {e}");
+                }
+            }
+        }
 
         // Field pitfall §2.3: refuse early when the service is
         // configured with a log driver that ships logs out of the
@@ -59,14 +217,35 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
             }
         }
 
-        let cmd = build_logs(step.service_def(), step.service(), &args);
-        let opts = if args.follow {
-            // Use a long timeout for follow; users will Ctrl-C to stop.
-            RunOpts::with_timeout(args.follow_timeout_secs.unwrap_or(60 * 60 * 8))
-        } else {
-            RunOpts::with_timeout(60)
-        };
-        let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)?;
+        let cmd = build_logs(step.service_def(), step.service(), step.container(), &args);
+
+        // P1 (v0.1.1): in --follow mode, render each line as it
+        // arrives instead of buffering until the SSH process exits.
+        // We also implement client-side reconnect (3 tries with 1/2/4s
+        // backoff) so a transient SSH drop doesn't end the user's
+        // session: the server-side loop in `build_docker_logs` already
+        // re-attaches across docker log rotations, so this layer only
+        // covers the SSH transport.
+        if args.follow {
+            stream_follow(
+                runner.as_ref(),
+                &step.ns.namespace,
+                &step.ns.target,
+                &cmd,
+                &svc_name,
+                args.follow_timeout_secs.unwrap_or(60 * 60 * 8),
+                args.format.is_json(),
+                &mut any_lines,
+            );
+            continue;
+        }
+
+        let opts = RunOpts::with_timeout(60);
+        let label = format!("logs {}/{}", step.ns.namespace, svc_name);
+        let show_progress = !args.format.is_json();
+        let out = crate::verbs::progress::with_progress(&label, show_progress, || {
+            runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)
+        })?;
         if !out.ok() && out.stdout.is_empty() {
             if !args.format.is_json() {
                 eprintln!(
@@ -110,20 +289,38 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
 fn build_logs(
     svc_def: Option<&crate::profile::schema::Service>,
     svc_name: Option<&str>,
+    container: Option<&str>,
     args: &LogsArgs,
 ) -> String {
     use crate::profile::schema::ServiceKind;
 
     let kind = svc_def.map(|s| s.kind).unwrap_or(ServiceKind::Container);
     match (svc_name, kind) {
+        // Systemd: journalctl wants the unit name (== `name`), not the
+        // container_name token.
         (Some(name), ServiceKind::Systemd) => build_journalctl(name, args),
-        (Some(name), _) => build_docker_logs(name, args),
+        // Container: every docker subcommand must target the real
+        // container name; `container` falls back to `svc_name` when
+        // no profile is loaded.
+        (Some(_), _) => build_docker_logs(container.unwrap_or("_"), args),
         (None, _) => {
             // Host-level: tail /var/log/syslog by default.
             let tail = args.tail.unwrap_or(200);
-            format!(
+            let base = format!(
                 "tail -n {tail} /var/log/syslog 2>/dev/null || tail -n {tail} /var/log/messages"
-            )
+            );
+            // Match/exclude wrap: tail's `||` already protects the
+            // empty case, so we splice the filter through an sh -c.
+            let suf = crate::verbs::line_filter::build_suffix(
+                &args.match_re,
+                &args.exclude_re,
+                args.follow,
+            );
+            if suf.is_empty() {
+                base
+            } else {
+                format!("sh -c {}", shquote(&format!("{base}{suf}")))
+            }
         }
     }
 }
@@ -179,6 +376,11 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
     if args.follow {
         s.push_str(" -f");
     }
+    if args.merged {
+        // P5: required so the merger has a parseable RFC3339 prefix
+        // on every line. The merger strips it before printing.
+        s.push_str(" --timestamps");
+    }
     if reconnect {
         // After a rotation we don't want the full history again.
         s.push_str(" --tail 0");
@@ -199,6 +401,11 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
     s.push_str(&shquote(svc));
     // docker logs writes to both stderr+stdout; merge for line discipline.
     s.push_str(" 2>&1");
+    s.push_str(&crate::verbs::line_filter::build_suffix(
+        &args.match_re,
+        &args.exclude_re,
+        args.follow,
+    ));
     s
 }
 
@@ -221,7 +428,97 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
     if let Some(tail) = args.tail {
         s.push_str(&format!(" -n {tail}"));
     }
+    s.push_str(&crate::verbs::line_filter::build_suffix(
+        &args.match_re,
+        &args.exclude_re,
+        args.follow,
+    ));
     s
+}
+
+/// P1 (v0.1.1): client-side reconnect wrapper for `--follow`. Streams
+/// each line from the SSH child to stdout (or JSON), and on transient
+/// SSH failure retries up to 3 times with 1s/2s/4s backoff. Aborts
+/// cleanly on Ctrl-C (cancellation flag set by [`crate::exec::cancel`]).
+#[allow(clippy::too_many_arguments)]
+fn stream_follow(
+    runner: &dyn crate::verbs::runtime::RemoteRunner,
+    namespace: &str,
+    target: &crate::ssh::options::SshTarget,
+    cmd: &str,
+    svc_name: &str,
+    timeout_secs: u64,
+    json: bool,
+    any_lines: &mut bool,
+) {
+    const MAX_RECONNECTS: u32 = 3;
+    let mut attempt: u32 = 0;
+    loop {
+        if crate::exec::cancel::is_cancelled() {
+            return;
+        }
+        let opts = RunOpts::with_timeout(timeout_secs);
+        // Borrow-checker: `any_lines` is mutated inside the closure.
+        // Use a local flag and merge after the call.
+        let mut got_any = false;
+        let result = runner.run_streaming(namespace, target, cmd, opts, &mut |line| {
+            got_any = true;
+            if json {
+                JsonOut::write(
+                    &Envelope::new(namespace, "logs", "logs")
+                        .with_service(svc_name)
+                        .put(
+                            "line",
+                            crate::format::safe::safe_machine_line(line).as_ref(),
+                        ),
+                );
+            } else {
+                let safe = crate::format::safe::safe_terminal_line(
+                    line,
+                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
+                );
+                println!("{namespace}/{svc_name} | {safe}");
+            }
+        });
+        if got_any {
+            *any_lines = true;
+        }
+
+        // User pressed Ctrl-C: stop without reconnecting.
+        if crate::exec::cancel::is_cancelled() {
+            return;
+        }
+
+        match result {
+            Ok(0) => return,
+            Ok(_) | Err(_) if attempt >= MAX_RECONNECTS => {
+                if let Err(e) = result {
+                    if !json {
+                        eprintln!("{namespace}/{svc_name}: stream ended ({e})");
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        attempt += 1;
+        let backoff = std::time::Duration::from_secs(1u64 << (attempt - 1));
+        if !json {
+            eprintln!(
+                "{namespace}/{svc_name}: stream dropped, reconnecting in {}s (attempt {attempt}/{MAX_RECONNECTS})",
+                backoff.as_secs()
+            );
+        }
+        // Sleep in small slices so Ctrl-C still cancels promptly.
+        let deadline = std::time::Instant::now() + backoff;
+        while std::time::Instant::now() < deadline {
+            if crate::exec::cancel::is_cancelled() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -234,9 +531,14 @@ mod tests {
         LogsArgs {
             selector: "x".into(),
             since: None,
+            since_last: false,
+            reset_cursor: false,
             until: None,
             tail: None,
             follow,
+            merged: false,
+            match_re: Vec::new(),
+            exclude_re: Vec::new(),
             format: FormatArgs::default(),
             follow_timeout_secs: None,
         }
