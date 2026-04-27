@@ -97,6 +97,8 @@
     "write",
     "safety",
     "fleet",
+    "bundle",
+    "watch",
     "recipes",
     "discovery",
     "ssh",

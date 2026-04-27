@@ -5,6 +5,93 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — v0.1.2 backlog (B1-B10)
+
+Closes the v0.1.2 backlog (`INSPECT_v0.1.2_BACKLOG.md`). Two new
+top-level verbs (`watch`, `bundle`), six refinements to existing
+verbs, and a tightened audit schema.
+
+### Added
+
+- **B9 — `inspect bundle plan|apply <file.yaml>`.** YAML-driven
+  multi-step orchestration. A bundle declares preflight checks, an
+  ordered list of steps (`exec`/`run`/`watch`), per-step rollback
+  actions, an optional bundle-level rollback block, and postflight
+  checks. Step `on_failure:` routes failures via `abort` (default),
+  `continue`, `rollback`, or `rollback_to: <id>`. Steps may use
+  `parallel: true` + `matrix:` to fan out across N values with
+  bounded concurrency (cap 8). Templating: `{{ vars.x.y }}` and
+  `{{ matrix.k }}` interpolate into any string field. Every `exec`
+  step (and rollback action) writes one audit entry tagged with a
+  bundle-correlation `bundle_id` and the step's `bundle_step`. Run
+  `inspect bundle plan` for a no-touch dry-run; `inspect bundle apply
+  --apply` to execute. CI mode: `--no-prompt` skips the rollback
+  confirmation prompt. First-class checks: `disk_free`,
+  `docker_running`, `services_healthy`, `http_ok`, `sql_returns`, plus
+  an `exec` escape hatch.
+
+- **B10 — `inspect watch <selector> --until-…`.** Single-target
+  block-until-condition verb. Four predicate kinds, mutually
+  exclusive: `--until-cmd`, `--until-log`, `--until-sql`,
+  `--until-http`. `--until-cmd` accepts comparators `--equals`,
+  `--matches`, `--gt`, `--lt`, `--changes`, `--stable-for <DUR>`;
+  default is "exit code 0 means match". `--until-http` accepts a DSL
+  via `--match` (`status == 200`, `body contains foo`,
+  `$.json.path == "x"`). Status line uses TTY in-place rewrite;
+  pass `--verbose` (or run non-TTY) for newline-per-poll. Audit
+  entry per watch (verb=`watch`). Exit codes: 0 match, 124 timeout,
+  130 cancelled, 2 error.
+
+- **B5 — `inspect search` cross-service grep.** Single command that
+  greps a pattern across logs and configs in selected containers and
+  reports a per-service summary plus highlighted matches. Pushes the
+  regex down to `grep -E` server-side and respects `--since`.
+
+- **B6 — Selectors carry container kind.** `ns/svc:logs` and
+  `ns/svc:config` selector suffixes route the same verb (e.g. `grep`)
+  to the correct file class without per-verb flags.
+
+- **B3 — Configurable per-line byte cap with `--no-truncate`.** Run /
+  exec / search default to a 4 KiB per-line cap (sanitized for
+  ANSI/C0). `--no-truncate` lifts the cap. Truncation marker now
+  shows the byte count.
+
+- **B2 — Server-side line filter pushdown.** `--filter-line-pattern`
+  (alias `--match`) pushes through `grep -E` on the remote so
+  irrelevant lines never cross the wire.
+
+- **B1 — Streaming captured stdout.** `inspect exec` now streams
+  output live AND captures it for audit; the audit `args` field
+  reflects exactly what the operator saw.
+
+- **B4 — `--reason` audit ergonomics.** Reason is validated up-front
+  (240-char cap), echoed to stderr at run start, and stored in the
+  audit log. `inspect audit ls --reason <substring>` filters by it.
+
+- **B8 — `--no-truncate` propagation.** Threaded through `run`,
+  `exec`, and `search` consistently.
+
+- **B7 — `inspect run` exit code propagation.** Inner exit codes
+  surface through `inspect run`/`exec` (clamped to 8 bits) so shell
+  scripts can branch on them.
+
+### Changed
+
+- **Audit schema** carries two optional fields: `bundle_id` and
+  `bundle_step`. Backward-compatible — entries written by 0.1.1 and
+  earlier parse and render unchanged.
+
+- **`inspect audit ls`** gains `--bundle <id>` to filter to a single
+  bundle invocation.
+
+### Notes
+
+- New CLI surface: `inspect watch --help`, `inspect bundle --help`,
+  `inspect bundle plan --help`, `inspect bundle apply --help`.
+  All carry the canonical `See also: inspect help …` footer.
+- 27 test suites, 555+ tests. CI gates (`cargo fmt --all -- --check`,
+  `cargo build --locked`, `cargo test --locked`) all green.
+
 ## [0.1.1] — Phase C field-feedback patches
 
 Phase C of `INSPECT_v0.1.1_PATCH_SPEC.md`. Builds on Phases A + B;

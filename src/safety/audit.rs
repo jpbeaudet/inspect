@@ -49,6 +49,16 @@ pub struct AuditEntry {
     /// here so audit downstream can grep on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// B9 (v0.1.2): bundle correlation id. When set, every step run
+    /// from the same `inspect bundle run` invocation shares this id
+    /// so `inspect audit ls --bundle <id>` can reconstruct the
+    /// transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    /// B9 (v0.1.2): the step id within the bundle. Lets reviewers
+    /// see which YAML step produced this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_step: Option<String>,
 }
 
 impl AuditEntry {
@@ -73,6 +83,8 @@ impl AuditEntry {
             is_revert: false,
             reverts: None,
             reason: None,
+            bundle_id: None,
+            bundle_step: None,
         }
     }
 }

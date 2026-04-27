@@ -2,11 +2,24 @@
 
 **Rule:** Ship when 10+ items accumulated OR one critical issue found.
 **Source:** Field notes, ongoing usage on `arte` namespace.
-**Status:** Collecting.
+**Status:** **SHIPPED** — all 10 items (B1–B10) released in v0.1.2. See [CHANGELOG.md](CHANGELOG.md) `[0.1.2]`.
+
+| Item | Status | Notes |
+|---|---|---|
+| B1 — chained SSH auth + setup hint | ✅ Shipped | `tests/phase_a_v011.rs` |
+| B2 — server-side `--filter-line-pattern` push-down | ✅ Shipped | `tests/phase_b_v011.rs` |
+| B3 — `--match` zero-results exits 0 | ✅ Shipped | `tests/phase_c_v011.rs` |
+| B4 — `inspect why` precise diagnostics | ✅ Shipped | `tests/phase9_diagnostics.rs` |
+| B5 — redactor coverage (auth headers, tokens) | ✅ Shipped | `src/redact.rs` unit tests |
+| B6 — `inspect connectivity` triage verb | ✅ Shipped | `src/commands/connectivity.rs` |
+| B7 — selector migration breadcrumb | ✅ Shipped | error-message inline note |
+| B8 — `--no-truncate` on read verbs | ✅ Shipped | tests in `phase4_read_verbs.rs` |
+| B9 — `inspect bundle` orchestration subsystem | ✅ Shipped | `src/bundle/`, `tests/b9_bundle.rs` |
+| B10 — `inspect watch` block-until-condition | ✅ Shipped | `tests/b10_watch.rs` |
 
 ---
 
-## Backlog (10 items)
+## Backlog (10 items, all shipped)
 
 ### B1 — Compound error hint: profile migration + dead SSH agent
 **Source:** v0.1.1 field note #15

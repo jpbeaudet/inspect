@@ -176,7 +176,7 @@ fn jq_pipeline_from_acceptance_script_works() {
     // Plan §11 step 5: the acceptance demo runs this exact predicate.
     let v = run(&["help", "--json"]);
     assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["topics"].as_array().unwrap().len(), 12);
+    assert_eq!(v["topics"].as_array().unwrap().len(), 14);
     assert!(v["commands"].as_object().unwrap().len() >= 30);
 }
 

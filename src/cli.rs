@@ -425,6 +425,31 @@ EXAMPLES
   $ inspect revert <audit-id> --apply
   $ inspect revert <audit-id> --apply --force";
 
+const LONG_BUNDLE: &str = "\
+YAML-driven multi-step orchestration. A bundle declares preflight \
+checks, an ordered list of steps (exec / run / watch), per-step \
+rollback actions, an optional bundle-level rollback block, and \
+postflight checks.
+
+Subcommands:
+  plan   Validate the bundle, interpolate {{ vars.* }} / {{ matrix.* }},
+         and print the rendered step list. Never touches a remote.
+  apply  Run preflight, then steps in order. On failure, route via the
+         step's `on_failure:` (abort | continue | rollback | rollback_to:<id>).
+         Postflight runs on success and is reported but does NOT trigger
+         rollback.
+
+Audit:
+  Every exec step (and bundle.rollback / bundle.watch action) writes one
+  audit entry tagged with bundle_id (a fresh ULID-shaped id per apply
+  invocation) and bundle_step (the step's `id:`). `inspect audit ls
+  --bundle <id>` filters to a single run.
+
+EXAMPLES
+  $ inspect bundle plan deploy.yaml
+  $ inspect bundle apply deploy.yaml --apply --reason 'INC-1234'
+  $ inspect bundle apply deploy.yaml --apply --no-prompt    # CI-safe";
+
 const LONG_HELP: &str = "\
 Show in-binary documentation. Run with no topic to see the topic + \
 command index, or with a topic name for the full prose. Use `--search` \
@@ -617,6 +642,11 @@ pub enum Command {
     /// Run a verb across multiple namespaces.
     #[command(long_about = LONG_FLEET)]
     Fleet(FleetArgs),
+
+    // ---- v0.1.2 B9 bundle ----------------------------------------------------
+    /// YAML-driven multi-step orchestration with rollback.
+    #[command(long_about = LONG_BUNDLE)]
+    Bundle(BundleArgs),
 
     // ---- Help system (HP-0) -------------------------------------------------
     /// Show help on a topic, search help, or list all topics.
@@ -1620,6 +1650,57 @@ pub struct WatchArgs {
     /// One status line per poll (instead of in-place TTY rewrite).
     #[arg(long)]
     pub verbose: bool,
+}
+
+// ---------------------------------------------------------------------------
+// B9 (v0.1.2) — `inspect bundle`
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_BUNDLE,
+    after_help = SEE_ALSO_WRITE,
+)]
+pub struct BundleArgs {
+    #[command(subcommand)]
+    pub mode: BundleMode,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BundleMode {
+    /// Validate, interpolate vars/matrix, and print the rendered step
+    /// list. No remote work.
+    Plan(BundlePlanArgs),
+    /// Run preflight + steps + postflight. Destructive steps require
+    /// `--apply` unless they opt out (`apply: false`).
+    Apply(BundleApplyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BundlePlanArgs {
+    /// Path to the bundle YAML file.
+    pub file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct BundleApplyArgs {
+    /// Path to the bundle YAML file.
+    pub file: std::path::PathBuf,
+
+    /// Required for any bundle that contains a destructive `exec:`
+    /// step. Without it, `apply` refuses up front.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Skip the interactive "rollback completed steps?" prompt on
+    /// failure / Ctrl-C. CI mode: rollback runs unconditionally.
+    #[arg(long)]
+    pub no_prompt: bool,
+
+    /// Free-form note attached to every audit entry the bundle
+    /// produces. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]

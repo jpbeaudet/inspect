@@ -64,6 +64,16 @@ pub const TOPICS: &[Topic] = &[
         body: Some(include_str!("content/fleet.md")),
     },
     Topic {
+        id: "bundle",
+        summary: "YAML-driven multi-step orchestration with rollback (B9)",
+        body: Some(include_str!("content/bundle.md")),
+    },
+    Topic {
+        id: "watch",
+        summary: "Block until a condition holds on a single target (B10)",
+        body: Some(include_str!("content/watch.md")),
+    },
+    Topic {
         id: "recipes",
         summary: "Multi-step diagnostic and remediation runbooks",
         body: Some(include_str!("content/recipes.md")),
@@ -156,6 +166,7 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("network", &["selectors", "formats", "examples"]),
     ("ports", &["selectors", "formats", "examples"]),
     ("run", &["selectors", "formats", "examples"]),
+    ("watch", &["selectors", "formats", "examples"]),
     ("resolve", &["selectors", "aliases", "examples"]),
     // Search.
     ("search", &["search", "selectors", "aliases", "formats"]),
@@ -177,6 +188,8 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("revert", &["safety", "write"]),
     // Fleet orchestrator.
     ("fleet", &["fleet", "write", "selectors"]),
+    // B9 — bundle orchestration.
+    ("bundle", &["write", "safety", "fleet"]),
     // Diagnostic recipes.
     ("why", &["recipes", "examples"]),
     ("connectivity", &["recipes", "examples"]),
@@ -324,7 +337,7 @@ mod tests {
 
     #[test]
     fn topic_count_matches_bible() {
-        assert_eq!(TOPICS.len(), 12);
+        assert_eq!(TOPICS.len(), 14);
     }
 
     #[test]

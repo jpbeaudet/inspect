@@ -3,6 +3,7 @@
 pub mod add;
 pub mod alias;
 pub mod audit;
+pub mod bundle;
 pub mod connect;
 pub mod connections;
 pub mod connectivity;
