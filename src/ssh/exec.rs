@@ -328,3 +328,137 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
 
     Ok(exit_code)
 }
+
+/// B7 (v0.1.2) capturing streaming variant. Pumps remote stdout
+/// line-by-line through `on_line` for live display **and** captures
+/// every emitted line into the returned [`RemoteOutput`] so callers
+/// (notably `inspect exec`, which writes the audit log) keep a
+/// faithful record of what was shown to the operator.
+///
+/// stderr is collected into the returned `RemoteOutput.stderr` field,
+/// not streamed: most failure-message detection (no-shell containers,
+/// MaxSessions, SSH multiplexing errors) reads the whole stderr blob
+/// at once after the child exits, and streaming it would interleave
+/// noise into the operator's transcript. The MaxSessions diagnostic
+/// is preserved.
+pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
+    namespace: &str,
+    target: &SshTarget,
+    cmd: &str,
+    opts: RunOpts,
+    mut on_line: F,
+) -> Result<RemoteOutput> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    let _session =
+        super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
+
+    let socket = socket_path(namespace);
+    let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
+
+    let mut ssh = Command::new(SSH_BIN);
+    if use_socket {
+        ssh.arg("-S")
+            .arg(&socket)
+            .arg("-o")
+            .arg(format!("ControlPath={}", socket.display()));
+    }
+    ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
+    apply_extra_opts(&mut ssh);
+    ssh.arg(&target.host)
+        .arg("--")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let timeout = opts.timeout.unwrap_or_else(|| Duration::from_secs(30));
+    let mut child = ssh
+        .spawn()
+        .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_handle = if let Some(mut e) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        Some(thread::spawn(move || {
+            let mut local = Vec::new();
+            let _ = e.read_to_end(&mut local);
+            if let Ok(mut g) = buf.lock() {
+                g.extend_from_slice(&local);
+            }
+        }))
+    } else {
+        None
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("ssh: failed to capture stdout"))?;
+    let mut reader = BufReader::new(stdout);
+    let start = std::time::Instant::now();
+    let mut line_bytes: Vec<u8> = Vec::with_capacity(4096);
+    let mut captured_stdout = String::new();
+
+    let exit_code: i32 = loop {
+        if crate::exec::cancel::is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 130;
+        }
+        line_bytes.clear();
+        match reader.read_until(b'\n', &mut line_bytes) {
+            Ok(0) => {
+                let status = child.wait().context("waiting on ssh")?;
+                break status.code().unwrap_or(-1);
+            }
+            Ok(_) => {
+                while matches!(line_bytes.last(), Some(b'\n') | Some(b'\r')) {
+                    line_bytes.pop();
+                }
+                let s = String::from_utf8_lossy(&line_bytes);
+                captured_stdout.push_str(&s);
+                captured_stdout.push('\n');
+                on_line(&s);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("ssh stdout read failed: {e}"));
+            }
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "remote stream timed out after {}s on '{}': {}",
+                timeout.as_secs(),
+                namespace,
+                truncate(cmd, 120)
+            ));
+        }
+    };
+
+    if let Some(h) = stderr_handle {
+        let _ = h.join();
+    }
+    let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+
+    if exit_code != 0 && super::concurrency::looks_like_max_sessions(&stderr) {
+        return Err(anyhow!(
+            "SSH MaxSessions hit on '{}': server refused new channel \
+             (lower INSPECT_MAX_SESSIONS_PER_HOST below the server's \
+             MaxSessions, or raise the server's limit)",
+            target.host
+        ));
+    }
+
+    Ok(RemoteOutput {
+        stdout: captured_stdout,
+        stderr,
+        exit_code,
+    })
+}

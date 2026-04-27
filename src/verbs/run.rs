@@ -49,6 +49,15 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
     let masker = crate::redact::EnvSecretMasker::new(args.show_secrets, args.redact_all);
+    // B8 (v0.1.2): when --no-truncate is set, lift the per-line byte cap
+    // entirely. Otherwise keep the existing 4 KiB default that protects
+    // terminals from runaway 100KB+ JSON blobs.
+    let line_budget = if args.no_truncate {
+        usize::MAX
+    } else {
+        crate::format::safe::DEFAULT_MAX_LINE_BYTES
+    };
+    let mut truncated_lines = 0usize;
 
     for s in &steps {
         if crate::exec::cancel::is_cancelled() {
@@ -89,10 +98,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         ),
                 );
             } else {
-                let safe = crate::format::safe::safe_terminal_line(
-                    &masked,
-                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
-                );
+                let safe = crate::format::safe::safe_terminal_line(&masked, line_budget);
+                if line_budget != usize::MAX && masked.len() > line_budget {
+                    truncated_lines += 1;
+                }
                 println!("{label} | {safe}");
             }
         });
@@ -128,6 +137,17 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let mut r = Renderer::new();
         r.summary(format!("run: {ok} ok, {bad} failed"));
         r.print();
+        // B8: surface a single, unmissable end-of-stream warning when any
+        // line was truncated mid-content. Goes to stderr so it doesn't
+        // interleave with the data captured by `> file` redirects.
+        if truncated_lines > 0 {
+            eprintln!(
+                "── output truncated: {n} line{s} exceeded the {budget}-byte per-line cap (re-run with --no-truncate to see full content) ──",
+                n = truncated_lines,
+                s = if truncated_lines == 1 { "" } else { "s" },
+                budget = line_budget,
+            );
+        }
     }
 
     // P11 (v0.1.1): surface the remote command's exit code on

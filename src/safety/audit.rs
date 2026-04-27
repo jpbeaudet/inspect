@@ -49,6 +49,16 @@ pub struct AuditEntry {
     /// here so audit downstream can grep on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// B9 (v0.1.2): bundle correlation id. When set, every step run
+    /// from the same `inspect bundle run` invocation shares this id
+    /// so `inspect audit ls --bundle <id>` can reconstruct the
+    /// transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    /// B9 (v0.1.2): the step id within the bundle. Lets reviewers
+    /// see which YAML step produced this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_step: Option<String>,
 }
 
 impl AuditEntry {
@@ -73,6 +83,8 @@ impl AuditEntry {
             is_revert: false,
             reverts: None,
             reason: None,
+            bundle_id: None,
+            bundle_step: None,
         }
     }
 }
@@ -230,6 +242,18 @@ fn append_locked(path: &Path, line: &str) -> Result<()> {
     buf.push('\n');
     f.write_all(buf.as_bytes()).context("writing audit entry")?;
     f.flush().context("flushing audit entry")?;
+    // Forensic durability: an audit entry that exists only in the
+    // kernel page cache is one power loss away from being lost. We
+    // pay one fdatasync per mutation. Best-effort: on filesystems
+    // that don't implement fsync (some FUSE/network mounts), degrade
+    // gracefully — we'd rather keep the record we just wrote than
+    // refuse the operation.
+    if let Err(e) = f.sync_data() {
+        eprintln!(
+            "inspect: warning: audit fsync failed ({}); entry written but may not be durable",
+            e
+        );
+    }
 
     #[cfg(unix)]
     {

@@ -255,12 +255,13 @@ fn help_all_dumps_every_topic() {
             "`inspect help all` missing topic title {id:?}"
         );
     }
-    // Deterministic separator between topics (11 separators for 12 topics).
+    // Deterministic separator between topics (13 separators for 14 topics
+    // after v0.1.2 added `bundle` and `watch`).
     let bar = "=".repeat(72);
     assert_eq!(
         text.matches(bar.as_str()).count(),
-        11,
-        "expected 11 topic separators in `inspect help all`"
+        13,
+        "expected 13 topic separators in `inspect help all`"
     );
 }
 
@@ -443,6 +444,7 @@ const TOP_LEVEL_VERBS: &[&str] = &[
     "audit",
     "revert",
     "fleet",
+    "bundle",
     "help",
 ];
 

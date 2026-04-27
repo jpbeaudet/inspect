@@ -8,6 +8,7 @@
 pub mod drift;
 pub mod engine;
 pub mod probes;
+pub mod ssh_precheck;
 
 #[allow(unused_imports)]
 pub use engine::{discover, DiscoverOptions};

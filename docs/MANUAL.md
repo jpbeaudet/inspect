@@ -127,7 +127,7 @@ inspect connect arte
 
 This unlocks the SSH agent / key once and keeps a `ControlMaster`
 socket open for the rest of the shell, so subsequent `inspect`
-invocations do not prompt for a passphrase. See §13 for the full
+invocations do not prompt for a passphrase. See §15 for the full
 SSH lifecycle.
 
 ### 3.4 Discover the topology
@@ -498,6 +498,7 @@ For the deep dive: `inspect help write`.
 
 ```sh
 inspect audit ls --limit 20          # recent mutations
+inspect audit ls --bundle <bundle-id> # entries from one bundle apply
 inspect audit show <id>              # one entry with diff summary
 inspect audit grep "atlas"           # search audit entries
 inspect revert <audit-id>            # preview the reverse diff
@@ -515,6 +516,12 @@ clobbering a more recent change.
 The audit log is **forensic, not tamper-proof**. A user with file
 access can edit or delete entries. For regulated environments,
 forward audit entries to an external log system.
+
+Every audit entry is `fdatasync(2)`'d after write, so it survives
+power loss on conformant filesystems. On filesystems that do not
+implement `fsync` (some FUSE/network mounts) `inspect` warns once
+and continues — it would rather record the entry than refuse the
+operation.
 
 ---
 
@@ -630,7 +637,124 @@ For more: `inspect help fleet`.
 
 ---
 
-## 13. SSH lifecycle, ControlMaster, passphrases
+## 13. Block until a condition with `inspect watch`
+
+`inspect watch` blocks the shell until a single target reaches a
+condition you describe, then exits. It is the building block for
+"wait for the deploy to be healthy before flipping traffic" and
+for smoke checks inside CI pipelines.
+
+```sh
+inspect watch arte/atlas --until-status running --timeout 2m
+inspect watch arte/atlas --until-cmd 'systemctl is-active atlas' --eq active
+inspect watch arte/atlas --until-log '/var/log/atlas.log' --match 'ready'
+inspect watch arte/api --until-http https://api.example.com/healthz --status 200
+```
+
+Four predicate kinds, one at a time:
+
+| Predicate | Satisfied when |
+|---|---|
+| `--until-status <state>` | container/process reaches that state (e.g. `running`) |
+| `--until-cmd <sh>` `--eq/--ne/--contains <s>` | command stdout matches the comparator |
+| `--until-log <path>` `--match <re>` | a new line in the log matches the regex |
+| `--until-http <url>` `--status <code>` | HTTP probe returns that status (`--insecure`, `--header`) |
+
+Knobs that apply to all predicates:
+
+- `--interval <dur>` — poll interval (default `2s`).
+- `--timeout <dur>` — overall ceiling. Exits **124** when reached.
+- `--quiet` — suppress the per-tick status line.
+- `--insecure` (only with `--until-http`) — disables TLS
+  verification for self-signed staging endpoints. **Never use
+  against production.**
+
+Exit codes: **0** condition met, **124** timeout, **130** Ctrl-C,
+**2** invalid arguments. Each completed watch writes one audit
+entry (`verb=watch`) so retries are reconstructable.
+
+For the full reference: `inspect help watch`.
+
+---
+
+## 14. Multi-step orchestration with `inspect bundle`
+
+`inspect bundle` runs a YAML-described sequence of mutations across
+one or more targets, with preflight checks, ordered or parallel
+steps, automatic rollback on failure, and postflight verification.
+Every action is audited and correlated by a single `bundle_id` so
+the whole apply is one forensic unit.
+
+Two subcommands:
+
+```sh
+inspect bundle plan  ./rollout.yaml          # render the plan, do nothing
+inspect bundle apply ./rollout.yaml --apply  # execute (gate is mandatory)
+inspect bundle apply ./rollout.yaml --apply --no-prompt --reason "CHG-1234"
+```
+
+A minimal bundle:
+
+```yaml
+version: 1
+name: rotate-atlas-config
+preflight:
+  - id: ssh-up
+    check: ssh
+    target: arte/atlas
+steps:
+  - id: edit-conf
+    target: arte/atlas
+    edit:
+      path: /etc/atlas/atlas.conf
+      sed: 's/timeout=10/timeout=30/'
+  - id: restart
+    target: arte/atlas
+    restart: {}
+    requires: [edit-conf]
+    on_failure: { rollback_to: edit-conf }
+postflight:
+  - id: healthy
+    check: http
+    url: https://atlas.example.com/healthz
+    status: 200
+```
+
+Key mechanics:
+
+- **`requires`** builds a DAG. Forward references and cycles are
+  rejected at `plan` time.
+- **`matrix`** on a step expands one step into N parallel branches,
+  capped by `INSPECT_MAX_PARALLEL` (hard cap 8).
+- **`on_failure`** routes the step's exit:
+  `abort` (default), `continue`, or `{ rollback_to: <step-id> }`.
+- **Rollback** walks completed reversible steps in reverse order.
+  If a rollback action itself fails, the bundle exits with a clear
+  "mixed state" warning naming the step.
+- **`--apply` is mandatory** for any mutation. Without it, every
+  mutating step is a dry-run, regardless of bundle contents.
+- **Audit correlation:** every step writes an audit entry tagged
+  with `bundle_id` and `bundle_step`. Retrieve with
+  `inspect audit ls --bundle <bundle-id>`.
+
+Exit codes: **0** all steps succeeded (postflight included), **3**
+a step failed and rollback completed cleanly, **4** rollback itself
+failed (mixed state — operator action required), **2** schema
+error, **130** Ctrl-C during apply (rollback runs).
+
+When to reach for `bundle` instead of `fleet` or `recipe`:
+
+- **`fleet`** = same verb across many namespaces, no ordering.
+- **`recipe`** = a named multi-step workflow with no rollback.
+- **`bundle`** = ordered or parallel steps with preflight, rollback,
+  postflight, and forensic correlation. Use it for change-managed
+  rollouts.
+
+For the full reference and schema: `inspect help bundle`.
+
+---
+
+## 15. SSH lifecycle, ControlMaster, passphrases
 
 `inspect` does **not** read your passphrase. It uses your system
 `ssh`, which is configured to use `ControlMaster` so you only unlock
@@ -656,7 +780,7 @@ For the full reference: `inspect help ssh` (and `inspect help ssh
 
 ---
 
-## 14. Configuration reference
+## 16. Configuration reference
 
 | Path | Purpose |
 |---|---|
@@ -678,7 +802,7 @@ Useful environment variables:
 
 ---
 
-## 15. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | First check | Likely cause |
 |---|---|---|
@@ -689,12 +813,14 @@ Useful environment variables:
 | Slow first results across many servers | `INSPECT_MAX_PARALLEL=8 inspect …` | concurrency cap |
 | Secrets visible in `--json` output | open a P0 issue | redactor bug — this is a contract |
 | Selector "matches nothing" | the diagnostic lists what is available | typo, drifted profile, or wrong namespace |
+| `inspect watch` exits **124** | predicate genuinely not met within `--timeout`, or interval too long | raise `--timeout`, lower `--interval`, or check the predicate by hand |
+| `inspect bundle apply` exits **4** | rollback itself failed — bundle is in a mixed state | inspect `audit ls --bundle <id>`, finish the rollback by hand |
 
 For maintainer-side incident handling, see [RUNBOOK.md](RUNBOOK.md) §3.
 
 ---
 
-## 16. Translation guide (grep / stern / ssh / sed)
+## 18. Translation guide (grep / stern / ssh / sed)
 
 You probably already know the shape of the work. Here's how it maps.
 

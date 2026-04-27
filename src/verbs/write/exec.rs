@@ -2,8 +2,17 @@
 //!
 //! Runs a free-form command on the target. `--apply` required (no
 //! preview semantics — the command is itself the action).
+//!
+//! v0.1.2 (B7): output is streamed line-by-line to the operator's
+//! terminal as the remote command produces it, instead of being
+//! buffered until exit. A background heartbeat thread emits
+//! `[inspect] still running on <ns> (Ns elapsed)` to stderr after
+//! `--heartbeat <secs>` (default 30s) of remote silence so the
+//! operator can tell `pg_dump` is alive vs. wedged.
 
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -66,6 +75,13 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
 
+    // B7: heartbeat configuration. 0 = disabled.
+    let heartbeat_secs: u64 = if args.no_heartbeat {
+        0
+    } else {
+        args.heartbeat.unwrap_or(30)
+    };
+
     for s in &steps {
         let cmd = match s.container() {
             Some(container) => {
@@ -78,12 +94,71 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             None => user_cmd.clone(),
         };
         let started = Instant::now();
-        let out = runner.run(
+        let label = format!(
+            "{}{}",
+            s.ns.namespace,
+            s.service().map(|x| format!("/{x}")).unwrap_or_default()
+        );
+
+        // B7: heartbeat thread. Wakes every 500ms and, if no remote line
+        // has arrived for `heartbeat_secs`, emits a single line to stderr.
+        let last_seen = Arc::new(Mutex::new(Instant::now()));
+        let stop_heartbeat = Arc::new(AtomicBool::new(false));
+        let heartbeat_handle = if heartbeat_secs > 0 {
+            let last = Arc::clone(&last_seen);
+            let stop = Arc::clone(&stop_heartbeat);
+            let label_hb = label.clone();
+            let interval = Duration::from_secs(heartbeat_secs);
+            let started_hb = started;
+            Some(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let last_t = *last.lock().unwrap();
+                    if last_t.elapsed() >= interval {
+                        let elapsed = started_hb.elapsed().as_secs();
+                        eprintln!("[inspect] still running on {label_hb} ({elapsed}s elapsed)");
+                        // Reset so we don't spam every 500ms after the
+                        // threshold trips — we want one heartbeat per
+                        // `interval` of silence.
+                        *last.lock().unwrap() = Instant::now();
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // B7: stream stdout live; capture into a buffer for the audit log.
+        // The closure prints each line as it arrives so the operator sees
+        // progress in real time, and pokes `last_seen` so the heartbeat
+        // thread knows the remote is still talking.
+        let last_seen_cb = Arc::clone(&last_seen);
+        let mut on_line = |line: &str| {
+            *last_seen_cb.lock().unwrap() = Instant::now();
+            let masked = masker.mask_line(line);
+            // Indented to match the previous `data_line("  {}", ...)`
+            // shape so transcripts and audit log readers don't shift.
+            println!("  {}", masked);
+        };
+
+        let stream_result = runner.run_streaming_capturing(
             &s.ns.namespace,
             &s.ns.target,
             &cmd,
             RunOpts::with_timeout(args.timeout_secs.unwrap_or(120)),
-        )?;
+            &mut on_line,
+        );
+
+        // Stop the heartbeat regardless of success/failure.
+        stop_heartbeat.store(true, Ordering::Relaxed);
+        if let Some(h) = heartbeat_handle {
+            let _ = h.join();
+        }
+
+        let out = stream_result?;
         let dur = started.elapsed().as_millis() as u64;
 
         let mut e = AuditEntry::new(
@@ -117,20 +192,11 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         }
         last_inner = Some(out.exit_code);
 
-        let label = format!(
-            "{}{}",
-            s.ns.namespace,
-            s.service().map(|x| format!("/{x}")).unwrap_or_default()
-        );
         if out.ok() {
             ok += 1;
             renderer.data_line(format!("{label}: ok ({}ms)", dur));
-            if !out.stdout.trim().is_empty() {
-                for line in out.stdout.lines() {
-                    let masked = masker.mask_line(line);
-                    renderer.data_line(format!("  {}", masked));
-                }
-            }
+            // We already streamed the captured stdout above; do NOT
+            // re-emit it via the renderer (would duplicate).
         } else {
             bad += 1;
             // Field pitfall §7.3: distroless / scratch images have no

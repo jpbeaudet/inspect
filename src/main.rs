@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod alias;
+mod bundle;
 mod cli;
 mod commands;
 mod config;
@@ -116,12 +117,14 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Chown(args) => verbs::write::chown::run(args),
         Command::Exec(args) => verbs::write::exec::run(args),
         Command::Run(args) => verbs::run::run(args),
+        Command::Watch(args) => verbs::watch::run(args),
         Command::Audit(args) => commands::audit::run(args),
         Command::Revert(args) => commands::revert::run(args),
         Command::Why(args) => commands::why::run(args),
         Command::Connectivity(args) => commands::connectivity::run(args),
         Command::Recipe(args) => commands::recipe::run(args),
         Command::Fleet(args) => commands::fleet::run(args),
+        Command::Bundle(args) => commands::bundle::run(args),
         Command::Help(args) => commands::help::run(args),
     }
 }

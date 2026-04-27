@@ -330,6 +330,36 @@ EXAMPLES
   $ inspect run arte/atlas -- 'docker ps --format json'
   $ inspect run 'prod-*' -- 'df -h /var'";
 
+const LONG_WATCH: &str = "\
+Block until a predicate over the target becomes true (B10, v0.1.2). \
+Exactly one `--until-*` flag is required:
+
+  --until-cmd <CMD>      run CMD on the target each interval and apply
+                         a comparator (--equals/--matches/--gt/--lt/
+                         --changes/--stable-for); without a comparator,
+                         the predicate is `exit code == 0`.
+  --until-log <PATTERN>  poll `docker logs` since watch start and match
+                         PATTERN literally (default) or as a regex
+                         (`--regex`).
+  --until-sql <SQL>      run SQL via `docker exec <ctr> psql -tAc ...`;
+                         match if result trims to t/true/1/yes.
+  --until-http <URL>     curl URL on the target; match on HTTP 200 by
+                         default, or apply `--match <EXPR>` with the
+                         tiny DSL `<lhs> <op> <rhs>` where lhs is
+                         `body`/`status`/`$.json.path`, op is
+                         ==/!=/</>/contains.
+
+Exit codes: 0 on match, 124 on timeout (matches timeout(1)), 2 on \
+error. Default --interval is 2s and default --timeout cap is 10m. \
+Each watch records one audit entry with verb=`watch`, the predicate, \
+elapsed time, and the value that triggered the match.
+
+EXAMPLES
+  $ inspect watch arte/atlas --until-cmd 'systemctl is-active atlas' --equals active
+  $ inspect watch arte/db    --until-sql 'SELECT pg_is_in_recovery()=false' --psql-opts '-U postgres'
+  $ inspect watch arte/api   --until-http http://localhost:8080/health --match 'status == 200'
+  $ inspect watch arte/atlas --until-log 'ready to accept connections' --timeout 5m";
+
 const LONG_PATH_ARG: &str = "\
 File operation on a target path (the verb form chooses: rm / mkdir / \
 touch). Dry-run by default; `--apply` executes.
@@ -394,6 +424,31 @@ EXAMPLES
   $ inspect revert <audit-id>
   $ inspect revert <audit-id> --apply
   $ inspect revert <audit-id> --apply --force";
+
+const LONG_BUNDLE: &str = "\
+YAML-driven multi-step orchestration. A bundle declares preflight \
+checks, an ordered list of steps (exec / run / watch), per-step \
+rollback actions, an optional bundle-level rollback block, and \
+postflight checks.
+
+Subcommands:
+  plan   Validate the bundle, interpolate {{ vars.* }} / {{ matrix.* }},
+         and print the rendered step list. Never touches a remote.
+  apply  Run preflight, then steps in order. On failure, route via the
+         step's `on_failure:` (abort | continue | rollback | rollback_to:<id>).
+         Postflight runs on success and is reported but does NOT trigger
+         rollback.
+
+Audit:
+  Every exec step (and bundle.rollback / bundle.watch action) writes one
+  audit entry tagged with bundle_id (a fresh ULID-shaped id per apply
+  invocation) and bundle_step (the step's `id:`). `inspect audit ls
+  --bundle <id>` filters to a single run.
+
+EXAMPLES
+  $ inspect bundle plan deploy.yaml
+  $ inspect bundle apply deploy.yaml --apply --reason 'INC-1234'
+  $ inspect bundle apply deploy.yaml --apply --no-prompt    # CI-safe";
 
 const LONG_HELP: &str = "\
 Show in-binary documentation. Run with no topic to see the topic + \
@@ -561,6 +616,10 @@ pub enum Command {
     #[command(long_about = LONG_RUN)]
     Run(RunArgs),
 
+    /// Block until a predicate over the target becomes true (B10).
+    #[command(long_about = LONG_WATCH)]
+    Watch(WatchArgs),
+
     // ---- Phase 3 alias management --------------------------------------------
     /// Manage selector aliases.
     #[command(long_about = LONG_ALIAS)]
@@ -583,6 +642,11 @@ pub enum Command {
     /// Run a verb across multiple namespaces.
     #[command(long_about = LONG_FLEET)]
     Fleet(FleetArgs),
+
+    // ---- v0.1.2 B9 bundle ----------------------------------------------------
+    /// YAML-driven multi-step orchestration with rollback.
+    #[command(long_about = LONG_BUNDLE)]
+    Bundle(BundleArgs),
 
     // ---- Help system (HP-0) -------------------------------------------------
     /// Show help on a topic, search help, or list all topics.
@@ -1427,6 +1491,14 @@ pub struct ExecArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Emit a `[inspect] still running on <ns> (Ns elapsed)` line to
+    /// stderr after this many seconds of remote silence (B7, v0.1.2).
+    /// Defaults to 30s. Use `--no-heartbeat` to disable.
+    #[arg(long, value_name = "SECS", conflicts_with = "no_heartbeat")]
+    pub heartbeat: Option<u64>,
+    /// Disable the live heartbeat. Streaming output is unaffected.
+    #[arg(long)]
+    pub no_heartbeat: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1463,8 +1535,177 @@ pub struct RunArgs {
     /// intent. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Pass through every output line verbatim — disables the per-line
+    /// byte cap that protects terminals from runaway 100KB+ JSON blobs.
+    /// Use when you need full fidelity (e.g. capturing full SQL query
+    /// output for a snapshot). Lines are still sanitized for ANSI/C0.
+    #[arg(long)]
+    pub no_truncate: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_WATCH,
+    after_help = SEE_ALSO_READ,
+)]
+pub struct WatchArgs {
+    /// Selector. For `--until-cmd`/`--until-log`/`--until-sql`/`--until-http`
+    /// this is the target the predicate is evaluated against.
+    pub selector: String,
+
+    // ---- predicate kinds (mutually exclusive, exactly one required) ----
+    /// Block until CMD's stdout / exit code satisfies the comparator.
+    /// Without a comparator, exit code 0 is treated as match.
+    #[arg(
+        long,
+        value_name = "CMD",
+        group = "predicate",
+        conflicts_with_all = ["until_log", "until_sql", "until_http"],
+    )]
+    pub until_cmd: Option<String>,
+
+    /// Block until PATTERN appears in `docker logs` after the watch
+    /// started. Literal substring by default; pass `--regex` for ERE.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        group = "predicate",
+        conflicts_with_all = ["until_cmd", "until_sql", "until_http"],
+    )]
+    pub until_log: Option<String>,
+
+    /// Block until `psql -tAc <SQL>` returns truthy (t/true/1/yes after
+    /// trim). Run inside the target container via `docker exec`. Use
+    /// `--psql-opts` to pass `-U/-d/...`.
+    #[arg(
+        long,
+        value_name = "SQL",
+        group = "predicate",
+        conflicts_with_all = ["until_cmd", "until_log", "until_http"],
+    )]
+    pub until_sql: Option<String>,
+
+    /// Block until `curl -fsS <URL>` (run on the target host) satisfies
+    /// `--match`. Without `--match`, any HTTP success (curl exit 0) is
+    /// a match.
+    #[arg(
+        long,
+        value_name = "URL",
+        group = "predicate",
+        conflicts_with_all = ["until_cmd", "until_log", "until_sql"],
+    )]
+    pub until_http: Option<String>,
+
+    // ---- comparators (only valid with --until-cmd) ----
+    /// Match if the trimmed cmd stdout equals VALUE.
+    #[arg(long, value_name = "VALUE", requires = "until_cmd")]
+    pub equals: Option<String>,
+    /// Match if the cmd stdout matches REGEX (ERE).
+    #[arg(long, value_name = "REGEX", requires = "until_cmd")]
+    pub matches: Option<String>,
+    /// Match if the trimmed cmd stdout (parsed as f64) is greater than N.
+    #[arg(long, value_name = "N", requires = "until_cmd")]
+    pub gt: Option<f64>,
+    /// Match if the trimmed cmd stdout (parsed as f64) is less than N.
+    #[arg(long, value_name = "N", requires = "until_cmd")]
+    pub lt: Option<f64>,
+    /// Match the first time the cmd stdout differs from the previous
+    /// poll. Skips the first poll.
+    #[arg(long, requires = "until_cmd")]
+    pub changes: bool,
+    /// Match when the cmd stdout has been the same for at least DUR
+    /// (e.g. `30s`, `5m`).
+    #[arg(long, value_name = "DUR", requires = "until_cmd")]
+    pub stable_for: Option<String>,
+
+    // ---- per-kind options ----
+    /// Treat `--until-log <PATTERN>` as an extended regex instead of a
+    /// literal substring.
+    #[arg(long, requires = "until_log")]
+    pub regex: bool,
+    /// Extra args inserted between `psql` and the SQL flags (e.g.
+    /// `-U postgres -d app`). Required when the container does not
+    /// default to a usable PGUSER/PGDATABASE.
+    #[arg(long, value_name = "OPTS", requires = "until_sql")]
+    pub psql_opts: Option<String>,
+    /// Predicate over the HTTP response. DSL: `<lhs> <op> <rhs>` where
+    /// lhs ∈ {body, status, $.json.path}, op ∈ {==, !=, <, >, contains}.
+    #[arg(long, value_name = "EXPR", requires = "until_http")]
+    pub r#match: Option<String>,
+    /// Disable TLS certificate verification for `--until-http`. Use
+    /// only for self-signed staging endpoints; never against
+    /// production. Maps to `curl --insecure`.
+    #[arg(long, requires = "until_http")]
+    pub insecure: bool,
+
+    // ---- shared loop knobs ----
+    /// Polling interval (default `2s`). Accepts `Ns/Nm/Nh/Nd`.
+    #[arg(long, value_name = "DUR")]
+    pub interval: Option<String>,
+    /// Hard deadline (default `10m`). Accepts `Ns/Nm/Nh/Nd`. Use `0s`
+    /// to disable. On timeout, `inspect watch` exits 124.
+    #[arg(long, value_name = "DUR")]
+    pub timeout: Option<String>,
+    /// Free-form note recorded in the audit entry. Limited to 240
+    /// characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// One status line per poll (instead of in-place TTY rewrite).
+    #[arg(long)]
+    pub verbose: bool,
+}
+
+// ---------------------------------------------------------------------------
+// B9 (v0.1.2) — `inspect bundle`
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_BUNDLE,
+    after_help = SEE_ALSO_WRITE,
+)]
+pub struct BundleArgs {
+    #[command(subcommand)]
+    pub mode: BundleMode,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BundleMode {
+    /// Validate, interpolate vars/matrix, and print the rendered step
+    /// list. No remote work.
+    Plan(BundlePlanArgs),
+    /// Run preflight + steps + postflight. Destructive steps require
+    /// `--apply` unless they opt out (`apply: false`).
+    Apply(BundleApplyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BundlePlanArgs {
+    /// Path to the bundle YAML file.
+    pub file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct BundleApplyArgs {
+    /// Path to the bundle YAML file.
+    pub file: std::path::PathBuf,
+
+    /// Required for any bundle that contains a destructive `exec:`
+    /// step. Without it, `apply` refuses up front.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Skip the interactive "rollback completed steps?" prompt on
+    /// failure / Ctrl-C. CI mode: rollback runs unconditionally.
+    #[arg(long)]
+    pub no_prompt: bool,
+
+    /// Free-form note attached to every audit entry the bundle
+    /// produces. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
