@@ -12,6 +12,15 @@
 //! Empty results produce a [`SelectorError::NoMatches`] carrying everything
 //! the user might have typo'd, in pre-sorted form, so the diagnostic is
 //! helpful instead of a bare "no matches".
+//!
+//! `clippy::result_large_err` is allowed at the module level. The
+//! diagnostic payload (available namespaces, services, aliases, groups
+//! pre-sorted for the user) IS the value of this error type — it is
+//! what makes `inspect` fail-helpful instead of fail-cryptic. Boxing
+//! it would save 200 bytes on the cold path while making every error
+//! site indirect on the hot one. As an SRE tool we map services and
+//! errors as first-class values; that's the contract.
+#![allow(clippy::result_large_err)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
