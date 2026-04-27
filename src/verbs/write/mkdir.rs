@@ -58,7 +58,11 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     for (s, path) in &planned {
         let inner = format!("mkdir -p -- {}", shquote(path));
         let cmd = match s.container() {
-            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
+            Some(container) => format!(
+                "docker exec {} sh -c {}",
+                shquote(container),
+                shquote(&inner)
+            ),
             None => inner,
         };
         let started = Instant::now();

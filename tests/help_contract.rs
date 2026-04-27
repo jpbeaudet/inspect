@@ -797,11 +797,34 @@ fn p8_help_every_top_level_verb_resolves() {
     // either an editorial topic or clap's long-help fallback. The list
     // is the user-facing surface area; an unhandled verb is a regression.
     for verb in [
-        "logs", "status", "ps", "grep", "search", "restart", "stop",
-        "exec", "edit", "rm", "cp", "mkdir", "audit", "revert",
-        "fleet", "why", "recipe", "connectivity", "add", "list",
-        "show", "test", "setup", "discover", "profile", "connect",
-        "alias", "help",
+        "logs",
+        "status",
+        "ps",
+        "grep",
+        "search",
+        "restart",
+        "stop",
+        "exec",
+        "edit",
+        "rm",
+        "cp",
+        "mkdir",
+        "audit",
+        "revert",
+        "fleet",
+        "why",
+        "recipe",
+        "connectivity",
+        "add",
+        "list",
+        "show",
+        "test",
+        "setup",
+        "discover",
+        "profile",
+        "connect",
+        "alias",
+        "help",
     ] {
         let out = inspect()
             .args(["help", verb])
@@ -810,10 +833,7 @@ fn p8_help_every_top_level_verb_resolves() {
             .get_output()
             .stdout
             .clone();
-        assert!(
-            !out.is_empty(),
-            "`inspect help {verb}` produced no output"
-        );
+        assert!(!out.is_empty(), "`inspect help {verb}` produced no output");
     }
 }
 

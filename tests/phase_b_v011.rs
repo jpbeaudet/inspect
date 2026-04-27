@@ -167,13 +167,12 @@ fn p6_run_writes_no_audit_entry() {
         let entries: Vec<_> = std::fs::read_dir(&audit_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|x| x == "jsonl")
-            })
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
             .collect();
-        assert!(entries.is_empty(), "expected no audit jsonl, got {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "expected no audit jsonl, got {entries:?}"
+        );
     }
 }
 
@@ -213,14 +212,7 @@ fn p7_exec_rejects_allow_exec_flag() {
     // Place `--allow-exec` BEFORE the selector so clap parses it as a
     // flag (not as a trailing-var-arg cmd token).
     sb.cmd()
-        .args([
-            "exec",
-            "--allow-exec",
-            "arte/pulse",
-            "--apply",
-            "--",
-            "id",
-        ])
+        .args(["exec", "--allow-exec", "arte/pulse", "--apply", "--", "id"])
         .assert()
         .failure()
         .stderr(contains("--allow-exec").or(contains("unexpected argument")));
@@ -269,16 +261,30 @@ fn p12_audit_ls_filter_by_reason() {
     // First call: a reason that should match the filter.
     sb.cmd()
         .args([
-            "exec", "arte/pulse", "--apply", "--yes", "--reason", "ROTATE secrets",
-            "--", "echo", "ok",
+            "exec",
+            "arte/pulse",
+            "--apply",
+            "--yes",
+            "--reason",
+            "ROTATE secrets",
+            "--",
+            "echo",
+            "ok",
         ])
         .assert()
         .success();
     // Second call: a reason that should be filtered out.
     sb.cmd()
         .args([
-            "exec", "arte/pulse", "--apply", "--yes", "--reason", "investigation",
-            "--", "echo", "ok",
+            "exec",
+            "arte/pulse",
+            "--apply",
+            "--yes",
+            "--reason",
+            "investigation",
+            "--",
+            "echo",
+            "ok",
         ])
         .assert()
         .success();
@@ -301,8 +307,15 @@ fn p12_reason_too_long_is_rejected() {
     let big = "x".repeat(241);
     sb.cmd()
         .args([
-            "exec", "arte/pulse", "--apply", "--yes", "--reason", &big,
-            "--", "echo", "ok",
+            "exec",
+            "arte/pulse",
+            "--apply",
+            "--yes",
+            "--reason",
+            &big,
+            "--",
+            "echo",
+            "ok",
         ])
         .assert()
         .failure()
@@ -391,7 +404,11 @@ fn p10_since_last_creates_cursor_file() {
         .assert()
         .success();
     let cursor = sb.home().join("cursors").join("arte").join("pulse.kv");
-    assert!(cursor.exists(), "cursor file not created at {}", cursor.display());
+    assert!(
+        cursor.exists(),
+        "cursor file not created at {}",
+        cursor.display()
+    );
     let body = std::fs::read_to_string(&cursor).unwrap();
     assert!(body.contains("ns=arte"));
     assert!(body.contains("service=pulse"));

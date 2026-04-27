@@ -196,8 +196,7 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
     // discovery down with it; now we record a warning, mark just that
     // service as `discovery_incomplete`, and keep going.
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-    let mut incomplete_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut incomplete_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let inspect_cmd = format!(
         "docker inspect --format '{{{{json .}}}}' {} 2>/dev/null",
         ids.join(" ")

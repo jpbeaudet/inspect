@@ -80,10 +80,7 @@ mod tests {
     #[test]
     fn match_then_exclude_pipes_in_order() {
         let suf = build_suffix(&s(&["error"]), &s(&["healthcheck"]), false);
-        assert_eq!(
-            suf,
-            " | grep -E -- 'error' | grep -vE -- 'healthcheck'"
-        );
+        assert_eq!(suf, " | grep -E -- 'error' | grep -vE -- 'healthcheck'");
     }
 
     #[test]

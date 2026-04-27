@@ -56,8 +56,8 @@ impl Cursor {
         if !p.exists() {
             return Ok(None);
         }
-        let body = fs::read_to_string(&p)
-            .with_context(|| format!("read cursor {}", p.display()))?;
+        let body =
+            fs::read_to_string(&p).with_context(|| format!("read cursor {}", p.display()))?;
         let mut last_call: u64 = 0;
         let mut last_ts: u64 = 0;
         let mut file_ns = String::new();
@@ -92,8 +92,7 @@ impl Cursor {
     pub fn save(&self) -> Result<()> {
         let p = cursor_file(&self.ns, &self.service);
         if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir -p {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("mkdir -p {}", parent.display()))?;
             // Best effort; cursors_dir() and the per-namespace dir
             // both want 0700.
             let _ = set_dir_mode_0700(&cursors_dir());
