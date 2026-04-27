@@ -203,8 +203,8 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         //    mode/uid/gid of the original (audit §4.2), then rename.
         let tmp = format!("{path}.inspect.{}.tmp", &new_hash[..8]);
         let inner = super::atomic::write_then_rename(&b64, &tmp, path);
-        let cmd = match s.service() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+        let cmd = match s.container() {
+            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
             None => format!("sh -c {}", shquote(&inner)),
         };
 
@@ -276,8 +276,8 @@ fn pull(_args: CpArgs, remote_sel: String, local: String) -> Result<ExitKind> {
     };
 
     let inner = format!("base64 -- {}", shquote(&path));
-    let cmd = match s.service() {
-        Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+    let cmd = match s.container() {
+        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
         None => inner,
     };
     let out = runner.run(
@@ -323,8 +323,8 @@ fn read_remote(
     path: &str,
 ) -> Option<String> {
     let inner = format!("cat -- {}", shquote(path));
-    let cmd = match s.service() {
-        Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+    let cmd = match s.container() {
+        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
         None => inner,
     };
     let out = runner

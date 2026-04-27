@@ -17,7 +17,6 @@ use anyhow::{anyhow, Context, Result};
 
 use super::master::{check_socket, socket_path, MasterStatus};
 use super::options::SshTarget;
-
 const SSH_BIN: &str = "ssh";
 
 /// Result of a remote command execution.
@@ -185,4 +184,147 @@ fn truncate(s: &str, max: usize) -> String {
         out.push_str("...");
         out
     }
+}
+
+/// Streaming variant of [`run_remote`] (P1, v0.1.1). Spawns ssh just
+/// like the buffered runner, but pumps stdout line-by-line into
+/// `on_line` so callers can render output as it arrives instead of
+/// waiting for the remote command to exit.
+///
+/// Returns the remote process's exit code on completion. Honors
+/// [`crate::exec::cancel::is_cancelled`]: when SIGINT/SIGTERM trips
+/// the global flag, the child is killed and `Ok(130)` is returned
+/// (the conventional "killed by SIGINT" exit code).
+///
+/// `opts.timeout` is treated as an *upper bound* on the lifetime of
+/// the entire streaming call. Callers using `--follow` should pass a
+/// generous timeout (hours) since the user is expected to Ctrl-C.
+pub fn run_remote_streaming<F: FnMut(&str)>(
+    namespace: &str,
+    target: &SshTarget,
+    cmd: &str,
+    opts: RunOpts,
+    mut on_line: F,
+) -> Result<i32> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    let _session =
+        super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
+
+    let socket = socket_path(namespace);
+    let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
+
+    let mut ssh = Command::new(SSH_BIN);
+    if use_socket {
+        ssh.arg("-S")
+            .arg(&socket)
+            .arg("-o")
+            .arg(format!("ControlPath={}", socket.display()));
+    }
+    ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
+    apply_extra_opts(&mut ssh);
+    ssh.arg(&target.host)
+        .arg("--")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let timeout = opts.timeout.unwrap_or_else(|| Duration::from_secs(30));
+    let mut child = ssh
+        .spawn()
+        .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+
+    // Drain stderr in a background thread so a chatty remote can't
+    // block on its stderr pipe filling up. We capture it for the
+    // MaxSessions diagnostic at exit time.
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_handle = if let Some(mut e) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        Some(thread::spawn(move || {
+            let mut local = Vec::new();
+            let _ = e.read_to_end(&mut local);
+            if let Ok(mut g) = buf.lock() {
+                g.extend_from_slice(&local);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Read stdout line-by-line. We use raw byte reads + lossy UTF-8
+    // decode (mirroring the buffered path) so non-UTF-8 log bytes
+    // don't poison the stream.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("ssh: failed to capture stdout"))?;
+    let mut reader = BufReader::new(stdout);
+    let start = std::time::Instant::now();
+    let mut line_bytes: Vec<u8> = Vec::with_capacity(4096);
+
+    let exit_code: i32 = loop {
+        if crate::exec::cancel::is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 130;
+        }
+        line_bytes.clear();
+        match reader.read_until(b'\n', &mut line_bytes) {
+            Ok(0) => {
+                // EOF: drain the child.
+                let status = child.wait().context("waiting on ssh")?;
+                break status.code().unwrap_or(-1);
+            }
+            Ok(_) => {
+                // Strip trailing CR/LF before lossy-decoding, so
+                // `on_line` doesn't see them.
+                while matches!(line_bytes.last(), Some(b'\n') | Some(b'\r')) {
+                    line_bytes.pop();
+                }
+                let s = String::from_utf8_lossy(&line_bytes);
+                on_line(&s);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                // Signal arrived during the syscall (SIGINT without
+                // SA_RESTART). Loop back to re-check cancellation.
+                continue;
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("ssh stdout read failed: {e}"));
+            }
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "remote stream timed out after {}s on '{}': {}",
+                timeout.as_secs(),
+                namespace,
+                truncate(cmd, 120)
+            ));
+        }
+    };
+
+    if let Some(h) = stderr_handle {
+        let _ = h.join();
+    }
+
+    if exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+        if super::concurrency::looks_like_max_sessions(&stderr) {
+            return Err(anyhow!(
+                "SSH MaxSessions hit on '{}': server refused new channel \
+                 (lower INSPECT_MAX_SESSIONS_PER_HOST below the server's \
+                 MaxSessions, or raise the server's limit)",
+                target.host
+            ));
+        }
+    }
+
+    Ok(exit_code)
 }

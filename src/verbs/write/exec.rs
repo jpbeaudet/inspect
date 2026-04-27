@@ -70,8 +70,10 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
 
     for s in &steps {
-        let cmd = match s.service() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&user_cmd)),
+        let cmd = match s.container() {
+            Some(container) => {
+                format!("docker exec {} sh -c {}", shquote(container), shquote(&user_cmd))
+            }
             None => user_cmd.clone(),
         };
         let started = Instant::now();

@@ -227,7 +227,14 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         // Field pitfall §6.1: prefer the compose service label when
         // present, but fall back to the container name. We only swap
         // when the label is unambiguous within this host (see
-        // `seen_compose` above).
+        // `seen_compose` above). The user-facing `name` is what
+        // selectors match against; the *real* container name (always
+        // `row.name`) is preserved separately as `container_name` and
+        // is what every `docker logs|exec|restart` actually targets.
+        // Without this split, a profile with `name: api` would
+        // resolve in `inspect logs arte/api` but then run
+        // `docker logs api` on a host whose container is actually
+        // `luminary-api` — that's the v0.1.0 phantom-service bug.
         let svc_name = match &row.compose_service {
             Some(label) if !seen_compose.contains(label) => {
                 seen_compose.insert(label.clone());
@@ -269,6 +276,8 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
         }
         r.services.push(Service {
             name: svc_name,
+            container_name: row.name.clone(),
+            compose_service: row.compose_service.clone(),
             container_id: Some(row.id),
             image: Some(row.image),
             ports,
@@ -469,7 +478,9 @@ pub fn probe_systemd_units(ns: &str, target: &SshTarget) -> ProbeResult {
             continue;
         }
         r.services.push(Service {
-            name,
+            name: name.clone(),
+            container_name: name,
+            compose_service: None,
             container_id: None,
             image: None,
             ports: vec![],

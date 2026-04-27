@@ -57,6 +57,24 @@ impl<'a> Step<'a> {
             .iter()
             .find(|s| s.name == name)
     }
+
+    /// Container name for `docker logs|exec|restart|stop|start|kill`
+    /// commands. Resolves to `service_def().container_name` when a
+    /// profile entry exists; otherwise falls back to `service()` so
+    /// the command still runs on hosts that haven't been discovered.
+    /// Returns `None` for host-level steps (`arte/_`).
+    ///
+    /// Field pitfall §6.1 (v0.1.1 P2): the user-facing service name
+    /// (`name`, possibly a compose label like `api`) is what the
+    /// selector matches on, but the docker daemon only knows the real
+    /// container name (`luminary-api`). Always pass `container()` to
+    /// docker, never `service()`.
+    pub fn container(&self) -> Option<&str> {
+        match self.service_def() {
+            Some(def) => Some(def.container_name.as_str()),
+            None => self.service(),
+        }
+    }
 }
 
 /// Resolve `selector` and prepare a fan-out plan. Returns the runner and a

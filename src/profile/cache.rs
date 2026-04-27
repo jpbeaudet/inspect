@@ -63,8 +63,23 @@ pub fn load_profile(namespace: &str) -> Result<Option<Profile>> {
     paths::check_file_mode_0600(&path).map_err(anyhow::Error::from)?;
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading profile '{}'", path.display()))?;
-    let p: Profile = serde_yaml::from_str(&text)
-        .with_context(|| format!("parsing profile '{}'", path.display()))?;
+    let p: Profile = serde_yaml::from_str(&text).map_err(|e| {
+        // v0.1.1 added the required `container_name` field on every
+        // service. Pre-v0.1.1 profiles fail to deserialise here.
+        // Surface a clean, actionable error rather than the raw serde
+        // diagnostic so the operator knows the fix is one command.
+        let msg = e.to_string();
+        if msg.contains("container_name") {
+            anyhow::anyhow!(
+                "profile '{}' was written by an older inspect (v0.1.0). \
+                 Run `inspect setup {}` to regenerate it.",
+                path.display(),
+                namespace
+            )
+        } else {
+            anyhow::Error::from(e).context(format!("parsing profile '{}'", path.display()))
+        }
+    })?;
     Ok(Some(p))
 }
 
@@ -214,6 +229,8 @@ mod tests {
         let mut incoming = Profile::empty("arte", "h", &rfc3339_now());
         incoming.services.push(Service {
             name: "atlas".into(),
+            container_name: "atlas".into(),
+            compose_service: None,
             container_id: None,
             image: None,
             ports: vec![],

@@ -59,8 +59,8 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
 
     for (s, path) in &steps_with_path {
         let inner = format!("rm -f -- {}", shquote(path));
-        let cmd = match s.service() {
-            Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
+        let cmd = match s.container() {
+            Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&inner)),
             None => inner.clone(),
         };
         let started = Instant::now();

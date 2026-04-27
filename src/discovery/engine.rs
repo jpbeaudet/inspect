@@ -74,6 +74,11 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
                     .process
                     .clone()
                     .unwrap_or_else(|| format!("port-{}", hl.port)),
+                container_name: hl
+                    .process
+                    .clone()
+                    .unwrap_or_else(|| format!("port-{}", hl.port)),
+                compose_service: None,
                 container_id: None,
                 image: None,
                 ports: vec![crate::profile::schema::Port {

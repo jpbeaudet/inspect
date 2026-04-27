@@ -73,7 +73,7 @@ fn write_profile(home: &std::path::Path, ns: &str, services: &[(&str, &str)]) {
     let mut svc_yaml = String::new();
     for (name, image) in services {
         svc_yaml.push_str(&format!(
-            "  - name: {name}\n    container_id: cid-{name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: ok\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
+            "  - name: {name}\n    container_name: {name}\n    container_id: cid-{name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: ok\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
         ));
     }
     let body = format!(

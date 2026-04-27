@@ -80,9 +80,31 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
                 };
                 render(&body)
             }
+            // P8 (v0.1.1): no editorial topic, but it might be a verb.
+            // Fall back to clap's long-help renderer so users can type
+            // either `inspect help logs` or `inspect logs --help`.
+            None if help::is_verb(name) => render_clap_long_help(name),
             None => unknown_topic(name),
         },
     }
+}
+
+/// P8 fallback: render clap's long help for a top-level subcommand.
+/// Returns `Success` when the subcommand exists (always, since we
+/// gate the call with [`help::is_verb`]); the only failure surface is
+/// the writer, which we route through the same handler as topic
+/// pages.
+fn render_clap_long_help(verb: &str) -> Result<ExitKind> {
+    use clap::CommandFactory;
+    let mut top = crate::cli::Cli::command();
+    let Some(sub) = top.find_subcommand_mut(verb) else {
+        // Defensive: VERB_TOPICS got out of sync with the clap tree.
+        // Tests guard the invariant, but at runtime we degrade to the
+        // unknown-topic path rather than panicking.
+        return unknown_topic(verb);
+    };
+    let body = sub.render_long_help().to_string();
+    render(&body)
 }
 
 fn render(text: &str) -> Result<ExitKind> {

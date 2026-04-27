@@ -5,6 +5,52 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — Phase A field-feedback patches
+
+Phase A of `INSPECT_v0.1.1_PATCH_SPEC.md`: three patches that came out
+of the first real ~60-call production debugging session.
+
+### Fixed
+
+- **P2 — phantom service names.** Discovery now records the real
+  `docker ps` name in `Service.container_name` alongside the
+  user-facing `name`. Every `docker logs|exec|restart|stop|start|kill`
+  call site uses the container name; selectors and labels keep using
+  the friendly name. Eliminates the v0.1.0 footgun where
+  `inspect logs arte/api` produced `docker logs api` on a host whose
+  actual container was `luminary-api`.
+  - Schema: `Service.container_name: String` is **required**. Old
+    profiles fail with a clean "run `inspect setup <ns>` to regenerate"
+    error.
+  - New helper `Step::container()` chooses the right token in one
+    place; `cp`, `edit`, `mkdir`, `touch`, `chmod`, `chown`, `rm`,
+    `exec`, `logs`, lifecycle (`restart`/`stop`/`start`/`reload`), and
+    the lower-level `exec/reader/{logs,file}.rs` all switched.
+
+### Added
+
+- **P1 — streaming `--follow`.** New `ssh::exec::run_remote_streaming`
+  pumps stdout line-by-line from the SSH child instead of waiting for
+  the command to exit. `inspect logs --follow` now renders every line
+  the moment it crosses the wire. The verb wrapper retries the SSH
+  call up to three times with 1s/2s/4s backoff so a transient drop
+  doesn't end the operator's session; Ctrl-C still cancels promptly.
+  The `RemoteRunner` trait grew a default `run_streaming` method so
+  mock-backed tests keep working unmodified.
+- **P8 — `inspect help <verb>` fallback.** When the named topic has no
+  editorial body, the dispatcher falls through to clap's long-help
+  renderer for the matching subcommand. Users can type either
+  `inspect help logs` or `inspect logs --help` and get help. The
+  "did you mean" suggester now also considers verb names, so
+  `inspect help serch` hints `did you mean: search?`.
+
+### Tests
+
+- New `tests/phase_a_v011.rs` (6 cases) pins the P2 round-trip and
+  P1 streaming wire-up against regressions.
+- `tests/help_contract.rs` gained 3 P8 guards including a
+  one-test-per-verb fallback assertion.
+
 ## [Unreleased]
 
 ### Added — documentation

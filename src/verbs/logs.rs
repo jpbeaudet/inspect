@@ -59,13 +59,30 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
             }
         }
 
-        let cmd = build_logs(step.service_def(), step.service(), &args);
-        let opts = if args.follow {
-            // Use a long timeout for follow; users will Ctrl-C to stop.
-            RunOpts::with_timeout(args.follow_timeout_secs.unwrap_or(60 * 60 * 8))
-        } else {
-            RunOpts::with_timeout(60)
-        };
+        let cmd = build_logs(step.service_def(), step.service(), step.container(), &args);
+
+        // P1 (v0.1.1): in --follow mode, render each line as it
+        // arrives instead of buffering until the SSH process exits.
+        // We also implement client-side reconnect (3 tries with 1/2/4s
+        // backoff) so a transient SSH drop doesn't end the user's
+        // session: the server-side loop in `build_docker_logs` already
+        // re-attaches across docker log rotations, so this layer only
+        // covers the SSH transport.
+        if args.follow {
+            stream_follow(
+                runner.as_ref(),
+                &step.ns.namespace,
+                &step.ns.target,
+                &cmd,
+                &svc_name,
+                args.follow_timeout_secs.unwrap_or(60 * 60 * 8),
+                args.format.is_json(),
+                &mut any_lines,
+            );
+            continue;
+        }
+
+        let opts = RunOpts::with_timeout(60);
         let out = runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)?;
         if !out.ok() && out.stdout.is_empty() {
             if !args.format.is_json() {
@@ -110,14 +127,20 @@ pub fn run(args: LogsArgs) -> Result<ExitKind> {
 fn build_logs(
     svc_def: Option<&crate::profile::schema::Service>,
     svc_name: Option<&str>,
+    container: Option<&str>,
     args: &LogsArgs,
 ) -> String {
     use crate::profile::schema::ServiceKind;
 
     let kind = svc_def.map(|s| s.kind).unwrap_or(ServiceKind::Container);
     match (svc_name, kind) {
+        // Systemd: journalctl wants the unit name (== `name`), not the
+        // container_name token.
         (Some(name), ServiceKind::Systemd) => build_journalctl(name, args),
-        (Some(name), _) => build_docker_logs(name, args),
+        // Container: every docker subcommand must target the real
+        // container name; `container` falls back to `svc_name` when
+        // no profile is loaded.
+        (Some(_), _) => build_docker_logs(container.unwrap_or("_"), args),
         (None, _) => {
             // Host-level: tail /var/log/syslog by default.
             let tail = args.tail.unwrap_or(200);
@@ -222,6 +245,91 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
         s.push_str(&format!(" -n {tail}"));
     }
     s
+}
+
+/// P1 (v0.1.1): client-side reconnect wrapper for `--follow`. Streams
+/// each line from the SSH child to stdout (or JSON), and on transient
+/// SSH failure retries up to 3 times with 1s/2s/4s backoff. Aborts
+/// cleanly on Ctrl-C (cancellation flag set by [`crate::exec::cancel`]).
+#[allow(clippy::too_many_arguments)]
+fn stream_follow(
+    runner: &dyn crate::verbs::runtime::RemoteRunner,
+    namespace: &str,
+    target: &crate::ssh::options::SshTarget,
+    cmd: &str,
+    svc_name: &str,
+    timeout_secs: u64,
+    json: bool,
+    any_lines: &mut bool,
+) {
+    const MAX_RECONNECTS: u32 = 3;
+    let mut attempt: u32 = 0;
+    loop {
+        if crate::exec::cancel::is_cancelled() {
+            return;
+        }
+        let opts = RunOpts::with_timeout(timeout_secs);
+        // Borrow-checker: `any_lines` is mutated inside the closure.
+        // Use a local flag and merge after the call.
+        let mut got_any = false;
+        let result = runner.run_streaming(namespace, target, cmd, opts, &mut |line| {
+            got_any = true;
+            if json {
+                JsonOut::write(
+                    &Envelope::new(namespace, "logs", "logs")
+                        .with_service(svc_name)
+                        .put(
+                            "line",
+                            crate::format::safe::safe_machine_line(line).as_ref(),
+                        ),
+                );
+            } else {
+                let safe = crate::format::safe::safe_terminal_line(
+                    line,
+                    crate::format::safe::DEFAULT_MAX_LINE_BYTES,
+                );
+                println!("{namespace}/{svc_name} | {safe}");
+            }
+        });
+        if got_any {
+            *any_lines = true;
+        }
+
+        // User pressed Ctrl-C: stop without reconnecting.
+        if crate::exec::cancel::is_cancelled() {
+            return;
+        }
+
+        match result {
+            Ok(0) => return,
+            Ok(_) | Err(_) if attempt >= MAX_RECONNECTS => {
+                if let Err(e) = result {
+                    if !json {
+                        eprintln!("{namespace}/{svc_name}: stream ended ({e})");
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        attempt += 1;
+        let backoff = std::time::Duration::from_secs(1u64 << (attempt - 1));
+        if !json {
+            eprintln!(
+                "{namespace}/{svc_name}: stream dropped, reconnecting in {}s (attempt {attempt}/{MAX_RECONNECTS})",
+                backoff.as_secs()
+            );
+        }
+        // Sleep in small slices so Ctrl-C still cancels promptly.
+        let deadline = std::time::Instant::now() + backoff;
+        while std::time::Instant::now() < deadline {
+            if crate::exec::cancel::is_cancelled() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 #[cfg(test)]

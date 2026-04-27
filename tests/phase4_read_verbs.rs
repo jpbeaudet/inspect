@@ -79,7 +79,7 @@ fn write_profile(
     let mut svc_yaml = String::new();
     for (name, image, hs) in services {
         svc_yaml.push_str(&format!(
-            "  - name: {name}\n    container_id: cid-{name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
+            "  - name: {name}\n    container_name: {name}\n    container_id: cid-{name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
         ));
     }
     let body = format!(
@@ -420,7 +420,7 @@ fn health_uses_curl_when_url_present() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let body = "schema_version: 1\nnamespace: arte\nhost: arte.example.invalid\ndiscovered_at: 2099-01-01T00:00:00+00:00\nremote_tooling:\n  rg: false\n  jq: false\n  journalctl: false\n  sed: false\n  grep: true\n  netstat: false\n  ss: true\n  systemctl: false\n  docker: true\nservices:\n  - name: pulse\n    container_id: cid-pulse\n    image: p:1\n    ports: []\n    mounts: []\n    health: http://localhost:8000/health\n    health_status: ok\n    log_readable_directly: false\n    kind: container\n    depends_on: []\nvolumes: []\nimages: []\nnetworks: []\n";
+    let body = "schema_version: 1\nnamespace: arte\nhost: arte.example.invalid\ndiscovered_at: 2099-01-01T00:00:00+00:00\nremote_tooling:\n  rg: false\n  jq: false\n  journalctl: false\n  sed: false\n  grep: true\n  netstat: false\n  ss: true\n  systemctl: false\n  docker: true\nservices:\n  - name: pulse\n    container_name: pulse\n    container_id: cid-pulse\n    image: p:1\n    ports: []\n    mounts: []\n    health: http://localhost:8000/health\n    health_status: ok\n    log_readable_directly: false\n    kind: container\n    depends_on: []\nvolumes: []\nimages: []\nnetworks: []\n";
     let path = dir.join("arte.yaml");
     std::fs::write(&path, body).unwrap();
     #[cfg(unix)]

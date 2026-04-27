@@ -153,7 +153,21 @@ pub struct RemoteTooling {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Service {
+    /// User-facing name used in selectors (e.g. `arte/api`). When the
+    /// container carries a `com.docker.compose.service` label that's
+    /// unambiguous on this host, we promote that label to the name.
+    /// Otherwise this is the raw container name.
     pub name: String,
+    /// Real container name as reported by `docker ps --format {{.Names}}`.
+    /// **Always** the value passed to `docker logs|exec|restart|stop|...`,
+    /// never `name` — that's the v0.1.0 phantom-service bug.
+    /// For non-container kinds (systemd, host listener) this mirrors `name`.
+    pub container_name: String,
+    /// Compose service label, when present. Informational only — used
+    /// at discovery time to decide whether to promote it to `name`,
+    /// then preserved for forensics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +323,8 @@ mod tests {
         let mut p = Profile::empty("arte", "arte.example", "2026-04-25T14:32:18Z");
         p.services.push(Service {
             name: "pulse".into(),
+            container_name: "pulse".into(),
+            compose_service: None,
             container_id: Some("8a3f".into()),
             image: Some("luminary/pulse:1.4.2".into()),
             ports: vec![Port {
@@ -347,6 +363,8 @@ mod tests {
         assert_eq!(a.fingerprint(), b.fingerprint());
         a.services.push(Service {
             name: "x".into(),
+            container_name: "x".into(),
+            compose_service: None,
             container_id: None,
             image: None,
             ports: vec![],
