@@ -242,6 +242,18 @@ fn append_locked(path: &Path, line: &str) -> Result<()> {
     buf.push('\n');
     f.write_all(buf.as_bytes()).context("writing audit entry")?;
     f.flush().context("flushing audit entry")?;
+    // Forensic durability: an audit entry that exists only in the
+    // kernel page cache is one power loss away from being lost. We
+    // pay one fdatasync per mutation. Best-effort: on filesystems
+    // that don't implement fsync (some FUSE/network mounts), degrade
+    // gracefully — we'd rather keep the record we just wrote than
+    // refuse the operation.
+    if let Err(e) = f.sync_data() {
+        eprintln!(
+            "inspect: warning: audit fsync failed ({}); entry written but may not be durable",
+            e
+        );
+    }
 
     #[cfg(unix)]
     {

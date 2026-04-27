@@ -1634,6 +1634,11 @@ pub struct WatchArgs {
     /// lhs ∈ {body, status, $.json.path}, op ∈ {==, !=, <, >, contains}.
     #[arg(long, value_name = "EXPR", requires = "until_http")]
     pub r#match: Option<String>,
+    /// Disable TLS certificate verification for `--until-http`. Use
+    /// only for self-signed staging endpoints; never against
+    /// production. Maps to `curl --insecure`.
+    #[arg(long, requires = "until_http")]
+    pub insecure: bool,
 
     // ---- shared loop knobs ----
     /// Polling interval (default `2s`). Accepts `Ns/Nm/Nh/Nd`.

@@ -291,8 +291,10 @@ fn http_ok(
     let (ns, target) = target_for(check_target, default_host)?;
     // -f: fail on 4xx/5xx so curl's exit code carries the verdict.
     // -sS: silent but show errors; -o /dev/null: drop body.
+    // --connect-timeout / --max-time: curl-level guards so a stuck
+    // socket doesn't pin the SSH session up to CHECK_TIMEOUT_SECS.
     let cmd = format!(
-        "curl -fsS -o /dev/null -w '%{{http_code}}' {}",
+        "curl -fsS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{{http_code}}' {}",
         shquote(url)
     );
     let out = runner.run(

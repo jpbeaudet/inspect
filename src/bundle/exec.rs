@@ -96,7 +96,11 @@ pub fn plan(bundle: &Bundle) -> Result<ExitKind> {
             .unwrap_or("(none)");
 
         if step.parallel && !step.matrix.is_empty() {
-            let (mkey, mvals) = step.matrix.iter().next().expect("non-empty matrix");
+            let (mkey, mvals) = step
+                .matrix
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow!("plan: step `{}` parallel without matrix", step.id))?;
             let cap = step
                 .max_parallel
                 .unwrap_or(mvals.len())
@@ -450,7 +454,13 @@ fn render_step_body(
     let raw = match kind {
         StepBodyKind::Exec => step.exec.as_deref().unwrap_or(""),
         StepBodyKind::Run => step.run.as_deref().unwrap_or(""),
-        StepBodyKind::Watch => return Ok(format_watch_body(step.watch.as_ref().unwrap())),
+        StepBodyKind::Watch => {
+            let w = step
+                .watch
+                .as_ref()
+                .ok_or_else(|| anyhow!("step `{}`: watch body missing", step.id))?;
+            return Ok(format_watch_body(w));
+        }
     };
     interpolate(raw, vars, matrix).map_err(|e: InterpError| anyhow!("step `{}`: {e}", step.id))
 }
@@ -616,7 +626,10 @@ fn run_single_branch(
             Ok(())
         }
         StepBodyKind::Watch => {
-            let watch_step = step.watch.as_ref().expect("watch body presence");
+            let watch_step = step
+                .watch
+                .as_ref()
+                .ok_or_else(|| anyhow!("step `{}`: watch body missing", step.id))?;
             let args =
                 build_watch_args(watch_step, target_ns, reason.clone(), &bundle.vars, matrix)?;
             // Delegate to the B10 engine. It maintains its own audit
@@ -660,7 +673,7 @@ fn run_parallel_matrix(
         .matrix
         .iter()
         .next()
-        .expect("validated non-empty matrix");
+        .ok_or_else(|| anyhow!("step `{}`: parallel without matrix", step.id))?;
     let cap = step
         .max_parallel
         .unwrap_or(mvals.len())
@@ -700,7 +713,27 @@ fn run_parallel_matrix(
                 mtx.insert(mkey.clone(), v.clone());
                 let label = super::vars::yaml_to_str(&v).unwrap_or_default();
                 eprintln!("    ├─ {mkey}={label} starting");
-                match run_single_branch(runner, bundle, step, kind, &mtx, bundle_id, store, opts) {
+                // Isolate worker panics: a panic in run_single_branch
+                // would otherwise tear down the entire scope and
+                // bypass first_err recording. Convert to a normal
+                // failure so rollback semantics still apply.
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_single_branch(runner, bundle, step, kind, &mtx, bundle_id, store, opts)
+                }));
+                let res = match res {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "worker panicked".to_string()
+                        };
+                        Err(anyhow!("panic: {msg}"))
+                    }
+                };
+                match res {
                     Ok(()) => {
                         eprintln!("    ├─ {mkey}={label} ok");
                     }
@@ -757,6 +790,7 @@ fn build_watch_args(
         regex: w.regex,
         psql_opts: w.psql_opts.clone(),
         r#match: w.match_expr.clone(),
+        insecure: w.insecure,
         interval: w.interval.clone(),
         timeout: w.timeout.clone(),
         reason,
@@ -1102,6 +1136,7 @@ mod tests {
             regex: false,
             psql_opts: None,
             match_expr: None,
+            insecure: false,
             interval: None,
             timeout: Some("5s".into()),
         };

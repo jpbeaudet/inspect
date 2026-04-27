@@ -219,7 +219,9 @@ pub fn run(args: WatchArgs) -> Result<ExitKind> {
             ),
             Predicate::Log(pat) => probe_log(&*runner, step, pat, log_re.as_ref(), &log_since),
             Predicate::Sql(q) => probe_sql(&*runner, step, q, args.psql_opts.as_deref()),
-            Predicate::Http(u) => probe_http(&*runner, step, u, args.r#match.as_deref()),
+            Predicate::Http(u) => {
+                probe_http(&*runner, step, u, args.r#match.as_deref(), args.insecure)
+            }
         };
 
         match probe {
@@ -593,13 +595,18 @@ fn probe_http(
     step: &Step<'_>,
     url: &str,
     match_expr: Option<&str>,
+    insecure: bool,
 ) -> Result<Probe> {
     // -sS: silent but show errors. We deliberately omit -f because we
     // want the body even on 4xx/5xx so the predicate DSL can inspect
     // it. The status code is appended in a marker line that we strip
     // back off before evaluating `body` / `$.json`.
+    // --connect-timeout / --max-time: curl-level guards so a stuck
+    // socket can't pin SSH for the full POLL_CMD_TIMEOUT_SECS budget.
+    // --insecure is operator opt-in for self-signed staging only.
+    let insecure_flag = if insecure { " --insecure" } else { "" };
     let curl_cmd = format!(
-        "curl -sS -o - -w '\\n{marker}%{{http_code}}\\n' {url}",
+        "curl -sS --connect-timeout 5 --max-time 15{insecure_flag} -o - -w '\\n{marker}%{{http_code}}\\n' {url}",
         marker = HTTP_STATUS_MARKER,
         url = shquote(url)
     );
@@ -915,6 +922,7 @@ mod tests {
             regex: false,
             psql_opts: None,
             r#match: None,
+            insecure: false,
             interval: None,
             timeout: None,
             reason: None,
@@ -940,6 +948,7 @@ mod tests {
             regex: false,
             psql_opts: None,
             r#match: None,
+            insecure: false,
             interval: None,
             timeout: None,
             reason: None,

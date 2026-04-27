@@ -183,6 +183,8 @@ pub struct WatchStep {
     pub psql_opts: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "match")]
     pub match_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub insecure: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
