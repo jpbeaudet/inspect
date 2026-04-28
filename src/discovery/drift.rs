@@ -114,6 +114,7 @@ fn cheap_rows(namespace: &str, target: &SshTarget) -> anyhow::Result<Vec<DriftRo
         cmd,
         RunOpts {
             timeout: Some(Duration::from_secs(8)),
+            stdin: None,
         },
     )?;
     if !out.ok() {

@@ -124,6 +124,12 @@ struct MockEntry {
     stderr: String,
     #[serde(default)]
     exit: i32,
+    /// F9 (v0.1.3): when `true` and the caller forwarded stdin via
+    /// `RunOpts.stdin`, the mock prepends the (lossily UTF-8 decoded)
+    /// stdin to its `stdout`. Lets tests assert that bytes really
+    /// crossed the runner boundary without needing a live ssh.
+    #[serde(default)]
+    echo_stdin: bool,
 }
 
 pub struct MockRunner {
@@ -144,12 +150,19 @@ impl RemoteRunner for MockRunner {
         _namespace: &str,
         _target: &SshTarget,
         cmd: &str,
-        _opts: RunOpts,
+        opts: RunOpts,
     ) -> Result<RemoteOutput> {
         for e in &self.entries {
             if cmd.contains(&e.match_) {
+                let mut stdout = e.stdout.clone();
+                if e.echo_stdin {
+                    if let Some(bytes) = opts.stdin.as_ref() {
+                        let prefix = String::from_utf8_lossy(bytes);
+                        stdout = format!("{prefix}{stdout}");
+                    }
+                }
                 return Ok(RemoteOutput {
-                    stdout: e.stdout.clone(),
+                    stdout,
                     stderr: e.stderr.clone(),
                     exit_code: e.exit,
                 });

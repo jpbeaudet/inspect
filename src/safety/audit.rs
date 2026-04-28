@@ -59,6 +59,23 @@ pub struct AuditEntry {
     /// see which YAML step produced this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_step: Option<String>,
+    /// F9 (v0.1.3): byte count of local stdin forwarded to the remote
+    /// command. `0` (or absent on read) means stdin was not forwarded
+    /// (tty input, `--no-stdin`, or no piped input). Recorded so a
+    /// post-hoc audit can answer "what input did this command consume?"
+    /// by size.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub stdin_bytes: u64,
+    /// F9 (v0.1.3): SHA-256 of forwarded stdin, present only when the
+    /// caller passed `--audit-stdin-hash`. Off by default for perf;
+    /// opt-in for security-sensitive runs (auditable byte-for-byte
+    /// reconstruction without storing the bytes themselves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin_sha256: Option<String>,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 impl AuditEntry {
@@ -85,6 +102,8 @@ impl AuditEntry {
             reason: None,
             bundle_id: None,
             bundle_step: None,
+            stdin_bytes: 0,
+            stdin_sha256: None,
         }
     }
 }

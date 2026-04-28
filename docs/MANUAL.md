@@ -492,6 +492,45 @@ captures `[secrets_masked=true]`.
 
 For the deep dive: `inspect help write`.
 
+### 7.5 `inspect run` stdin handling (v0.1.3)
+
+When `inspect run`'s own stdin is non-tty (piped or redirected from
+a file), it is forwarded byte-for-byte to the remote command's
+stdin and closed on EOF, so commands that read until EOF (`sh`,
+`psql`, `cat`, `tee`, `gpg`) terminate normally:
+
+```sh
+# Apply a local SQL script through a remote container's psql:
+inspect run arte 'docker exec -i atlas-pg psql' < ./01-roles.sql
+
+# Untar a local archive into a remote container:
+cat fixtures.tgz | inspect run arte 'tar -xz -C /opt'
+```
+
+When local stdin **is** a tty (interactive terminal), forwarding is
+skipped — `inspect run arte 'cat'` does not hang waiting for input
+that was never piped. This matches `ssh -T host cmd <terminal>`
+semantics.
+
+**Audit.** Every `inspect run` invocation that forwards stdin
+writes a one-line audit entry with `verb=run`, `stdin_bytes=<N>`,
+and (with `--audit-stdin-hash`) `stdin_sha256=<hex>` of the
+forwarded payload. Without forwarded stdin, `inspect run` remains
+un-audited (matches v0.1.2 read-verb behavior).
+
+**Size cap.** Default 10 MiB per invocation. Above that, exit 2
+with a hint pointing at `inspect cp`. Override with `--stdin-max
+<SIZE>` (k/m/g suffixes) or set `--stdin-max 0` to disable the cap
+entirely. For bulk transfer, prefer `inspect cp` (faster,
+resumable, audit-tracked separately).
+
+**Loud failure.** `--no-stdin` refuses to forward. If you pass
+`--no-stdin` while local stdin has data waiting, `inspect run`
+exits 2 BEFORE dispatching the remote command — never silently
+discards input. With `--no-stdin` and an empty pipe (`< /dev/null`,
+`true | inspect run …`), the run proceeds normally without
+forwarding, since there is no data to drop.
+
 ---
 
 ## 8. Audit and revert

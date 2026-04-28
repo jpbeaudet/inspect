@@ -38,6 +38,13 @@ impl RemoteOutput {
 pub struct RunOpts {
     /// Maximum time to wait for the remote command. Defaults to 30s.
     pub timeout: Option<Duration>,
+    /// F9 (v0.1.3): bytes to forward as the remote command's stdin.
+    /// `None` (default) means stdin is `/dev/null`, matching pre-v0.1.3
+    /// behavior. `Some(bytes)` pipes those bytes byte-for-byte to the
+    /// remote command's stdin and closes the channel on EOF, so
+    /// commands that read until EOF (`sh`, `psql`, `cat`, `tee`)
+    /// terminate normally.
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl RunOpts {
@@ -56,7 +63,15 @@ impl RunOpts {
         };
         Self {
             timeout: Some(Duration::from_secs(final_secs)),
+            stdin: None,
         }
+    }
+
+    /// F9 (v0.1.3): forward `bytes` to the remote command's stdin.
+    /// Builder-style for ergonomic call sites.
+    pub fn with_stdin(mut self, bytes: Vec<u8>) -> Self {
+        self.stdin = Some(bytes);
+        self
     }
 }
 
@@ -67,7 +82,7 @@ pub fn run_remote(
     namespace: &str,
     target: &SshTarget,
     cmd: &str,
-    opts: RunOpts,
+    mut opts: RunOpts,
 ) -> Result<RemoteOutput> {
     // Per-host MaxSessions throttle (audit §3.3). Acquired *before*
     // we spawn ssh so we never overshoot the server-side cap. Released
@@ -87,10 +102,15 @@ pub fn run_remote(
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
+    let stdin_bytes = opts.stdin.take();
     ssh.arg(&target.host)
         .arg("--")
         .arg(cmd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -98,6 +118,7 @@ pub fn run_remote(
     let mut child = ssh
         .spawn()
         .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+    spawn_stdin_writer(&mut child, stdin_bytes);
 
     // Wait with a soft timeout. We can't easily kill ssh without breaking
     // multiplexed channel state, but we CAN observe and surface a useful
@@ -176,6 +197,28 @@ fn apply_extra_opts(cmd: &mut Command) {
     }
 }
 
+/// F9 (v0.1.3): if `bytes` is `Some`, take the spawned child's stdin
+/// handle and write the bytes from a background thread, then drop the
+/// handle (which closes the pipe and signals EOF to the remote
+/// command). Done off-thread so the caller can keep draining stdout
+/// without deadlocking when the input is larger than the pipe buffer
+/// (Linux: 64 KiB by default).
+fn spawn_stdin_writer(child: &mut std::process::Child, bytes: Option<Vec<u8>>) {
+    let Some(buf) = bytes else { return };
+    let Some(mut stdin) = child.stdin.take() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        use std::io::Write;
+        // Best-effort: a remote that closes its stdin early (broken
+        // pipe) is the partial-stdin case. Surfaced as a non-zero exit
+        // by the remote command itself; we don't poison the run here.
+        let _ = stdin.write_all(&buf);
+        let _ = stdin.flush();
+        drop(stdin);
+    });
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -203,7 +246,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     namespace: &str,
     target: &SshTarget,
     cmd: &str,
-    opts: RunOpts,
+    mut opts: RunOpts,
     mut on_line: F,
 ) -> Result<i32> {
     use std::io::{BufRead, BufReader, Read};
@@ -225,10 +268,15 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
+    let stdin_bytes = opts.stdin.take();
     ssh.arg(&target.host)
         .arg("--")
         .arg(cmd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -236,6 +284,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     let mut child = ssh
         .spawn()
         .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+    spawn_stdin_writer(&mut child, stdin_bytes);
 
     // Drain stderr in a background thread so a chatty remote can't
     // block on its stderr pipe filling up. We capture it for the
@@ -345,7 +394,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     namespace: &str,
     target: &SshTarget,
     cmd: &str,
-    opts: RunOpts,
+    mut opts: RunOpts,
     mut on_line: F,
 ) -> Result<RemoteOutput> {
     use std::io::{BufRead, BufReader, Read};
@@ -367,10 +416,15 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
+    let stdin_bytes = opts.stdin.take();
     ssh.arg(&target.host)
         .arg("--")
         .arg(cmd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -378,6 +432,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     let mut child = ssh
         .spawn()
         .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+    spawn_stdin_writer(&mut child, stdin_bytes);
 
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_handle = if let Some(mut e) = child.stderr.take() {

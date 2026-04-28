@@ -14,6 +14,45 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F9 — `inspect run` forwards local stdin to the remote command.**
+  3rd field user (BUG-3 follow-up): `inspect run arte 'docker exec
+  -i atlas-pg sh' < ./init.sql` returned `SUMMARY: run: 1 ok, 0
+  failed` and exit 0, but no SQL ran — the script's stdin never
+  reached the remote `sh`. **Behavior change:** when `inspect run`'s
+  own stdin is non-tty (piped or redirected from a file), it is now
+  forwarded byte-for-byte to the remote command's stdin and closed
+  on EOF, matching native `ssh host cmd <stdin>` semantics. When
+  local stdin is a tty, behavior is unchanged from v0.1.2 — no
+  forwarding, no hang.
+
+  New flags on `inspect run`:
+  - `--no-stdin` refuses to forward; if local stdin has data waiting,
+    exits 2 BEFORE dispatching the remote command (never silently
+    discards input). With an empty pipe (`< /dev/null`,
+    `true | inspect run …`), the run proceeds normally.
+  - `--stdin-max <SIZE>` overrides the default 10 MiB cap (`k`/`m`/`g`
+    suffixes; `0` disables). Above the cap, exits 2 with a chained
+    hint pointing at `inspect cp` for bulk transfer.
+  - `--audit-stdin-hash` records `stdin_sha256` (hex SHA-256 of the
+    forwarded payload) in the audit entry. Off by default for perf;
+    opt-in for security-sensitive runs.
+
+  Audit-log additions: every `inspect run` invocation that forwards
+  stdin now writes a one-line audit entry with `verb=run`,
+  `stdin_bytes=<N>`, and (with `--audit-stdin-hash`)
+  `stdin_sha256=<hex>`. Without forwarded stdin, `inspect run`
+  remains un-audited (matches v0.1.2 read-verb behavior). The audit
+  schema gains optional `stdin_bytes` (skip-on-zero) and
+  `stdin_sha256` (skip-on-none) fields.
+
+  Tests: 8 new acceptance tests in `tests/phase_f_v013.rs` covering
+  the field reproducer (byte-for-byte forwarding through a mock
+  with `echo_stdin: true`), `--no-stdin` loud-failure with
+  pre-dispatch exit, size cap with chained hint, `--stdin-max 0`
+  disables the cap, no-piped-input regression guard, `stdin_bytes`
+  audit field, `stdin_sha256` audit field, and `--no-stdin` with
+  empty pipe being a silent pass.
+
 - **F8 — Cache freshness, runtime-tier cache, `SOURCE:` provenance,
   `inspect cache` verb.** Three field reports converged on the same
   failure mode: `inspect status` happily served pre-mutation data

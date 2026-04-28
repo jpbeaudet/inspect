@@ -325,10 +325,31 @@ secrets in `KEY=VALUE` form are masked unless `--show-secrets` is \
 passed. No audit entry, no apply gate -- this is the verb to reach \
 for when you want a quick \"what is the state?\" check.
 
+STDIN HANDLING (F9, v0.1.3)
+  When `inspect run`'s own stdin is non-tty (piped or redirected from
+  a file), it is forwarded byte-for-byte to the remote command's
+  stdin and closed on EOF, so commands that read until EOF (`sh`,
+  `psql`, `cat`, `tee`) terminate normally. When local stdin is a
+  tty, no forwarding happens (same as `ssh -T host cmd <terminal>`).
+
+  Forwarding writes a one-line audit entry with `stdin_bytes: <N>`;
+  pass `--audit-stdin-hash` to also record `stdin_sha256` of the
+  forwarded payload (off by default for perf).
+
+  Default size cap is 10 MiB; raise with `--stdin-max <SIZE>` (k/m/g
+  suffixes), set `--stdin-max 0` to disable, or use `inspect cp` for
+  bulk transfer (faster, resumable, audit-tracked separately).
+
+  Pass `--no-stdin` to refuse to forward; if you pass `--no-stdin`
+  while local stdin has data waiting, `inspect run` exits 2 BEFORE
+  dispatching the remote command (never silently discards input).
+
 EXAMPLES
   $ inspect run arte/atlas -- env
   $ inspect run arte/atlas -- 'docker ps --format json'
-  $ inspect run 'prod-*' -- 'df -h /var'";
+  $ inspect run 'prod-*' -- 'df -h /var'
+  $ inspect run arte 'docker exec -i atlas-pg sh' < ./init.sql
+  $ cat big.tar.gz | inspect run arte --stdin-max 100m -- 'tar -xz -C /opt'";
 
 const LONG_WATCH: &str = "\
 Block until a predicate over the target becomes true (B10, v0.1.2). \
@@ -1589,6 +1610,22 @@ pub struct RunArgs {
     /// output for a snapshot). Lines are still sanitized for ANSI/C0.
     #[arg(long)]
     pub no_truncate: bool,
+    /// F9 (v0.1.3): refuse to forward local stdin to the remote
+    /// command. If local stdin has data waiting (non-tty + readable)
+    /// and this flag is set, `inspect run` exits 2 BEFORE dispatching
+    /// the remote command — never silently discards input.
+    #[arg(long, conflicts_with_all = ["stdin_max", "audit_stdin_hash"])]
+    pub no_stdin: bool,
+    /// F9 (v0.1.3): cap on forwarded stdin per invocation. Accepts a
+    /// raw byte count or a k/m/g suffix (case-insensitive). Default
+    /// 10m. Set to `0` to disable the cap entirely.
+    #[arg(long, value_name = "SIZE")]
+    pub stdin_max: Option<String>,
+    /// F9 (v0.1.3): record `stdin_sha256` (hex SHA-256 of the
+    /// forwarded payload) in the audit entry. Off by default for
+    /// perf; opt-in for security-sensitive runs.
+    #[arg(long)]
+    pub audit_stdin_hash: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

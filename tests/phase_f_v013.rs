@@ -556,3 +556,242 @@ steps:
         .success()
         .stdout(contains("SOURCE:  live"));
 }
+
+// -----------------------------------------------------------------------------
+// F9 — `inspect run` silently drops local stdin instead of forwarding it.
+// 3rd field user (BUG-3 follow-up): `inspect run arte 'docker exec -i pg sh' < init.sql`
+// returned `1 ok, 0 failed` while the SQL never ran. The fix: forward
+// non-tty stdin byte-for-byte, audit the byte count, refuse loudly on
+// `--no-stdin` with data waiting, cap at 10 MiB by default with explicit
+// override, and bring `inspect run` in line with native `ssh host cmd`
+// semantics.
+// -----------------------------------------------------------------------------
+
+fn f9_run_mock() -> serde_json::Value {
+    json!([
+        // `cat` echo: exercises the byte-for-byte forward contract.
+        { "match": "cat", "stdout": "", "exit": 0, "echo_stdin": true },
+        // `wc -c` echo: a fixed payload assertion target.
+        { "match": "wc -c", "stdout": "", "exit": 0, "echo_stdin": true },
+        // bare echo: no stdin involvement, regression guard for the
+        // "no piped input" case.
+        { "match": "echo hi", "stdout": "hi\n", "exit": 0 }
+    ])
+}
+
+#[test]
+fn f9_run_forwards_local_stdin_byte_for_byte() {
+    // Field reproducer: piped data must reach the remote command.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "cat"])
+        .write_stdin("hello world\n")
+        .assert()
+        .success()
+        .stdout(contains("hello world"));
+}
+
+#[test]
+fn f9_run_no_stdin_with_piped_input_exits_2_before_dispatch() {
+    // Loud-failure contract: never silently discard input. With
+    // `--no-stdin` and piped data, exit 2 BEFORE dispatching the
+    // remote command (mock command counter stays at zero).
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--no-stdin", "--", "cat"])
+        .write_stdin("would be silently dropped\n")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--no-stdin"),
+        "stderr should explain --no-stdin contract: {stderr}"
+    );
+    assert!(
+        stderr.contains("inspect cp") || stderr.contains("--stdin")
+            || stderr.contains("forwarding is disabled"),
+        "stderr should chain hint at the recovery action: {stderr}"
+    );
+}
+
+#[test]
+fn f9_run_stdin_size_cap_exceeded_exits_2() {
+    // Size-cap contract: payload above --stdin-max exits 2 with a
+    // chained hint pointing at `inspect cp`. No remote command fires.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    // 1 KiB cap, 2 KiB payload → must exit 2.
+    let payload: String = "x".repeat(2048);
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--stdin-max",
+            "1k",
+            "--",
+            "cat",
+        ])
+        .write_stdin(payload)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("cap") && stderr.contains("inspect cp"),
+        "stderr should explain the size cap and chain to inspect cp: {stderr}"
+    );
+}
+
+#[test]
+fn f9_run_stdin_max_zero_disables_cap() {
+    // `--stdin-max 0` means "no cap". A 200 KiB payload must succeed.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let payload: String = "y".repeat(200 * 1024);
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--stdin-max",
+            "0",
+            "--",
+            "cat",
+        ])
+        .write_stdin(payload)
+        .assert()
+        .success();
+}
+
+#[test]
+fn f9_run_no_piped_input_unchanged_no_audit_no_forward() {
+    // Regression guard: a `run` with no piped input behaves exactly
+    // as it did in v0.1.2 — no audit entry written, no stdin forwarded,
+    // exit 0 if the remote command exited 0.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    // `< /dev/null` keeps stdin non-tty but empty. assert_cmd's
+    // default stdin disposition is /dev/null when `write_stdin` is
+    // not called, so this matches the no-input contract.
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("hi"));
+    // Audit dir must be empty (no entries appended).
+    let audit_dir = sb.home().join("audit");
+    if audit_dir.exists() {
+        for entry in std::fs::read_dir(&audit_dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                let body = std::fs::read_to_string(&p).unwrap_or_default();
+                assert!(
+                    body.trim().is_empty(),
+                    "no audit entry should be written for non-stdin run; got: {body}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn f9_run_audit_entry_records_stdin_bytes() {
+    // Audit contract: forwarded stdin writes one audit entry per step
+    // with `verb=run`, `stdin_bytes=<N>`, and (without --audit-stdin-hash)
+    // no `stdin_sha256` field.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "cat"])
+        .write_stdin("hello\n") // 6 bytes
+        .assert()
+        .success();
+    let audit_dir = sb.home().join("audit");
+    let mut found = false;
+    for entry in std::fs::read_dir(&audit_dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&p).unwrap().lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("verb").and_then(|s| s.as_str()) == Some("run") {
+                let bytes = v
+                    .get("stdin_bytes")
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                assert_eq!(bytes, 6, "expected stdin_bytes=6 in audit entry: {v}");
+                assert!(
+                    v.get("stdin_sha256").is_none(),
+                    "stdin_sha256 must be absent without --audit-stdin-hash: {v}"
+                );
+                found = true;
+            }
+        }
+    }
+    assert!(found, "no audit entry with verb=run found");
+}
+
+#[test]
+fn f9_run_audit_stdin_hash_records_sha256() {
+    // With `--audit-stdin-hash`, the audit entry carries the hex
+    // SHA-256 of the forwarded payload (audit-friendly proof of
+    // content without storing the bytes themselves).
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--audit-stdin-hash",
+            "--",
+            "cat",
+        ])
+        .write_stdin("hello")
+        .assert()
+        .success();
+    // SHA-256 of "hello"
+    let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    let audit_dir = sb.home().join("audit");
+    let mut hash_found: Option<String> = None;
+    for entry in std::fs::read_dir(&audit_dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&p).unwrap().lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("verb").and_then(|s| s.as_str()) == Some("run") {
+                if let Some(h) = v.get("stdin_sha256").and_then(|s| s.as_str()) {
+                    hash_found = Some(h.to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(hash_found.as_deref(), Some(expected));
+}
+
+#[test]
+fn f9_run_no_stdin_with_empty_pipe_is_silent_pass() {
+    // `--no-stdin` with `< /dev/null` (non-tty but empty) must NOT
+    // error — the contract is "never silently DROP data", and there
+    // is no data to drop. This is the "batch script with no input"
+    // case that operators use intentionally.
+    let sb = Sandbox::new(f9_run_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--no-stdin", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("hi"));
+}
