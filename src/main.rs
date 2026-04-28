@@ -45,6 +45,16 @@ fn main() -> ExitCode {
     // topic, not `search --help`); only when the token is a verb
     // *and* not a topic do we rewrite.
     let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // F10.1 (v0.1.3): namespace-flag-as-typo pre-parser. Catches
+    // operators with `kubectl -n <ns>` muscle memory writing
+    // `inspect why atlas-neo4j --on arte` and emits a chained hint
+    // pointing at the canonical `arte/atlas-neo4j` form. Pure error-
+    // message change: must run BEFORE clap so the user sees our
+    // hint instead of clap's generic "unknown flag" rejection.
+    if let Some(msg) = detect_namespace_flag_typo(&raw) {
+        eprintln!("{msg}");
+        return ExitCode::from(2);
+    }
     let rewritten = rewrite_help_synonym(raw);
     let cli = Cli::parse_from(rewritten);
     let result = dispatch(cli);
@@ -197,6 +207,101 @@ fn is_known_top_level_verb(name: &str) -> bool {
         .any(|s| s.get_name() == name || s.get_all_aliases().any(|a| a == name));
     hit
 }
+
+/// F10.1 (v0.1.3): selector-taking verbs whose first positional
+/// argument is the selector. Used by [`detect_namespace_flag_typo`]
+/// to scope the kubectl-muscle-memory hint to verbs where the
+/// suggested `<ns>/<service>` rewrite makes sense.
+const F10_SELECTOR_VERBS: &[&str] = &[
+    "why", "logs", "run", "health", "status", "ports", "cat", "grep", "ps", "ls",
+    "find", "exec", "volumes", "images", "network", "resolve",
+];
+
+/// F10.1 (v0.1.3): operators with `kubectl -n <ns>` muscle memory
+/// commonly type `inspect <verb> <service> --<ns-flag> <ns>` before
+/// learning the canonical `<ns>/<service>` selector. Today's clap
+/// rejection ("unknown flag --on") is unhelpful — we detect the
+/// shape pre-clap and emit a chained hint pointing at the correct
+/// rewrite.
+///
+/// Returns `Some(msg)` when the shape matches and the caller should
+/// emit `msg` to stderr + exit 2; `None` otherwise.
+///
+/// Recognized flags: `--on`, `--in`, `--at`, `--host`, `--ns`,
+/// `--namespace`. Detection is conservative: only fires when (a) the
+/// verb is in [`F10_SELECTOR_VERBS`], (b) the first non-verb
+/// positional is a bare token (no `:`, no `/`, no `@`), and (c) the
+/// flag carries a single non-empty value. Otherwise we fall through
+/// to clap's regular parsing path so legitimate verb-specific flags
+/// (e.g. `--no-bundle` on `why`) are never shadowed.
+fn detect_namespace_flag_typo(raw: &[std::ffi::OsString]) -> Option<String> {
+    if raw.len() < 5 {
+        return None;
+    }
+    let verb = raw.get(1)?.to_str()?;
+    if !F10_SELECTOR_VERBS.contains(&verb) {
+        return None;
+    }
+    // Walk the argv looking for a pair (--<ns-flag> <value>) AND a
+    // bare positional token that doesn't already look like a selector
+    // (no `/`, no `:`, no leading `@`). Order is flexible.
+    const NS_FLAGS: &[&str] = &[
+        "--on", "--in", "--at", "--host", "--ns", "--namespace",
+    ];
+    let mut ns_flag: Option<&str> = None;
+    let mut ns_value: Option<String> = None;
+    let mut bare: Option<String> = None;
+    let mut i = 2;
+    while i < raw.len() {
+        let cur = raw[i].to_str()?;
+        if let Some(f) = NS_FLAGS.iter().find(|f| **f == cur) {
+            // `--ns-flag <value>` consumes the next argv slot.
+            let v = raw.get(i + 1)?.to_str()?;
+            if v.is_empty() || v.starts_with('-') {
+                return None;
+            }
+            ns_flag = Some(*f);
+            ns_value = Some(v.to_string());
+            i += 2;
+            continue;
+        }
+        // `--ns-flag=value` form.
+        if let Some(f) = NS_FLAGS.iter().find(|f| cur.starts_with(&format!("{}=", f))) {
+            let v = &cur[f.len() + 1..];
+            if v.is_empty() {
+                return None;
+            }
+            ns_flag = Some(*f);
+            ns_value = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if cur.starts_with('-') {
+            // Some other flag — skip its value if it takes one. We
+            // can't tell without clap, so just skip the flag itself
+            // and let the next iteration continue.
+            i += 1;
+            continue;
+        }
+        // Plain positional. Treat the first non-selector-shaped one
+        // as the candidate bare-service token.
+        if bare.is_none()
+            && !cur.contains('/')
+            && !cur.contains(':')
+            && !cur.starts_with('@')
+        {
+            bare = Some(cur.to_string());
+        }
+        i += 1;
+    }
+    let (flag, ns) = (ns_flag?, ns_value?);
+    let svc = bare?;
+    Some(format!(
+        "error: {flag} is not a flag — selectors are <ns>/<service>. \
+         Did you mean 'inspect {verb} {ns}/{svc}'?"
+    ))
+}
+
 
 #[cfg(test)]
 mod f3_tests {

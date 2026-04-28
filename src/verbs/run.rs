@@ -19,6 +19,65 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
 
+/// F10.7 (v0.1.3): strip ANSI CSI / OSC escape sequences from a
+/// rendered output line. Conservative: matches `ESC [ ... <final>`
+/// (CSI) and `ESC ] ... BEL` / `ESC ] ... ESC \` (OSC). Anything
+/// else (single-byte controls already stripped by `safe_terminal_line`)
+/// passes through. Allocation-free fast-path when no ESC byte is
+/// present.
+fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\u{001b}') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            let nxt = bytes[i + 1];
+            if nxt == b'[' {
+                // CSI: ESC [ <params> <final 0x40-0x7E>
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    let c = bytes[j];
+                    if (0x40..=0x7e).contains(&c) {
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            if nxt == b']' {
+                // OSC: ESC ] ... ( BEL | ESC \ )
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    if bytes[j] == 0x07 {
+                        j += 1;
+                        break;
+                    }
+                    if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                        j += 2;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // Two-char escape (ESC <char>): drop both.
+            i += 2;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Bytes were a valid UTF-8 string and we only removed ASCII
+    // ranges, so the result is still valid UTF-8.
+    std::borrow::Cow::Owned(String::from_utf8(out).unwrap_or_default())
+}
+
 /// F9 (v0.1.3): default cap on forwarded stdin per `inspect run` invocation.
 /// Above this the verb refuses, with a chained hint pointing at `inspect cp`
 /// for bulk transfer (faster, resumable, audit-tracked separately).
@@ -229,6 +288,16 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             Some(pat) => format!("{inner} | grep -E {}", shquote(pat)),
             None => inner,
         };
+        // F10.7 (v0.1.3): `--clean-output` prepends `TERM=dumb` so any
+        // remote tool that consults $TERM (less, ls --color=auto,
+        // progress bars) downgrades to plain text. ANSI stripping
+        // happens client-side post-mask as a belt-and-braces second
+        // line of defense.
+        let cmd = if args.clean_output {
+            format!("TERM=dumb {cmd}")
+        } else {
+            cmd
+        };
 
         let opts = RunOpts::with_timeout(timeout_secs);
         let opts = match &stdin_payload {
@@ -241,6 +310,14 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
 
         let exit = runner.run_streaming(&ns_name, &s.ns.target, &cmd, opts, &mut |line| {
             let masked = masker.mask_line(line);
+            let masked: std::borrow::Cow<'_, str> = if args.clean_output {
+                match strip_ansi(&masked) {
+                    std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Owned(masked.into_owned()),
+                    std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
+                }
+            } else {
+                masked
+            };
             if json {
                 JsonOut::write(
                     &Envelope::new(&ns_name, "run", "run")

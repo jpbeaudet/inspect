@@ -11,8 +11,22 @@ const LONG_ABOUT: &str = "\
 inspect — operational debugging CLI for cross-server search and safe hot-fix \
 application.
 
-Phase 0 implements namespace credential management. Other commands are \
-scaffolded and will be filled in by subsequent phases.
+COMMON VERBS
+  $ inspect run arte 'docker ps -a'              one-shot remote command (read-only)
+  $ inspect exec arte/atlas --apply -- systemctl restart atlas
+                                                 audited mutation
+  $ inspect logs arte/atlas-vault --since 5m --match 'panic'
+                                                 tail + filter without 'inspect run -- docker logs'
+  $ inspect status arte                          one-line health rollup
+  $ inspect why arte/atlas-vault                 deep diagnostic walk
+
+DIAGNOSTIC + READ VERBS
+  $ inspect ps / health / cat / grep / find / ls / ports / volumes / network / images
+
+WRITE + LIFECYCLE VERBS
+  $ inspect restart / stop / start / reload / cp / edit / rm / chmod / chown
+
+For the full list run `inspect --help` (each verb), or `inspect help <topic>` for editorial guides.
 ";
 
 // ---------------------------------------------------------------------------
@@ -144,6 +158,10 @@ EXAMPLES
   $ inspect recipe cycle-atlas --sel arte/atlas --apply";
 
 const LONG_SEARCH: &str = "\
+MODEL:    LogQL query across the profile-side index of logs / files / discovery sources; client-evaluated against indexed snapshots, not a live remote 'grep'.
+EXAMPLE:  inspect search '{server=\"arte\", source=\"logs\"} |= \"error\"' --since 1h
+NOTE:     for a live one-shot 'grep -r' against a single target path, use 'inspect grep' instead.
+
 LogQL query across logs, files, and discovery sources. Queries are \
 always single-quoted. The pipeline is the LogQL DSL, not the shell.
 
@@ -267,6 +285,10 @@ EXAMPLES
   $ inspect logs 'prod-*/storage' --since 1h --json";
 
 const LONG_GREP: &str = "\
+MODEL:    shells out to remote 'grep -r' against the resolved target path; no client-side indexing.
+EXAMPLE:  inspect grep arte/onyx-vault:/var/log 'panic'
+NOTE:     for indexed search across a fleet, use 'inspect search' (LogQL DSL, profile-side index).
+
 Search content in logs or files on the selected targets. Selector may \
 include `:path` to grep a specific file. Smart-case by default.
 
@@ -1488,6 +1510,25 @@ EXAMPLES\n  \
 pub struct CatArgs {
     /// Selector with `:path` (e.g. `arte/atlas:/etc/atlas.conf`).
     pub target: String,
+    /// F10.2 (v0.1.3): inclusive 1-based line range to print, e.g.
+    /// `--lines 5-10`. Mutually exclusive with `--start`/`--end`.
+    /// Alias `--range`.
+    #[arg(
+        long = "lines",
+        alias = "range",
+        value_name = "L-R",
+        conflicts_with_all = ["start", "end"],
+    )]
+    pub lines: Option<String>,
+    /// F10.2 (v0.1.3): inclusive 1-based start line. Pair with
+    /// `--end` for a range, or omit `--end` to print from `--start`
+    /// to EOF. Mutually exclusive with `--lines`.
+    #[arg(long = "start", value_name = "N")]
+    pub start: Option<usize>,
+    /// F10.2 (v0.1.3): inclusive 1-based end line. Pair with
+    /// `--start`. Mutually exclusive with `--lines`.
+    #[arg(long = "end", value_name = "N")]
+    pub end: Option<usize>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1680,6 +1721,19 @@ pub struct RunArgs {
     /// perf; opt-in for security-sensitive runs.
     #[arg(long)]
     pub audit_stdin_hash: bool,
+    /// F10.7 (v0.1.3): strip ANSI escape sequences from captured
+    /// output and prepend `TERM=dumb` to the remote command's env
+    /// so progress bars / colorizers downgrade to plain text. Use
+    /// for log captures and snapshots that must remain pipe-clean.
+    /// Alias `--no-tty`. Mutually exclusive with `--tty`.
+    #[arg(long = "clean-output", alias = "no-tty", conflicts_with = "tty")]
+    pub clean_output: bool,
+    /// F10.7 (v0.1.3): force tty allocation on the remote side.
+    /// Mutually exclusive with `--clean-output`. Reserved for the
+    /// (future) interactive-run flag-set; currently a no-op marker
+    /// so `--clean-output --tty` is a clap-level rejection.
+    #[arg(long = "tty")]
+    pub tty: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

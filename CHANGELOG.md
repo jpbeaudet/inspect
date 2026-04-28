@@ -14,6 +14,53 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F10 — 4th-user polish bundle (seven first-hour friction points
+  surfaced by a fresh operator on a partly-discovered namespace).
+  All seven sub-items shipped.**
+  - **F10.1 — Namespace-flag-as-typo chained hint.** Operators with
+    `kubectl -n <ns>` muscle memory commonly type
+    `inspect why atlas-neo4j --on arte` (also `--in`/`--at`/
+    `--host`/`--ns`/`--namespace`). The pre-clap detector in
+    `main.rs` now emits
+    `error: --on is not a flag — selectors are <ns>/<service>. Did
+    you mean 'inspect why arte/atlas-neo4j'?` and exits 2.
+    Conservative shape detection scoped to known selector-taking
+    verbs.
+  - **F10.2 — `inspect cat --lines L-R` server-side line slice.**
+    Inclusive 1-based range with `--start`/`--end` synonym
+    (mutually exclusive). JSON path emits structured `{n, line}`
+    envelopes per kept line so agents get line numbers without
+    parsing prose.
+  - **F10.3 — `why <ns>/<container>` chained hint when the token
+    is a running container but not a registered service.** Catches
+    `SelectorError::NoMatches` / `EmptyProfile`, looks the literal
+    token up against the runtime inventory, and on a hit emits a
+    three-line chained hint (`inspect logs … / inspect run …
+    docker inspect / inspect setup --force`). Exit 0
+    (informational). Genuine typos still exit 2 unchanged.
+  - **F10.4 — `inspect grep` / `inspect search` MODEL/EXAMPLE/NOTE
+    help preface.** Both `--help` outputs now declare their model
+    (grep shells out to remote `grep -r`; search runs a LogQL
+    query against the profile-side index) and cross-reference
+    each other so the right verb can be picked from `--help`
+    alone.
+  - **F10.5 — `--quiet` pipeline regression test.** F7.4's
+    `status --quiet` (no envelope trailers) and
+    `logs --tail N --quiet | wc -l == N` contracts are now
+    explicit acceptance tests in `phase_f_v013.rs`.
+  - **F10.6 — `inspect logs` on the top-level `--help` index.**
+    `LONG_ABOUT` reorganized into COMMON / DIAGNOSTIC + READ /
+    WRITE + LIFECYCLE blocks with
+    `inspect logs arte/atlas-vault --since 5m --match 'panic'` as
+    a worked example.
+  - **F10.7 — `inspect run --clean-output` (alias `--no-tty`).**
+    Strips ANSI CSI/OSC escape sequences from captured output and
+    prepends `TERM=dumb` to the remote command's env. Mutually
+    exclusive with `--tty`. ANSI strip is allocation-free when no
+    ESC byte is present.
+
+### Added (prior in v0.1.3)
+
 - **F7 — Selector + output ergonomic papercuts (field feedback:
   five separate small papercuts collected over a v0.1.2 destructive
   migration session that each cost an extra round-trip to the docs

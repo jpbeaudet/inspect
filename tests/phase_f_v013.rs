@@ -1944,3 +1944,418 @@ fn f7_status_json_state_no_services_matched_with_nonempty_inventory() {
         "non-empty inventory + zero services must surface as no_services_matched: {v}"
     );
 }
+
+// =============================================================================
+// F10 — 4th-user polish bundle (v0.1.3)
+// =============================================================================
+//
+// 7 sub-items, each a documented first-hour friction point:
+//   F10.1 — namespace-flag-as-typo hint (`--on`, `--in`, `--at`, `--host`,
+//           `--ns`, `--namespace`) on every selector-taking verb
+//   F10.2 — `inspect cat --lines L-R` server-side line slice
+//   F10.3 — `why <ns>/<container>` chained hint when the token is a running
+//           container but not a registered service
+//   F10.4 — `inspect grep` / `inspect search` MODEL/EXAMPLE/NOTE help preface
+//   F10.5 — F7.4 `--quiet` regression-test promotion (jq-clean, exact wc -l)
+//   F10.6 — `inspect logs` discoverability on the top-level `--help` index
+//   F10.7 — `--clean-output` / `--no-tty` flag on `inspect run` strips ANSI
+//           escapes from captured output and sets TERM=dumb
+// -----------------------------------------------------------------------------
+
+/// F10.1a: `inspect why atlas-neo4j --on arte` exits 2 with a chained
+/// hint that points at the correct selector form. Mirrors `kubectl
+/// -n <ns>` muscle memory; today's error is a generic "unknown flag".
+#[test]
+fn f10_namespace_flag_typo_emits_chained_hint_on_why() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["why", "atlas-neo4j", "--on", "arte"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--on is not a flag"),
+        "stderr must explain that --on is not a flag: {stderr}"
+    );
+    assert!(
+        stderr.contains("inspect why arte/atlas-neo4j"),
+        "stderr must suggest the canonical form: {stderr}"
+    );
+}
+
+/// F10.1b: every spelling of the namespace-flag pattern triggers
+/// the same chained hint.
+#[test]
+fn f10_namespace_flag_typo_covers_all_aliases() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    for flag in &["--in", "--at", "--host", "--ns", "--namespace"] {
+        let out = sb
+            .cmd()
+            .args(["status", "atlas", flag, "arte"])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("{flag} is not a flag")),
+            "stderr must explain {flag}: {stderr}"
+        );
+        assert!(
+            stderr.contains("inspect status arte/atlas"),
+            "stderr must suggest canonical form for {flag}: {stderr}"
+        );
+    }
+}
+
+/// F10.2a: `inspect cat --lines 5-10` returns lines 5..=10 inclusive
+/// (6 lines). Slice happens client-side post-fetch; the server-side
+/// fetch is unchanged.
+#[test]
+fn f10_cat_lines_range_inclusive() {
+    let mock = json!([
+        {
+            "match": "cat -- '/etc/test.conf'",
+            "stdout":
+                "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["cat", "arte:/etc/test.conf", "--lines", "5-10"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("L5"), "L5 must appear: {stdout}");
+    assert!(stdout.contains("L10"), "L10 must appear: {stdout}");
+    assert!(!stdout.contains("L4"), "L4 must NOT appear: {stdout}");
+    assert!(!stdout.contains("L11"), "L11 must NOT appear: {stdout}");
+}
+
+/// F10.2b: `--start L --end R` is a synonym for `--lines L-R`.
+#[test]
+fn f10_cat_start_end_synonym_for_lines() {
+    let mock = json!([
+        {
+            "match": "cat -- '/etc/test.conf'",
+            "stdout": "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["cat", "arte:/etc/test.conf", "--start", "3", "--end", "5"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("L3") && stdout.contains("L4") && stdout.contains("L5"));
+    assert!(!stdout.contains("L2") && !stdout.contains("L6"));
+}
+
+/// F10.2c: `--lines` and `--start`/`--end` are mutually exclusive
+/// with each other (only one form per invocation).
+#[test]
+fn f10_cat_lines_and_start_end_mutually_exclusive() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["cat", "arte:/etc/test.conf", "--lines", "1-5", "--start", "3"])
+        .assert()
+        .failure();
+}
+
+/// F10.2d: `--lines 5-10 --json` emits structured `lines: [{n, text}, …]`
+/// records with 1-based line numbers — agents get line numbers
+/// structurally rather than parsing prose.
+#[test]
+fn f10_cat_lines_json_emits_n_text_records() {
+    let mock = json!([
+        {
+            "match": "cat -- '/etc/test.conf'",
+            "stdout": "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args([
+            "cat",
+            "arte:/etc/test.conf",
+            "--lines",
+            "2-4",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut found_n = std::collections::BTreeSet::new();
+    let mut found_text: Vec<String> = Vec::new();
+    for ln in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(ln) else {
+            continue;
+        };
+        if let (Some(n), Some(t)) = (v["n"].as_u64(), v["line"].as_str()) {
+            found_n.insert(n);
+            found_text.push(t.to_string());
+        }
+    }
+    assert!(found_n.contains(&2) && found_n.contains(&3) && found_n.contains(&4));
+    assert!(!found_n.contains(&1) && !found_n.contains(&5));
+    assert!(found_text.iter().any(|s| s == "beta"));
+}
+
+/// F10.3a: `why arte/<container>` — when the resolved selector finds
+/// no service definition AND the inventory has a container with that
+/// exact name, surface the friendly chained hint and exit 0
+/// (informational), not exit 2 (selector typo).
+#[test]
+fn f10_why_chained_hint_when_container_is_not_a_registered_service() {
+    let mock = json!([
+        // Atlas is registered AND running; atlas-neo4j is also running but
+        // not in the profile (container exists, no service definition).
+        { "match": "docker ps --format", "stdout": "atlas\natlas-neo4j\n", "exit": 0 },
+        {
+            "match": "docker inspect",
+            "stdout": "/atlas\thealthy\t0\n/atlas-neo4j\thealthy\t0\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas-neo4j"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("running container but not a registered service"),
+        "must explain the container/service distinction: {combined}"
+    );
+    assert!(
+        combined.contains("inspect logs arte/atlas-neo4j")
+            && combined.contains("inspect setup arte"),
+        "must chain logs + setup hints: {combined}"
+    );
+}
+
+/// F10.3b: when the container is genuinely not present in the
+/// inventory either, the prior selector-error path stands (no
+/// chained hint, exit 2).
+#[test]
+fn f10_why_genuine_typo_keeps_selector_error() {
+    let mock = json!([
+        { "match": "docker ps --format", "stdout": "atlas\n", "exit": 0 },
+        {
+            "match": "docker inspect",
+            "stdout": "/atlas\thealthy\t0\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["why", "arte/nonexistent-typo"])
+        .assert()
+        .failure();
+}
+
+/// F10.4a: `inspect grep --help` carries the MODEL/EXAMPLE/NOTE
+/// preface so an operator can tell from `--help` whether grep
+/// indexes-then-searches or shells out to remote `grep`.
+#[test]
+fn f10_grep_help_includes_model_preface() {
+    let sb = Sandbox::new(json!([]));
+    let out = sb
+        .cmd()
+        .args(["grep", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("MODEL:") && stdout.contains("shells out to remote"),
+        "grep --help must declare the model: {stdout}"
+    );
+    assert!(
+        stdout.contains("NOTE:") && stdout.contains("inspect search"),
+        "grep --help must point at inspect search for indexed search: {stdout}"
+    );
+}
+
+/// F10.4b: `inspect search --help` carries the matching MODEL/NOTE
+/// preface so the contrast lands from either entry point.
+#[test]
+fn f10_search_help_includes_model_preface() {
+    let sb = Sandbox::new(json!([]));
+    let out = sb
+        .cmd()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("MODEL:") && stdout.contains("LogQL"),
+        "search --help must declare the model: {stdout}"
+    );
+}
+
+/// F10.5a: `inspect status arte --quiet` is jq-parseable when paired
+/// with `--json` is impossible (mutex), so the actual contract is:
+/// the human path produces no SUMMARY:/NEXT:/WARNINGS: trailers when
+/// --quiet is set. We assert the absence directly (the upstream test
+/// for jq-clean would require `--json --quiet` which is rejected by
+/// design — pipe-clean is established by the no-trailer property).
+#[test]
+fn f10_quiet_status_human_path_has_no_envelope_trailers() {
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--quiet"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("SUMMARY:")
+            && !stdout.contains("NEXT:")
+            && !stdout.contains("WARNINGS:"),
+        "--quiet output must drop envelope trailers: {stdout}"
+    );
+}
+
+/// F10.5b: `inspect logs <ns>/<svc> --tail 50 --quiet | wc -l == 50`.
+/// Logs verb emits N lines for `--tail N` with no envelope; the
+/// `--quiet` flag must be parsed without error and the line count
+/// must match exactly so pipelines like `--tail 50 --quiet | wc -l`
+/// are a tested contract.
+#[test]
+fn f10_quiet_logs_tail_count_is_exact() {
+    // Build a 50-line log payload.
+    let payload: String = (1..=50).map(|i| format!("LINE-{i}\n")).collect();
+    let mock = json!([
+        { "match": "docker logs", "stdout": payload, "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["logs", "arte/atlas", "--tail", "50", "--quiet"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let n = stdout.lines().filter(|l| !l.is_empty()).count();
+    assert_eq!(
+        n, 50,
+        "logs --tail 50 --quiet must emit exactly 50 lines: got {n}\n{stdout}"
+    );
+}
+
+/// F10.6: top-level `inspect --help` lists `logs` in the "common
+/// verbs" block above the diagnostic verbs, with a worked example so
+/// operators don't keep reaching for `inspect run -- 'docker logs'`.
+#[test]
+fn f10_top_level_help_promotes_logs_with_example() {
+    let sb = Sandbox::new(json!([]));
+    let out = sb
+        .cmd()
+        .args(["--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("COMMON VERBS")
+            || stdout.contains("Common verbs")
+            || stdout.contains("inspect logs"),
+        "top-level --help must surface a common-verbs / logs block: {stdout}"
+    );
+    assert!(
+        stdout.contains("inspect logs arte"),
+        "must include a worked example for logs: {stdout}"
+    );
+}
+
+/// F10.7a: `inspect run --clean-output` strips ANSI escape sequences
+/// from captured stdout. Mock injects ESC[31m red ESC[0m markers in
+/// the simulated remote output; expected output is plain ASCII.
+#[test]
+fn f10_run_clean_output_strips_ansi_escapes() {
+    let mock = json!([
+        {
+            "match": "echo hello",
+            "stdout": "\u{001b}[31mhello-red\u{001b}[0m\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb
+        .cmd()
+        .args(["run", "arte", "--clean-output", "--", "echo", "hello"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("hello-red"),
+        "the visible text must survive: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\u{001b}[31m") && !stdout.contains("\u{001b}[0m"),
+        "ANSI escape codes must be stripped: {:?}",
+        stdout.as_bytes()
+    );
+}
+
+/// F10.7b: `--clean-output` and `--tty` are mutually exclusive
+/// (`--tty` forces tty allocation; `--clean-output` forces no tty
+/// + ANSI strip — combining them is incoherent).
+#[test]
+fn f10_run_clean_output_and_tty_mutually_exclusive() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--clean-output",
+            "--tty",
+            "--",
+            "echo",
+            "hello",
+        ])
+        .assert()
+        .failure();
+}

@@ -12,14 +12,18 @@ use anyhow::Result;
 
 use crate::cli::WhyArgs;
 use crate::error::ExitKind;
+use crate::profile::cache::load_profile;
 use crate::profile::runtime::{RuntimeSnapshot, SourceInfo};
 use crate::profile::schema::{HealthStatus, Profile, Service};
+use crate::selector::ast::{ServerAtom, ServerSpec, ServiceAtom, ServiceSpec};
+use crate::selector::parser::parse_selector;
+use crate::selector::resolve::SelectorError;
 use crate::ssh::SshTarget;
 use crate::verbs::cache::{aggregate_sources, get_runtime, print_source_line, GetOpts};
 use crate::verbs::correlation::why_rules;
-use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
+use crate::verbs::dispatch::{iter_steps, plan, NsCtx, StepError};
 use crate::verbs::output::OutputDoc;
-use crate::verbs::runtime::RemoteRunner;
+use crate::verbs::runtime::{current_runner, resolve_target, RemoteRunner};
 
 /// F4 (v0.1.3): hard cap on the recent-logs tail. Anything larger is
 /// clamped with a one-line stderr notice. Protects the operator from
@@ -27,7 +31,24 @@ use crate::verbs::runtime::RemoteRunner;
 pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
-    let (runner, nses, targets) = plan(&args.selector)?;
+    // F10.3 (v0.1.3): when the selector resolves to zero services BUT
+    // the inventory contains a running container with that exact name,
+    // surface a chained hint pointing at logs / docker inspect / setup
+    // instead of the generic "no targets" selector error. Catches the
+    // common "running container is not a registered service" gap that
+    // bites operators on first contact with a partly-discovered
+    // namespace.
+    let (runner, nses, targets) = match plan(&args.selector) {
+        Ok(p) => p,
+        Err(StepError::Selector(e @ (SelectorError::NoMatches { .. } | SelectorError::EmptyProfile { .. }))) => {
+            if let Some(hint) = build_container_hint(&args.selector) {
+                println!("{hint}");
+                return Ok(ExitKind::Success);
+            }
+            return Err(anyhow::Error::from(e));
+        }
+        Err(e) => return Err(e.into()),
+    };
     let (runtime_by_ns, sources, refresh_warnings) =
         collect_runtime(runner.as_ref(), &nses, args.refresh);
     let aggregated_source = aggregate_sources(&sources);
@@ -729,4 +750,78 @@ fn extract_port_from_addr(flag: &str) -> Option<u16> {
     last.trim_end_matches(|c: char| !c.is_ascii_digit())
         .parse::<u16>()
         .ok()
+}
+
+/// F10.3 (v0.1.3): when `inspect why <ns>/<token>` resolves to zero
+/// services, look up `<token>` against the runtime inventory of each
+/// candidate namespace. If `<token>` matches a running container's
+/// `container_name`, return the chained hint string. Otherwise return
+/// `None` so the caller falls back to the original selector error.
+///
+/// Conservative: only fires for the simple `<ns>/<single-token>`
+/// shape. Globs, regex atoms, multi-atom selectors, `_` host
+/// targets, and `:path` suffixes all fall through. The hint must be
+/// unambiguous or it isn't worth printing.
+fn build_container_hint(raw_selector: &str) -> Option<String> {
+    let sel = parse_selector(raw_selector).ok()?;
+    if sel.path.is_some() {
+        return None;
+    }
+    let token = match sel.service.as_ref()? {
+        ServiceSpec::Atoms(atoms) if atoms.len() == 1 => match &atoms[0] {
+            ServiceAtom::Pattern(p)
+                if !p.contains('*') && !p.contains('?') && !p.contains('[') =>
+            {
+                p.clone()
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let ns_atoms: Vec<&str> = match &sel.server {
+        ServerSpec::Atoms(atoms) => atoms
+            .iter()
+            .filter_map(|a| match a {
+                ServerAtom::Pattern(p)
+                    if !p.contains('*') && !p.contains('?') && !p.contains('[') =>
+                {
+                    Some(p.as_str())
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => return None,
+    };
+    if ns_atoms.is_empty() {
+        return None;
+    }
+    let runner = current_runner();
+    for ns in &ns_atoms {
+        let Ok((_, target)) = resolve_target(ns) else {
+            continue;
+        };
+        let profile = load_profile(ns).ok().flatten();
+        let ctx = NsCtx {
+            namespace: (*ns).to_string(),
+            target,
+            profile,
+        };
+        let Ok((snapshot, _)) = get_runtime(runner.as_ref(), &ctx, GetOpts::default()) else {
+            continue;
+        };
+        if snapshot
+            .services
+            .iter()
+            .any(|s| s.container_name == token)
+        {
+            let pretty = format!("{ns}/{token}");
+            return Some(format!(
+                "note: '{pretty}' is a running container but not a registered service definition.\n  \
+                 → inspect logs {pretty}                       (tail logs directly)\n  \
+                 → inspect run {ns} 'docker inspect {token}'    (raw inspect dump)\n  \
+                 → inspect setup {ns} --force                   (re-classify if you expect this to be a service)"
+            ));
+        }
+    }
+    None
 }
