@@ -1,12 +1,19 @@
 # Inspect CLI — v0.1.3 Patch Backlog
 
 **Rule:** Ship when 7+ items accumulated OR one critical issue found.
-**Source:** Known limitations from pre-v0.2.0 roadmap + retrospective items surfaced during v0.1.2 bundle implementation.
-**Status:** **OPEN** — 0 / 7 shipped. v0.1.3 is the last "break things freely" release before the v0.1.4 stabilization sweep and the v0.2.0 contract.
+**Source:** Known limitations from pre-v0.2.0 roadmap + retrospective items surfaced during v0.1.2 bundle implementation + field feedback from two independent v0.1.2 users (Keycloak / Vault debug sessions on multi-container hosts).
+**Status:** **OPEN — committed to ship all 14 items.** v0.1.3 is the last "break things freely" release on the docker-only surface; **v0.1.4 is dedicated to Kubernetes** (medium = k8s, kubectl-equivalent verbs, k8s-aware selectors). The stabilization sweep that was previously planned for v0.1.4 shifts to a v0.1.5 stabilization release before the v0.2.0 contract. Because v0.1.4 will be heads-down on k8s, **anything docker / compose / SSH related that doesn't ship in v0.1.3 will not be touched again until v0.1.5 at the earliest** — that's the reason to clear the entire v0.1.3 backlog rather than slipping items.
 **Contract:** No backward compatibility. Break whatever needs breaking. After v0.2.0 the CLI surface, JSON schema, and config formats are frozen.
 
 | Item | Status | Notes |
 |---|---|---|
+| F1 — `inspect status` returns 0 services after `--force` discovery (regression) | ⬜ Open | **critical regression**, ship-blocker; **independently confirmed by 2nd field user** on a 37-container Keycloak host |
+| F2 — `docker inspect` batched-timeout warning noise during setup | ⬜ Open | small, cosmetic but erodes trust on first run; 2nd field user hit the 10s default warning every setup |
+| F3 — `inspect help <command>` not a `--help` synonym | ⬜ Open | small, ergonomics; carry-over from v0.1.2 backlog |
+| F4 — `inspect why` compose-aware deep-diagnostic bundle (logs + effective Cmd + port reality) | ⬜ Open | **load-bearing field request**; turns 15-minute manual triage into 30 seconds |
+| F5 — Container-name vs compose-service-name uniform resolution | ⬜ Open | small/medium; both `arte/onyx-vault` and `arte/luminary-onyx-onyx-vault-1` should resolve, or the error must point at the canonical form |
+| F6 — First-class `inspect compose` verbs | ⬜ Open | medium-large; replaces ~80% of field `inspect run -- 'docker compose …'` usage; scoped read-only + restart in v0.1.3 |
+| F7 — Selector / output ergonomic papercuts (4 small fixes bundled) | ⬜ Open | small; pre-setup error hint, `arte:` shorthand suggestion, `inspect ports --port`, `--quiet` trailer suppression |
 | L4 — Password auth + session TTL + `ssh add-key` helper | ⬜ Open | small, unblocks legacy servers; bundles the key-migration helper |
 | L2 — OS keychain integration (opt-in, cross-session only) | ⬜ Open | small, one crate (`keyring`); default stays ssh-agent / per-session |
 | L5 — Audit log rotation / retention | ⬜ Open | small, maintenance hygiene |
@@ -15,11 +22,192 @@
 | L6 — Per-branch rollback in bundle matrix | ⬜ Open | medium, architectural — touches bundle executor |
 | L1 — TUI mode (`inspect tui`) | ⬜ Open | largest, ships last |
 
-**Implementation order:** L4 → L2 → L5 → L7 → L3 → L6 → L1. Smaller / lower-risk items first, TUI last when everything underneath is stable.
+**Implementation order:** F1 → F2 → F3 → F4 → F5 → F7 → F6 → L4 → L2 → L5 → L7 → L3 → L6 → L1. Field-reported regressions first (F1 is a ship-blocker on its own under the "one critical issue" rule). F4 is the load-bearing field request and ships ahead of all L-items because it amplifies every existing diagnostic verb. F5 + F7 are small ergonomic wins that ride along with F4 (same code paths). F6 (compose verbs) is the larger surface and lands after the diagnostic improvements so compose-aware `why` already exists when compose verbs ship. Then the planned L-items in their existing order. TUI last when everything underneath is stable.
 
 ---
 
-## Backlog (7 items)
+## Backlog (14 items)
+
+### F1 — `inspect status <ns>` returns 0 services after `--force` discovery (regression)
+**Source:** v0.1.2 field feedback (first reported on a 38-container host; **independently re-confirmed by 2nd field user** debugging a Keycloak deployment on a 37-container host — `inspect setup --force` showed the full inventory, then `inspect status arte` immediately returned `0 services`. `inspect health 'arte/onyx-*'` worked fine on the same data, which made `status` "feel like dead weight").
+**Severity:** **Critical** (ship-blocker on its own — qualifies v0.1.3 for release under the "one critical issue" clause). Two-of-two independent field users hit this on the same code path within the first minute of use; the status verb is the first thing operators run after `connect`, and returning 0 services on a healthy 30+-container host destroys trust in the tool.
+**Problem:** `inspect status arte` reports `0 services` even after `inspect status arte --force` (which is supposed to bypass the discovery cache and re-scan from scratch). The discovery probe clearly *did* run during v0.1.2 setup (the rest of the verbs work — `logs`, `run`, `search` all see services), so the regression is in either:
+  (a) the cache key used by `status` vs the cache key written by `--force` discovery (status reads a stale / wrong-keyed entry), or
+  (b) the post-discovery aggregation that builds the `status` view (services normalization landed in v0.1.2 to fix #1 / #3 phantom selectors — likely the same code path now drops everything when normalization can't resolve a row).
+**Fix:**
+- **Reproduce first.** Add `tests/phase_f_v013.rs::status_after_force_discovery_returns_services` covering: cold cache → `inspect status <ns> --force` → assert `services_count > 0` against a mock medium with N≥10 containers. This test must fail today before any code change.
+- **Bisect** between v0.1.1 (where status worked) and v0.1.2 (where it doesn't) on the discovery / status code paths only — the v0.1.2 services-normalization commit is the prime suspect.
+- **Fix at the layer the bisect points at**, not above:
+  - If (a) — make `--force` invalidate **and rewrite** the same cache entry that `status` reads. Single source of truth for the cache key (`src/discovery/engine.rs`). Add a debug-assert that the key written by discovery equals the key read by status.
+  - If (b) — the normalization step must never drop a row silently. Unresolvable rows fall through with `service: <raw_name>, normalized: false` and are still counted in `status`. Log a single warning summarizing how many rows fell through, never per-row spam.
+- `inspect status <ns> --force --debug` prints the cache path being read, entry count before/after force, and any rows dropped during normalization — so the next regression of this shape is diagnosed in one command.
+- Audit-log the `--force` invocation (`verb=status.force`) so we can see in the field how often operators reach for it.
+
+**Test:**
+- `tests/phase_f_v013.rs::status_after_force_discovery_returns_services` — passes after the fix, fails before.
+- Regression guard: same test against a 1-container, 10-container, and 50-container mock medium; all return the expected count.
+- Normalization fall-through: a container whose name does not match the v0.1.2 normalization rules still appears in `status` output with `normalized: false` and contributes to the total count.
+- `--force --debug` output includes cache path, pre/post entry count, and any drop summary.
+- v0.1.2 phantom-selector fix is **not regressed** (re-run `tests/phase_b_v011.rs` and the v0.1.2 services-normalization tests).
+
+---
+
+### F2 — `docker inspect` batched-timeout warning noise during setup
+**Source:** v0.1.2 field feedback (independently re-reported by 2nd field user — "appeared as a warning every single `setup` run" on a 37-container Keycloak host with the 10s default).
+**Severity:** Low (cosmetic, but it is the *first* output a new user sees on `inspect setup` / first discovery — and a scary warning on first run erodes trust before the tool has done anything useful). Two-of-two field users hitting it on first run elevates it from "rare papercut" to "guaranteed first-impression bug".
+**Problem:** During setup / first discovery, the batched `docker inspect` probe emits a timeout warning that (a) appears even on healthy hosts, (b) does not actually indicate a failure (discovery succeeds, services are populated, the warning is just noise), and (c) uses a fixed 10s default that is too aggressive for hosts with 30+ containers. Today's behavior trains users to ignore warnings, which is exactly the wrong reflex.
+**Fix:**
+- **Decide what the warning means** before changing anything. Audit `src/discovery/probes.rs` (the docker-inspect batch path) and classify the timeout into one of three buckets:
+  1. **Genuine failure** — batch returned partial / no data. Surface as an `error` with a concrete chained hint, never as a `warning`.
+  2. **Slow but successful** — batch took longer than the soft threshold but returned complete data. **Demote to debug-level only**, visible under `--debug` / `RUST_LOG=debug`. Default output stays clean.
+  3. **Per-container timeout in a parallel batch** — surface once at the end of discovery as `warning: docker inspect timed out for N/M containers; rerun with --force or check daemon load` (single line, with counts), never per-container.
+- **Scale the timeout with inventory size**, as the 2nd field user explicitly suggested. New formula: `timeout = max(10s, 250ms * container_count)` — i.e. 10s floor for tiny hosts, ~10s for 40 containers, ~25s for 100. Cap at 60s to keep failure cases bounded. Configurable via `discovery.docker_inspect_timeout = "30s"` in `~/.inspect/config.toml` for operators who want to override.
+- Add an integration test that runs first discovery against a healthy mock medium and asserts **no `warning:` lines** on stderr. That test is the contract going forward.
+- Document the three-bucket classification + the scaling formula in `docs/RUNBOOK.md` so the next probe author follows the same rule.
+
+**Test:**
+- Healthy mock medium with 37 containers, first discovery: stderr contains zero `warning:` lines (`tests/phase_f_v013.rs::no_spurious_docker_inspect_warning_at_field_scale`).
+- Inject a single slow container (sleep 10s in the inspect path) under the scaled threshold for a 37-container host: still zero warnings, debug log shows the slow entry.
+- Inject a genuine failure (kill the docker socket mid-batch): error surfaces with a chained hint, exit code non-zero, **not** a warning.
+- Inject 3 of 50 per-container timeouts: exactly one summary warning line at end of discovery, format matches the spec above.
+- Config override `discovery.docker_inspect_timeout = "5s"` is honored and bypasses the scaling formula.
+
+---
+
+### F3 — `inspect help <command>` as `--help` synonym
+**Source:** v0.1.2 field feedback (still open from prior backlogs — carried forward because operators keep hitting it).
+**Severity:** Low (ergonomics), but it is one of the first reflexes users have (`git help log`, `cargo help build`, `kubectl help get` all work) and its absence is jarring.
+**Problem:** `inspect help <command>` does not behave as a synonym for `inspect <command> --help`. Today it either errors or drops back to the top-level help, depending on the verb. Operators who type `inspect help logs` expect the `inspect logs --help` page.
+**Fix:**
+- In `src/commands/help.rs` (and the top-level dispatcher in `src/main.rs` / `src/cli.rs`), when the parsed argv is `inspect help <token>`:
+  - If `<token>` is a known verb → dispatch to that verb's `--help` rendering exactly as `inspect <token> --help` would (same output, byte-for-byte; share the rendering function).
+  - If `<token>` is a known topic (`ssh`, `bundle`, `selectors`, etc.) → render the topic page.
+  - If `<token>` is unknown → exit 2 with `error: unknown command or topic: <token>` and a chained hint pointing at `inspect help` (top-level list). Never silently fall back to the top-level help — that is exactly the bug.
+- Same treatment for the bare `inspect help` form (already works; keep it).
+- Add a `tests/help_contract.rs` case asserting `inspect help <verb>` and `inspect <verb> --help` produce **identical stdout** for every registered verb. This is the contract that prevents future drift.
+- No change to the JSON help snapshot (`tests/help_json_snapshot.rs`) other than adding the synonym path to its coverage.
+
+**Test:**
+- For every verb in the registry: `inspect help <verb>` stdout == `inspect <verb> --help` stdout (byte-for-byte).
+- `inspect help selectors` renders the selectors topic page (matches existing topic rendering).
+- `inspect help nonsense-verb` exits 2 with the unknown-command error and a hint to `inspect help`. Does **not** print top-level help on stdout.
+- Bare `inspect help` is unchanged.
+
+---
+
+### F4 — `inspect why` compose-aware deep-diagnostic bundle
+**Source:** v0.1.2 field feedback (2nd field user, "the one load-bearing feature request"). Real-world session: Vault failing with `bind: address already in use`, `inspect why arte/onyx-vault` correctly identified the service as down but stopped at "down — likely root cause" and pointed the operator at `inspect logs`. The operator then spent 15 minutes manually assembling logs + effective `Cmd` + port reality across `inspect run`, `inspect logs`, `inspect ports` to find a duplicate listener bug (docker-entrypoint injecting `-dev-listen-address` even with `-config`). With this bundle, the same diagnosis would have been ~30 seconds.
+**Severity:** **High value, medium effort.** This is the single highest-leverage change in v0.1.3 because it amplifies the value of every existing diagnostic verb without adding a new top-level surface. It is the verb operators reach for first when something is broken, and today it stops one level too shallow.
+**Problem:** `inspect why <selector>` reports up/down + a single likely-root-cause line + a `NEXT:` hint. That is correct but shallow for any unhealthy/exited container — the operator now manually runs three more commands (`logs`, `run -- 'docker inspect'`, `ports`) to reconstruct the actual failure context. The information is already on the host; the verb just isn't gathering it.
+**Fix:** For any selector that resolves to an **unhealthy, exited, or restart-looping** container, `inspect why` automatically attaches three diagnostic artifacts inline, in this exact order, under the existing `DATA` block:
+
+1. **Recent logs** — last 20 lines of `docker logs <container>` (configurable via `--log-tail <n>`, capped at 200). Streamed through the existing redaction pipeline (L7 once shipped). Skipped silently if logs are empty.
+2. **Effective `Cmd` + `Entrypoint`** — the `Cmd` and `Entrypoint` fields from `docker inspect`, **plus** the resolved entrypoint script if it is a known `docker-entrypoint.sh`-style wrapper (read the first 50 lines of the script to surface flag injection like Vault's `-dev-listen-address`). Display as: `effective command: <entrypoint> <cmd>` and, if a wrapper is detected, `wrapper injects: -dev-listen-address=...` on a separate line.
+3. **Port reality vs declared** — for each port the container declares (`HostConfig.PortBindings` + `Config.ExposedPorts`), check three things on the host: (a) is the host port free or bound? (b) is the container port bound inside the container's netns? (c) does the declared config bind the same port more than once? Render as a small table:
+   ```
+   port    host        container       declared
+   8200    free        bound (twice!)  config + entrypoint -dev-listen
+   8201    bound→pid…  free            config
+   ```
+   The "bound (twice!)" detection is the headline diagnostic — it short-circuits "is it the network, the config, or the entrypoint?" for the dominant class of port-conflict failures on shared dev hosts.
+
+Design points:
+- New flag `--no-bundle` to suppress the three artifacts and restore today's terse output (for agents that already drive the deeper queries themselves).
+- New flag `--log-tail <n>` (default 20, max 200).
+- For **healthy** services, `why` output is unchanged (no bundle, no extra round-trips, no perf regression on the happy path).
+- The bundle never fires more than 4 extra remote commands (logs + inspect + entrypoint cat + port probe). Hard cap, audited.
+- All three artifacts go under `DATA` with explicit subsection headers (`logs:`, `effective_command:`, `ports:`) so the existing `SUMMARY` / `DATA` / `NEXT` discipline holds.
+- `--json` output adds three structured fields: `recent_logs: []`, `effective_command: { entrypoint, cmd, wrapper_injects }`, `port_reality: [{ port, host, container, declared_by }]`.
+- The `NEXT:` block becomes smarter: if "bound twice" is detected, the suggestion is `inspect run <ns>/<svc> -- 'cat /entrypoint.sh'` or the equivalent for the detected wrapper. If logs contain `address already in use`, suggestion is `inspect ports <ns> --port <p>` (uses the F7 structured filter once that lands).
+- Compose-aware naming: works for both `arte/onyx-vault` (compose service) and `arte/luminary-onyx-onyx-vault-1` (docker container) — relies on F5's uniform resolution.
+- Implementation lives in `src/commands/why.rs`; the three artifact gatherers go under `src/commands/why/bundle/{logs.rs,command.rs,ports.rs}` so each is unit-testable in isolation against a mock docker-inspect / log fixture.
+
+**Test:**
+- Mock medium with a Vault-style container: exited (1), restart_count=4, logs containing `bind: address already in use`, entrypoint script that injects `-dev-listen-address=0.0.0.0:8200`, declared port 8200 in compose config — `inspect why arte/onyx-vault` output includes all three sections, the "bound (twice!)" detection fires, and `NEXT:` suggests inspecting the entrypoint.
+- Healthy service: `inspect why arte/pulse` output is byte-for-byte identical to v0.1.2 (no bundle, no extra commands fired — assert remote-command counter is unchanged).
+- `--no-bundle` on an unhealthy service produces v0.1.2-style terse output.
+- `--log-tail 50` returns 50 lines; `--log-tail 500` is clamped to 200 with a one-line notice.
+- `--json` output schema includes the three new fields with non-null values for unhealthy services and empty defaults for healthy ones.
+- Hard cap test: an unhealthy service produces ≤ 4 extra remote commands (counted via mock medium's command log).
+- Resolution test: `inspect why arte/luminary-onyx-onyx-vault-1` and `inspect why arte/onyx-vault` both produce the same bundle (depends on F5).
+
+---
+
+### F5 — Container-name vs compose-service-name uniform resolution
+**Source:** v0.1.2 field feedback (2nd field user). The operator tried `arte/luminary-onyx-onyx-vault-1` (the docker container name from `docker ps`), got an error, then `arte/onyx-vault` (the compose service name) worked. Both forms appear in the discovered inventory, so the failure is surprising.
+**Severity:** Small/medium (every compose user hits this once; trust cost on first encounter).
+**Problem:** A single container has at least two valid identifiers in the discovered inventory: the docker-assigned container name (`<project>-<service>-<index>`, e.g. `luminary-onyx-onyx-vault-1`) and the compose service name (`onyx-vault`). The selector resolver currently accepts only one of them depending on the verb / code path, and the error on the rejected form is generic ("no targets" or "invalid selector") with no hint at the canonical form.
+**Fix:**
+- **Single resolution pass** in `src/selector/`: every container selector resolves through one function that tries, in order: (1) exact match against compose `service` name, (2) exact match against docker container name, (3) glob match against either. The function returns the canonical form (compose service name, when available) plus a list of aliases.
+- All verbs (`why`, `logs`, `run`, `ports`, `cat`, `exec`, `health`) use that function. No verb-local resolution paths.
+- When the rejected form is a known docker container name but the canonical is the compose service: error becomes `error: 'arte/luminary-onyx-onyx-vault-1' is the docker container name; the canonical selector is 'arte/onyx-vault' (try that, or use the docker name with --by-container)`.
+- New flag `--by-container` (and config option `selector.prefer = "container" | "service"`, default `"service"`) for operators who explicitly want docker-container-name semantics (e.g. when two compose services map to the same image and they want the specific instance).
+- `inspect status <ns>` and `inspect health <selector>` JSON output gains an `aliases: ["luminary-onyx-onyx-vault-1"]` field per service so agents discover the equivalence without trial-and-error.
+
+**Test:**
+- `inspect why arte/onyx-vault` and `inspect why arte/luminary-onyx-onyx-vault-1` both succeed and target the same container.
+- Without the disambiguation flag, the docker-container form prints the canonical-form hint as part of stderr but still resolves (warning, not error). With `selector.prefer = "service"` (default), this warning fires; with `selector.prefer = "container"`, it does not.
+- Two compose services running the same image: `--by-container` resolves to the specific docker instance; default service-name resolution returns the compose service.
+- `inspect status arte --json` output includes the `aliases` field for every service that has a docker-container-name distinct from its compose-service name.
+- Glob form: `arte/onyx-*` and `arte/luminary-onyx-onyx-*-1` both work; the result set is identical when each compose service has exactly one container.
+
+---
+
+### F6 — First-class `inspect compose` verbs
+**Source:** v0.1.2 field feedback (2nd field user, "no obvious `inspect compose` integration … first-class compose verbs would replace 80% of my `run` usage"). Field operator was repeatedly running `inspect run arte -- 'cd /opt/luminary-onyx && sudo docker compose …'` for ps / logs / restart / config. Compose is the dominant deployment shape on the field servers Inspect targets today.
+**Severity:** Medium-large (new verb surface, but each sub-verb is a thin wrapper around an existing remote `docker compose` invocation — risk is in scoping, not in implementation complexity).
+**Problem:** Compose projects are a first-class deployment unit on the hosts Inspect targets, but Inspect treats them as opaque collections of containers. To inspect a compose project's effective config, restart a single service, or view aggregated compose logs, operators drop back to `inspect run <ns> -- 'cd <project_dir> && sudo docker compose …'` — losing structured output, audit trail, redaction, and selector grammar.
+**Fix:** Ship a small, **read-mostly** `inspect compose` subcommand surface in v0.1.3. Write verbs are limited to `restart` (the safest, most-needed action). `up` / `down` / `pull` are deferred to **v0.1.5+** pending a compose-write design review (v0.1.4 is the k8s release and will not touch compose).
+
+Sub-verbs in v0.1.3:
+- `inspect compose ls <ns>` — list compose projects discovered on the namespace, with `name`, `working_dir`, `service_count`, `running_count`, `compose_file`. Replaces `docker compose ls`.
+- `inspect compose ps <ns>/<project>` — per-service status table for one project (state, ports, image, uptime). Replaces `docker compose ps`.
+- `inspect compose config <ns>/<project>` — effective merged compose config (resolved variables, profiles applied). Replaces `docker compose config`. Streamed through redaction.
+- `inspect compose logs <ns>/<project>[/<service>]` — aggregated logs for a project (or one service inside it). Wraps `docker compose logs` with the existing `--tail` / `--follow` / `--since` flags from `inspect logs`.
+- `inspect compose restart <ns>/<project>/<service>` — restart a single service. **Audited** like any write verb (`verb=compose.restart`), respects `--dry-run`. Aborts if more than one service is targeted unless `--all` is passed (defensive default).
+
+Design points:
+- Compose project discovery extends `src/discovery/probes.rs` to find compose projects via `docker compose ls --format json`. Cached alongside the existing container inventory; surfaces in `inspect status <ns>` as a new `compose_projects:` line.
+- Project paths resolve against the discovered `working_dir`; operators never type the path. Selector form is `<ns>/<project>` for the project and `<ns>/<project>/<service>` for a service inside it. The existing `<ns>/<service>` form continues to work because F5's resolver tries compose-service first.
+- All sub-verbs share the existing `SUMMARY` / `DATA` / `NEXT` output discipline and `--json` schema.
+- **Out of scope for v0.1.3:** `up`, `down`, `pull`, `build`, `exec`. Those introduce compose-state-mutation semantics that need their own design pass; deferred to the **v0.1.5 backlog** with a placeholder (v0.1.4 is k8s-only).
+- Audit log: every `compose restart` writes a structured entry with `project`, `service`, `compose_file_hash` (so the post-mortem can verify the file didn't change between audit and rerun).
+- Help: `inspect help compose` lists the sub-verbs and explicitly notes which compose actions are intentionally not yet exposed and why.
+
+**Test:**
+- Mock medium with two compose projects: `inspect compose ls arte` lists both with correct service counts.
+- `inspect compose ps arte/luminary-onyx` returns the per-service table; `--json` schema matches the spec.
+- `inspect compose config arte/luminary-onyx` produces the merged YAML and runs through the redaction pipeline (L7-aware once that lands; today the existing env-var masker applies).
+- `inspect compose logs arte/luminary-onyx` aggregates; `inspect compose logs arte/luminary-onyx/onyx-vault` narrows to one service.
+- `inspect compose restart arte/luminary-onyx/onyx-vault` writes an audit entry, restarts only that service, and exits 0.
+- `inspect compose restart arte/luminary-onyx` (no service) exits 2 with "specify a service or pass --all".
+- `inspect compose restart arte/luminary-onyx --all --dry-run` lists every service that *would* restart without doing it.
+- `inspect status arte` output includes `compose_projects: 2` (or whatever the count is); `--json` includes the structured project list.
+- `inspect compose up`, `inspect compose down`, `inspect compose pull` exit 2 with "intentionally not implemented in v0.1.3 — see `inspect help compose`".
+
+---
+
+### F7 — Selector / output ergonomic papercuts (4 small fixes bundled)
+**Source:** v0.1.2 field feedback (2nd field user, "minor papercuts" section). Bundled because each fix is < 30 LOC and they all touch error formatting / selector parsing / output trimming.
+**Severity:** Low individually; collectively they remove four obvious "the tool should have just told me" moments from a fresh user's first hour.
+**Problem + Fix (one bullet each):**
+
+1. **Pre-setup verb error points at `inspect profile` instead of `inspect setup <ns>`.** Today, `inspect logs arte/onyx-vault` before discovery has run errors with `servers tried: arte / services available: (none)` and a hint pointing at `inspect profile`. The operator wanted "run `inspect setup arte` first". Fix: detect the "namespace known, services empty" case in `src/commands/logs.rs` (and every other read verb) and emit the chained hint `→ run 'inspect setup <ns>' to discover services on this namespace`. The `inspect profile` hint stays for the genuinely-misconfigured-namespace case (namespace not in `servers.toml`).
+
+2. **`arte:` shorthand for host-file paths is rejected with a generic "invalid selector character ':'" error.** The correct form is `arte/_:/path` (the `_` indicates "host, not container"). Fix: in the selector parser (`src/selector/parse.rs`), specifically detect the `<ns>:<absolute_path>` shape and emit `error: 'arte:/path' looks like a host-path selector — did you mean 'arte/_:/path'? (the '_' selector targets the host filesystem)`. Pure error-message change, no parser-grammar change.
+
+3. **`inspect ports arte | grep 8200` ergonomics.** Operators want a structured filter, not a grep. Fix: add `--port <n>` (single port) and `--port-range <lo-hi>` to `inspect ports`, filtering the table server-side. `inspect ports arte --port 8200` returns only rows where host or container port matches 8200. JSON output respects the same filter.
+
+4. **`inspect logs --tail` collides with the user's own `| tail` because the `SUMMARY` block is at the end.** Fix: add a global `--quiet` flag that suppresses the trailing `SUMMARY` and `NEXT:` blocks (keeps `DATA` only), making output safe to pipe into `tail`, `head`, `grep -A`, etc. without worrying about trailer corruption. Documented in `docs/MANUAL.md` under "piping output". `--quiet` is mutually exclusive with `--json` (json output is already trailer-free).
+
+**Test:**
+- Pre-setup: `inspect logs arte/onyx-vault` before any discovery for `arte` exits 2 with the chained hint pointing at `inspect setup arte`. Same for `inspect run`, `inspect why`, `inspect cat`.
+- `inspect cat arte:/etc/hosts` exits 2 with the `arte/_:/etc/hosts` suggestion. `inspect cat arte/_:/etc/hosts` succeeds.
+- `inspect ports arte --port 8200` returns only matching rows; `--port-range 8000-9000` returns the range; `--port 8200 --json` schema is unchanged minus the filter.
+- `inspect logs arte/onyx-vault --tail 50 --quiet | tail -10` prints exactly 10 log lines with no `SUMMARY` / `NEXT` text appended.
+- `--quiet --json` exits 2 with "mutually exclusive" error (json is already quiet).
+
+---
 
 ### L4 — Password authentication + extended session TTL + `ssh add-key` helper
 **Source:** Roadmap "Remaining work" / known limitation; key-only auth blocks integration with shared bastions and legacy boxes that still require password auth. Refined during v0.1.3 backlog review: password auth is only acceptable if (a) the session TTL is long enough that passwords are not re-prompted within a working session, and (b) there is a one-command path off password auth onto keys.
@@ -267,10 +455,11 @@ Design points:
 *(explicitly deferred — do not let scope creep drag these in)*
 
 - **TUI write actions.** Read-only in v0.1.3; `e` / `x` / `apply` from inside TUI is v0.2.0+.
+- **Compose write verbs beyond `restart`.** `inspect compose up` / `down` / `pull` / `build` / `exec` are intentionally deferred (see F6). They need a compose-state-mutation design pass and land in **v0.1.5 at earliest** — v0.1.4 is the Kubernetes release and will not touch compose.
 - **Alias defaults / fallback values** (`${svc:-pulse}`). Parser stays minimal in v0.1.3; defaults land in v0.2.0.
 - **Cross-medium bundles** (Docker + k8s steps in one bundle). v0.2.0 introduces k8s; cross-medium is post-v0.2.0.
-- **CLI surface renames / config schema freeze.** That is the entire job of v0.1.4. Resist any rename in v0.1.3 unless it is fixing an outright bug.
-- **kubectl / k8s anything.** v0.2.0.
+- **CLI surface renames / config schema freeze.** Previously planned for v0.1.4; now the job of **v0.1.5** (the stabilization sweep), because v0.1.4 is reserved for Kubernetes. Resist any rename in v0.1.3 unless it is fixing an outright bug.
+- **kubectl / k8s anything.** **v0.1.4** (was v0.2.0 — accelerated). The entire v0.1.4 release is dedicated to introducing the k8s medium, k8s-aware selectors, and the kubectl-equivalent verb surface.
 - **Themes, plugins, custom layouts in TUI.** Permanent no for v0.1.x.
 
 ---
@@ -280,6 +469,19 @@ Design points:
 
 ---
 
-## Running total: 0 / 7 — **OPEN**
+## Running total: 0 / 14 — **OPEN, committed to ship the full backlog**
 
-**Next step after L1 lands:** open `INSPECT_v0.1.4_BACKLOG.md` covering the S1–S7 stabilization sweep (CLI surface audit, config freeze, JSON schema freeze, help audit, README rewrite, dead code + dependency audit, security audit). v0.1.4 is the last release before the v0.2.0 contract; it ships **no new features**.
+**Why ship the entire backlog, not just F1:** v0.1.4 is now dedicated to Kubernetes. That means the docker / compose / SSH surface — every L-item and every F-item in this backlog — gets no further attention until **v0.1.5 at the earliest**. Slipping any item out of v0.1.3 effectively pushes it past two intervening releases (v0.1.4 k8s + v0.1.5 stabilization) into v0.2.0+ territory. The docker-host install base is the entire current user base of the tool, so leaving their backlog half-shipped while spending a release on k8s would be the wrong call. Ship all 14.
+
+**Note on critical-issue rule:** F1 (status returns 0 services after `--force`) is a regression on a verb that runs in the first 30 seconds of every session, **independently confirmed by two field users** on 37- and 38-container hosts. It qualifies v0.1.3 for release on its own under the "one critical issue" clause — but the commitment now is full-backlog. F4 (compose-aware `why`) is the highest-leverage item and the answer to the dominant field complaint ("structured verbs stop one level too shallow"); it amplifies the value of every other diagnostic verb without expanding the surface. F5 lands with F4 (shared resolver path). F6 (compose verbs) is the largest surface in the release; its absence is the second-most-cited field gap, and given the v0.1.4 k8s diversion, **F6 cannot slip** without leaving compose users without a structured surface for two full release cycles.
+
+**Release readiness gate (all must be green to tag v0.1.3):**
+- All 14 items have a passing test (or test bundle) in their respective phase file.
+- `tests/phase_f_v013.rs` covers F1–F7 end-to-end.
+- `tests/no_dead_code.rs` and `tests/help_contract.rs` pass against the expanded verb surface (F6 adds the `compose` subcommand tree; F7 adds `--quiet` globally and `--port` / `--port-range` to `ports`).
+- `docs/MANUAL.md` updated for: compose verbs (F6), `arte/_:` host-path selector (F7.2), `--quiet` piping section (F7.4), `inspect why` deep-bundle output and `--no-bundle` / `--log-tail` flags (F4).
+- `docs/RUNBOOK.md` updated for: F2 three-bucket warning classification + scaling formula, F4 deep-bundle internals.
+- `CHANGELOG.md` entry per item (14 bullets minimum).
+- One end-to-end smoke test against a real multi-container host reproduces the second field user's Vault-style scenario and confirms F4 produces the deep-bundle output (this is the field-validation gate, not a unit test).
+
+**Next step after L1 lands:** open `INSPECT_v0.1.4_BACKLOG.md` covering the **Kubernetes release** — k8s medium implementation, k8s-aware selectors (`<ctx>/<namespace>/<workload>`), kubectl-equivalent read verbs (`logs`, `describe`, `events`, `top`), kubectl-equivalent write verbs scoped conservatively (`scale`, `restart`, `delete pod` with audit), and the bundle-engine integration so cross-medium k8s+docker bundles become possible. The S1–S7 stabilization sweep that was previously slated for v0.1.4 (CLI surface audit, config freeze, JSON schema freeze, help audit, README rewrite, dead code + dependency audit, security audit) shifts to **`INSPECT_v0.1.5_BACKLOG.md`** — the last release before the v0.2.0 contract; v0.1.5 ships **no new features**, only stabilization. Update `INSPECT_ROADMAP_TO_v01.3.md` (or rename it) to reflect the v0.1.3 → v0.1.4 (k8s) → v0.1.5 (stabilization) → v0.2.0 (contract) sequence.
