@@ -1391,3 +1391,280 @@ fn f5_glob_matches_either_form() {
         .success()
         .stdout(contains("onyx-vault"));
 }
+
+// -----------------------------------------------------------------------------
+// F4 — `inspect why` compose-aware deep-diagnostic bundle.
+//
+// The 2nd field user's "one load-bearing feature request": for any
+// unhealthy/down/restart-looping container, attach (1) recent logs,
+// (2) effective Cmd + Entrypoint + wrapper-injection detection, and
+// (3) port reality vs declared. Compresses 15-minute manual triage
+// into ~30 seconds. Healthy-path output is unchanged (no extra
+// remote commands, no perf regression).
+// -----------------------------------------------------------------------------
+
+/// F4 mock for an unhealthy Vault-style container with the dev-listen
+/// duplicate-bind reproducer the field user hit. Covers every command
+/// the bundle gatherer fires; substring-matched in MockRunner.
+fn f4_vault_unhealthy_mock() -> serde_json::Value {
+    json!([
+        // Runtime cache: docker ps + docker inspect for health/restart
+        { "match": "docker ps --format", "stdout": "onyx-vault\n", "exit": 0 },
+        {
+            "match": "docker inspect --format '{{.Name}}",
+            "stdout": "/onyx-vault\tunhealthy\t4\n",
+            "exit": 0
+        },
+        // Bundle: recent logs.
+        {
+            "match": "docker logs --tail",
+            "stdout":
+                "==> Vault server configuration:\n\
+                 listener (tcp): bind: address already in use\n\
+                 listener two binds (config + entrypoint): conflict on 8200\n",
+            "exit": 0
+        },
+        // Bundle: effective Cmd / Entrypoint / ports as JSON.
+        {
+            "match": "docker inspect --format '{{json .Config.Cmd}}",
+            "stdout":
+                "[\"server\",\"-config=/vault/config\"]|[\"docker-entrypoint.sh\"]|{\"8200/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"8200\"}]}|{\"8200/tcp\":{}}\n",
+            "exit": 0
+        },
+        // Bundle: entrypoint script — dev-listen-address injection.
+        {
+            "match": "cat /docker-entrypoint",
+            "stdout":
+                "#!/bin/sh\n\
+                 # Vault wrapper\n\
+                 exec vault server -dev-listen-address=0.0.0.0:8200 \"$@\"\n",
+            "exit": 0
+        },
+        // Bundle: host port reality.
+        {
+            "match": "ss -ltn",
+            "stdout":
+                "State    Recv-Q   Send-Q   Local Address:Port   Peer Address:Port\n\
+                 LISTEN   0        4096     0.0.0.0:8200         0.0.0.0:*\n",
+            "exit": 0
+        }
+    ])
+}
+
+#[test]
+fn f4_unhealthy_target_attaches_bundle_artifacts() {
+    // Headline reproducer: all three sections present in human output.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    sb.cmd()
+        .args(["why", "arte/onyx-vault"])
+        .assert()
+        .code(2) // failing => ExitKind::Error
+        .stdout(contains("logs:"))
+        .stdout(contains("address already in use"))
+        .stdout(contains("effective_command:"))
+        .stdout(contains("docker-entrypoint.sh"))
+        .stdout(contains("port_reality:"))
+        .stdout(contains("8200"));
+}
+
+#[test]
+fn f4_unhealthy_target_detects_wrapper_injection() {
+    // The "wrapper injects: -dev-listen-address" line is the
+    // headline diagnostic for the duplicate-bind class of failure.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    sb.cmd()
+        .args(["why", "arte/onyx-vault"])
+        .assert()
+        .code(2)
+        .stdout(contains("wrapper injects:"))
+        .stdout(contains("-dev-listen-address"));
+}
+
+#[test]
+fn f4_no_bundle_flag_suppresses_artifacts() {
+    // Operators who already drive the deeper queries themselves want
+    // the v0.1.2 terse output. --no-bundle restores it.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    let out = sb
+        .cmd()
+        .args(["why", "arte/onyx-vault", "--no-bundle"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("logs:"),
+        "--no-bundle must suppress the logs section: {stdout}"
+    );
+    assert!(
+        !stdout.contains("effective_command:"),
+        "--no-bundle must suppress the effective_command section: {stdout}"
+    );
+    assert!(
+        !stdout.contains("port_reality:"),
+        "--no-bundle must suppress the port_reality section: {stdout}"
+    );
+}
+
+#[test]
+fn f4_healthy_target_no_bundle_attached() {
+    // Happy-path discipline: byte-for-byte unchanged on healthy
+    // services, no bundle headers in stdout.
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas"])
+        .assert()
+        .success() // healthy => exit 0
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("logs:"),
+        "healthy target must not attach logs section: {stdout}"
+    );
+    assert!(
+        !stdout.contains("effective_command:"),
+        "healthy target must not attach effective_command section: {stdout}"
+    );
+    assert!(
+        !stdout.contains("port_reality:"),
+        "healthy target must not attach port_reality section: {stdout}"
+    );
+}
+
+#[test]
+fn f4_log_tail_above_cap_is_clamped_to_200() {
+    // The cap protects the operator from accidentally pulling 50k
+    // lines through redaction; clamp + one-line notice on stderr.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    sb.cmd()
+        .args(["why", "arte/onyx-vault", "--log-tail", "500"])
+        .assert()
+        .code(2)
+        .stderr(contains("--log-tail 500 clamped to 200"));
+}
+
+#[test]
+fn f4_json_bundle_fields_populated_on_unhealthy() {
+    // Agent contract: the three new fields are present and populated
+    // with structured data on unhealthy services.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    let out = sb
+        .cmd()
+        .args(["why", "arte/onyx-vault", "--json"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    let line = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(line.lines().next().expect("at least one JSON record"))
+            .expect("why --json must parse");
+    let svc = &v["data"]["services"][0];
+
+    let logs = svc["recent_logs"].as_array().expect("recent_logs array");
+    assert!(!logs.is_empty(), "recent_logs must be populated");
+    let logs_text = logs
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        logs_text.contains("address already in use"),
+        "expected reproducer text in recent_logs, got: {logs_text}"
+    );
+
+    let cmd = &svc["effective_command"];
+    assert!(
+        cmd.is_object(),
+        "effective_command must be a JSON object on unhealthy: {cmd:?}"
+    );
+    assert!(
+        cmd["wrapper_injects"]
+            .as_str()
+            .map(|s| s.contains("-dev-listen-address"))
+            .unwrap_or(false),
+        "wrapper_injects must surface the dev-listen-address flag: {cmd:?}"
+    );
+
+    let ports = svc["port_reality"].as_array().expect("port_reality array");
+    assert!(!ports.is_empty(), "port_reality must be populated");
+    let p8200 = ports
+        .iter()
+        .find(|p| p["port"] == 8200)
+        .expect("port 8200 row");
+    assert_eq!(p8200["port"], 8200);
+}
+
+#[test]
+fn f4_json_bundle_fields_empty_on_healthy() {
+    // Schema stability: the three fields are always present, with
+    // documented empty defaults on healthy services so agents can
+    // address them without optional-chaining gymnastics.
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let line = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(line.lines().next().unwrap()).expect("why --json must parse");
+    let svc = &v["data"]["services"][0];
+
+    assert_eq!(
+        svc["recent_logs"],
+        serde_json::json!([]),
+        "recent_logs must be empty array on healthy"
+    );
+    assert!(
+        svc["effective_command"].is_null()
+            || svc["effective_command"] == serde_json::json!({}),
+        "effective_command must be null or empty object on healthy: {:?}",
+        svc["effective_command"]
+    );
+    assert_eq!(
+        svc["port_reality"],
+        serde_json::json!([]),
+        "port_reality must be empty array on healthy"
+    );
+}
+
+#[test]
+fn f4_smart_next_suggests_entrypoint_inspection_on_double_bind() {
+    // When wrapper-injection is detected AND a port appears bound
+    // twice, the NEXT block guides the operator at the entrypoint.
+    let sb = Sandbox::new(f4_vault_unhealthy_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+
+    sb.cmd()
+        .args(["why", "arte/onyx-vault"])
+        .assert()
+        .code(2)
+        .stdout(contains("NEXT:"))
+        .stdout(contains("entrypoint"));
+}

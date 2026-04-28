@@ -14,11 +14,17 @@ use crate::cli::WhyArgs;
 use crate::error::ExitKind;
 use crate::profile::runtime::{RuntimeSnapshot, SourceInfo};
 use crate::profile::schema::{HealthStatus, Profile, Service};
+use crate::ssh::SshTarget;
 use crate::verbs::cache::{aggregate_sources, get_runtime, print_source_line, GetOpts};
 use crate::verbs::correlation::why_rules;
 use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
 use crate::verbs::output::OutputDoc;
 use crate::verbs::runtime::RemoteRunner;
+
+/// F4 (v0.1.3): hard cap on the recent-logs tail. Anything larger is
+/// clamped with a one-line stderr notice. Protects the operator from
+/// accidentally pulling tens of thousands of lines through redaction.
+pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
@@ -28,12 +34,25 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;
     print_source_line(&aggregated_source, &fmt);
 
+    // F4 (v0.1.3): clamp --log-tail at LOG_TAIL_CAP with a one-line
+    // stderr notice. Keeps redaction + transport bills bounded.
+    let log_tail_clamped = if args.log_tail > LOG_TAIL_CAP {
+        eprintln!(
+            "warning: --log-tail {} clamped to {}",
+            args.log_tail, LOG_TAIL_CAP
+        );
+        LOG_TAIL_CAP
+    } else {
+        args.log_tail
+    };
+
     let mut data_lines: Vec<String> = Vec::new();
     let mut services_json: Vec<serde_json::Value> = Vec::new();
     let mut overall_failing = 0usize;
     let mut overall_total = 0usize;
     let mut emitted = 0usize;
     let mut last_root: Option<(String, String)> = None; // (server, root)
+    let mut bundle_next_steps: Vec<crate::verbs::output::NextStep> = Vec::new();
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = match step.service() {
@@ -84,6 +103,9 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             "self_status": status_map.get(&svc_name).copied().unwrap_or(NodeStatus::Unknown).as_str(),
             "root_cause": root.clone(),
             "nodes": nodes_json,
+            "recent_logs": serde_json::Value::Array(Vec::new()),
+            "effective_command": serde_json::Value::Null,
+            "port_reality": serde_json::Value::Array(Vec::new()),
         }));
 
         data_lines.push(format!("{ns}/{svc_name}:"));
@@ -97,6 +119,65 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             };
             let indent = "  ".repeat(depth + 1);
             data_lines.push(format!("{indent}{name}: {}{mark}", st.as_str()));
+        }
+
+        // F4 (v0.1.3): diagnostic bundle for failing target services.
+        // Only fires for the target service (not transitive deps), and
+        // only when its status is unhealthy/down. ≤4 remote commands
+        // per service per bundle invocation.
+        let target_status = status_map
+            .get(&svc_name)
+            .copied()
+            .unwrap_or(NodeStatus::Unknown);
+        if !args.no_bundle
+            && matches!(target_status, NodeStatus::Unhealthy | NodeStatus::Down)
+        {
+            if let Some(svc) = profile.services.iter().find(|s| s.name == svc_name) {
+                let bundle = collect_diagnostic_bundle(
+                    runner.as_ref(),
+                    ns,
+                    &step.ns.target,
+                    &svc.container_name,
+                    log_tail_clamped,
+                );
+                // Patch the JSON entry we just pushed with the real
+                // bundle fields so agents see populated data.
+                if let Some(last) = services_json.last_mut() {
+                    last["recent_logs"] = serde_json::Value::Array(
+                        bundle
+                            .recent_logs
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
+                    last["effective_command"] = bundle
+                        .effective_command
+                        .as_ref()
+                        .map(|ec| serde_json::to_value(ec).unwrap_or(serde_json::Value::Null))
+                        .unwrap_or(serde_json::Value::Null);
+                    last["port_reality"] =
+                        serde_json::to_value(&bundle.port_reality).unwrap_or_else(|_| {
+                            serde_json::Value::Array(Vec::new())
+                        });
+                }
+                for line in bundle.render_text() {
+                    data_lines.push(line);
+                }
+                if bundle.has_double_bind() {
+                    bundle_next_steps.push(crate::verbs::output::NextStep::new(
+                        format!(
+                            "inspect run {ns}/{svc_name} -- 'cat /docker-entrypoint.sh'"
+                        ),
+                        "inspect entrypoint for flag-injection (port bound twice)",
+                    ));
+                }
+                if bundle.logs_show_port_conflict() {
+                    bundle_next_steps.push(crate::verbs::output::NextStep::new(
+                        format!("inspect ports {ns}"),
+                        "host port reality (logs show 'address already in use')",
+                    ));
+                }
+            }
         }
     }
 
@@ -118,6 +199,14 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     )
     .with_meta("selector", args.selector.clone())
     .with_meta("source", aggregated_source.to_json());
+    // F4: smart NEXT hints derived from the bundle (entrypoint
+    // inspection on bound-twice, host port reality on "address
+    // already in use" log lines). These come *before* the generic
+    // why_rules suggestions so the most actionable guidance lands
+    // first.
+    for step in bundle_next_steps {
+        doc.push_next(step);
+    }
     if let Some((server, root)) = &last_root {
         for n in why_rules(server, Some(root.as_str())) {
             doc.push_next(n);
@@ -345,4 +434,298 @@ fn pick_root_cause(walk: &Walk, status: &HashMap<String, NodeStatus>) -> Option<
         }
     }
     best.map(|(_, n)| n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F4 (v0.1.3): diagnostic bundle.
+//
+// For unhealthy / down / restart-looping target services, attach three
+// artifacts inline so the operator (human or LLM) doesn't have to
+// re-run `inspect logs`, `inspect inspect`, and `inspect ports` to
+// reconstruct the picture. ≤4 remote commands per service per
+// invocation; each independent so partial failure still surfaces what
+// worked.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct EffectiveCommand {
+    entrypoint: Vec<String>,
+    cmd: Vec<String>,
+    /// Wrapper-script-injected flag (e.g. `-dev-listen-address=0.0.0.0:8200`)
+    /// detected by reading the container's docker-entrypoint script. None
+    /// when no injection pattern is found.
+    wrapper_injects: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PortRow {
+    port: u16,
+    /// `"bound→<host>:<port>"` when the host is listening on this
+    /// port, or `"free"` otherwise.
+    host: String,
+    /// `"bound"`, `"bound (twice!)"`, or `"exposed"` from the
+    /// container's perspective. "twice!" fires when the port is
+    /// declared both in `PortBindings` *and* in an entrypoint
+    /// wrapper-injected listener flag — the headline reproducer
+    /// pattern from the Vault triage.
+    container: String,
+    /// `"config"`, `"entrypoint <flag>"`, `"config + entrypoint <flag>"`,
+    /// or `"exposed"` — how this port came to be declared.
+    declared_by: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DiagnosticBundle {
+    recent_logs: Vec<String>,
+    effective_command: Option<EffectiveCommand>,
+    port_reality: Vec<PortRow>,
+}
+
+impl DiagnosticBundle {
+    /// Render the three sections as indented text lines for the human
+    /// `DATA:` block.
+    fn render_text(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push("  logs:".to_string());
+        if self.recent_logs.is_empty() {
+            lines.push("    (no recent logs)".to_string());
+        } else {
+            for l in &self.recent_logs {
+                lines.push(format!("    {l}"));
+            }
+        }
+        lines.push("  effective_command:".to_string());
+        match &self.effective_command {
+            Some(ec) => {
+                lines.push(format!("    entrypoint: {:?}", ec.entrypoint));
+                lines.push(format!("    cmd: {:?}", ec.cmd));
+                if let Some(w) = &ec.wrapper_injects {
+                    lines.push(format!("    wrapper injects: {w}"));
+                }
+            }
+            None => lines.push("    (unavailable)".to_string()),
+        }
+        lines.push("  port_reality:".to_string());
+        if self.port_reality.is_empty() {
+            lines.push("    (no declared ports)".to_string());
+        } else {
+            for p in &self.port_reality {
+                lines.push(format!(
+                    "    {}: declared by {}; host: {}; container: {}",
+                    p.port, p.declared_by, p.host, p.container
+                ));
+            }
+        }
+        lines
+    }
+
+    fn has_double_bind(&self) -> bool {
+        self.port_reality
+            .iter()
+            .any(|p| p.container.contains("twice"))
+    }
+
+    fn logs_show_port_conflict(&self) -> bool {
+        self.recent_logs
+            .iter()
+            .any(|l| l.to_lowercase().contains("address already in use"))
+    }
+}
+
+fn collect_diagnostic_bundle(
+    runner: &dyn RemoteRunner,
+    ns: &str,
+    target: &SshTarget,
+    container_name: &str,
+    log_tail: u32,
+) -> DiagnosticBundle {
+    use crate::ssh::exec::RunOpts as SshRunOpts;
+    let opts = SshRunOpts::with_timeout(15);
+    let mut bundle = DiagnosticBundle::default();
+
+    // ── 1/4: recent logs ────────────────────────────────────────────────
+    let cmd = format!(
+        "docker logs --tail {log_tail} {container_name} 2>&1 || true"
+    );
+    if let Ok(out) = runner.run(ns, target, &cmd, opts.clone()) {
+        let body = if !out.stdout.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        for line in body.lines() {
+            bundle.recent_logs.push(line.to_string());
+        }
+    }
+
+    // ── 2/4: effective Cmd / Entrypoint / declared ports (single inspect) ─
+    let cmd = format!(
+        "docker inspect --format '{{{{json .Config.Cmd}}}}|{{{{json .Config.Entrypoint}}}}|{{{{json .HostConfig.PortBindings}}}}|{{{{json .Config.ExposedPorts}}}}' {container_name}"
+    );
+    let mut declared_by_config: BTreeSet<u16> = BTreeSet::new();
+    let mut host_bindings: HashMap<u16, String> = HashMap::new();
+    let mut exposed_only: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(out) = runner.run(ns, target, &cmd, opts.clone()) {
+        if out.exit_code == 0 {
+            let trimmed = out.stdout.trim();
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            if parts.len() >= 4 {
+                let cmd_v: Vec<String> =
+                    serde_json::from_str(parts[0]).unwrap_or_default();
+                let ep_v: Vec<String> =
+                    serde_json::from_str(parts[1]).unwrap_or_default();
+                if let Ok(pb) = serde_json::from_str::<serde_json::Value>(parts[2]) {
+                    if let Some(map) = pb.as_object() {
+                        for (k, v) in map {
+                            if let Some(p) = parse_container_port(k) {
+                                declared_by_config.insert(p);
+                                if let Some(arr) = v.as_array() {
+                                    if let Some(first) = arr.first() {
+                                        let host_ip = first
+                                            .get("HostIp")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        let host_port = first
+                                            .get("HostPort")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        host_bindings
+                                            .insert(p, format!("{host_ip}:{host_port}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(ep) = serde_json::from_str::<serde_json::Value>(parts[3]) {
+                    if let Some(map) = ep.as_object() {
+                        for k in map.keys() {
+                            if let Some(p) = parse_container_port(k) {
+                                if !declared_by_config.contains(&p) {
+                                    exposed_only.insert(p);
+                                }
+                            }
+                        }
+                    }
+                }
+                bundle.effective_command = Some(EffectiveCommand {
+                    cmd: cmd_v,
+                    entrypoint: ep_v,
+                    wrapper_injects: None,
+                });
+            }
+        }
+    }
+
+    // ── 3/4: entrypoint script — wrapper-injection scan ─────────────────
+    let cat_cmd = format!(
+        "docker exec {container_name} cat /docker-entrypoint.sh 2>/dev/null \
+         || docker exec {container_name} cat /entrypoint.sh 2>/dev/null \
+         || true"
+    );
+    let mut entrypoint_injects: BTreeSet<u16> = BTreeSet::new();
+    let mut wrapper_flag: Option<String> = None;
+    if let Ok(out) = runner.run(ns, target, &cat_cmd, opts.clone()) {
+        if !out.stdout.is_empty() {
+            let prefixes = [
+                "-dev-listen-address=",
+                "-listen-address=",
+                "-bind-address=",
+                "-api-addr=",
+                "--listen-address=",
+            ];
+            'outer: for line in out.stdout.lines() {
+                for prefix in &prefixes {
+                    if let Some(idx) = line.find(prefix) {
+                        let rest = &line[idx..];
+                        let end = rest
+                            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                            .unwrap_or(rest.len());
+                        let flag = &rest[..end];
+                        wrapper_flag = Some(flag.to_string());
+                        if let Some(p) = extract_port_from_addr(flag) {
+                            entrypoint_injects.insert(p);
+                        }
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ec) = bundle.effective_command.as_mut() {
+        ec.wrapper_injects = wrapper_flag.clone();
+    }
+
+    // ── 4/4: host port reality ──────────────────────────────────────────
+    let ss_cmd = "ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true";
+    let mut host_listening: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(out) = runner.run(ns, target, ss_cmd, opts.clone()) {
+        for line in out.stdout.lines() {
+            for tok in line.split_whitespace() {
+                if let Some(colon) = tok.rfind(':') {
+                    let port_str = &tok[colon + 1..];
+                    if let Ok(p) = port_str.parse::<u16>() {
+                        host_listening.insert(p);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Combine into port_reality rows ──────────────────────────────────
+    let mut all_ports: BTreeSet<u16> = BTreeSet::new();
+    all_ports.extend(declared_by_config.iter().copied());
+    all_ports.extend(exposed_only.iter().copied());
+    all_ports.extend(entrypoint_injects.iter().copied());
+    for p in all_ports {
+        let from_config = declared_by_config.contains(&p);
+        let from_entry = entrypoint_injects.contains(&p);
+        let declared_by = match (from_config, from_entry) {
+            (true, true) => format!(
+                "config + entrypoint {}",
+                wrapper_flag.as_deref().unwrap_or("(injection)")
+            ),
+            (true, false) => "config".to_string(),
+            (false, true) => format!(
+                "entrypoint {}",
+                wrapper_flag.as_deref().unwrap_or("(injection)")
+            ),
+            (false, false) => "exposed".to_string(),
+        };
+        let host = if host_listening.contains(&p) {
+            host_bindings
+                .get(&p)
+                .map(|b| format!("bound→{b}"))
+                .unwrap_or_else(|| "bound".to_string())
+        } else {
+            "free".to_string()
+        };
+        let container = if from_config && from_entry {
+            "bound (twice!)".to_string()
+        } else if from_config || from_entry {
+            "bound".to_string()
+        } else {
+            "exposed".to_string()
+        };
+        bundle.port_reality.push(PortRow {
+            port: p,
+            host,
+            container,
+            declared_by,
+        });
+    }
+
+    bundle
+}
+
+fn parse_container_port(spec: &str) -> Option<u16> {
+    spec.split('/').next().and_then(|s| s.parse::<u16>().ok())
+}
+
+fn extract_port_from_addr(flag: &str) -> Option<u16> {
+    let rhs = flag.split_once('=')?.1;
+    let last = rhs.rsplit(':').next()?;
+    last.trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse::<u16>()
+        .ok()
 }

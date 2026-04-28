@@ -14,6 +14,48 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F4 — `inspect why` deep-diagnostic bundle (field feedback: the
+  primary operator's multi-hour Vault triage where `why` said
+  "unhealthy <- likely root cause" and stopped, forcing a hand-rolled
+  walk through `logs`, `inspect`, and `ports` to learn that the
+  entrypoint wrapper was injecting `-dev-listen-address=0.0.0.0:8200`
+  on top of a config-declared listener; the same port bound twice).**
+  When the target service of `inspect why <selector>` is unhealthy or
+  down, three artifacts are now attached inline under `DATA:`:
+  - **`logs:`** — the recent log tail (default 20 lines, configurable
+    via `--log-tail <N>`, hard-capped at 200 with a one-line stderr
+    notice — protects redaction + transport).
+  - **`effective_command:`** — the container's effective `Entrypoint`
+    + `Cmd` from `docker inspect`, plus a `wrapper injects:` line
+    when the entrypoint script contains a flag-injection pattern
+    (`-dev-listen-address=`, `-listen-address=`, `-bind-address=`,
+    `-api-addr=`, `--listen-address=`).
+  - **`port_reality:`** — per-port table cross-referencing
+    `PortBindings` + `ExposedPorts` from `docker inspect`,
+    entrypoint-injected listeners, and host listener state from
+    `ss -ltn` (or `netstat -ltn` fallback). Ports declared by both
+    config *and* a wrapper-injected flag are flagged
+    `container: bound (twice!)` — the headline reproducer pattern.
+  Hard-capped at **≤4 extra remote commands per service per bundle
+  invocation** (`docker logs --tail`, one combined `docker inspect`,
+  `docker exec ... cat /docker-entrypoint.sh`, `ss -ltn`). All four
+  fail independently — partial bundles still surface what worked.
+  New flags: `--no-bundle` (suppress; restores the v0.1.2 terse
+  output) and `--log-tail <N>` (default 20, capped at 200).
+  Smart `NEXT:` hints derived from the bundle: a "bound (twice!)"
+  port pushes `inspect run <ns>/<svc> -- 'cat /docker-entrypoint.sh'`,
+  and `address already in use` in the logs pushes `inspect ports
+  <ns>`. JSON adds three fields to each per-service object —
+  `recent_logs[]`, `effective_command{entrypoint, cmd, wrapper_injects}`,
+  `port_reality[{port, host, container, declared_by}]` — always
+  present (empty arrays / `null` on healthy services so agents don't
+  need optional-chaining gymnastics). Healthy services are
+  byte-for-byte unchanged: no extra round-trips, no bundle headers.
+  Eight acceptance tests in `tests/phase_f_v013.rs` covering
+  unhealthy/healthy paths, `--no-bundle`, `--log-tail` clamp, JSON
+  schema stability, wrapper-injection detection, and smart-NEXT
+  emission.
+
 - **F5 — Container-name vs compose-service-name uniform resolution
   (field feedback: 2nd v0.1.2 user typed `arte/luminary-onyx-onyx-vault-1`
   — the docker name from `docker ps` — got "no targets", then

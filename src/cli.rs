@@ -930,6 +930,20 @@ pub struct WhyArgs {
     /// "reads as still unhealthy" symptom. `--live` is an alias.
     #[arg(long, alias = "live")]
     pub refresh: bool,
+    /// F4 (v0.1.3): suppress the diagnostic bundle (recent logs +
+    /// effective Cmd/Entrypoint + port reality) attached to
+    /// unhealthy / down / restart-looping containers. Restores the
+    /// v0.1.2 terse output for agents that already drive the deeper
+    /// queries themselves.
+    #[arg(long)]
+    pub no_bundle: bool,
+    /// F4 (v0.1.3): tail size for the recent-logs section of the
+    /// diagnostic bundle. Default 20, hard-capped at 200 (anything
+    /// above is clamped with a one-line stderr notice — protects
+    /// the operator from accidentally pulling 50k lines through
+    /// redaction).
+    #[arg(long, default_value_t = 20)]
+    pub log_tail: u32,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

@@ -322,6 +322,57 @@ when a per-target fetch takes longer than 700ms. The spinner is
 suppressed automatically in JSON mode, when stderr is not a TTY,
 and when `INSPECT_NO_PROGRESS=1` is set in the env.
 
+### 5.4 `inspect why` deep-diagnostic bundle (v0.1.3)
+
+`inspect why <selector>` walks the dependency graph and labels each
+node with a status — for healthy services that's the whole story.
+For services in `unhealthy` or `down` state, three diagnostic
+artifacts are now attached inline under `DATA:`:
+
+- **`logs:`** — the recent log tail (default 20 lines, configurable
+  via `--log-tail <N>`, hard-capped at 200 with a one-line stderr
+  notice when exceeded).
+- **`effective_command:`** — the container's effective `Entrypoint`
+  + `Cmd` from `docker inspect`. When the container's
+  `/docker-entrypoint.sh` (or `/entrypoint.sh`) contains a
+  flag-injection pattern such as `-dev-listen-address=`,
+  `-listen-address=`, `-bind-address=`, `-api-addr=`, or
+  `--listen-address=`, the matched flag is surfaced as
+  `wrapper injects: <flag>=<value>`.
+- **`port_reality:`** — per-port table cross-referencing
+  `PortBindings` and `ExposedPorts` from `docker inspect` against
+  entrypoint-injected listeners and host listener state from
+  `ss -ltn` (or `netstat -ltn` fallback). A port declared by *both*
+  config and an entrypoint wrapper flag is marked
+  `container: bound (twice!)` — the headline reproducer pattern
+  for "service unhealthy with `bind: address already in use` in
+  the logs".
+
+The bundle costs **at most 4 extra remote commands per service per
+invocation**: one `docker logs --tail`, one combined `docker inspect`,
+one entrypoint-script `cat`, and one `ss -ltn`. Each fails
+independently, so partial bundles still surface what worked.
+
+Flags:
+- `--no-bundle` — suppress the bundle and restore the v0.1.2 terse
+  output (for agents that already drive `logs`, `inspect`, and
+  `ports` themselves).
+- `--log-tail <N>` — set the recent-logs tail size (default 20,
+  capped at 200).
+
+Smart `NEXT:` hints are pushed *before* the generic suggestions:
+a bound-twice port emits an entrypoint-inspection hint
+(`inspect run <ns>/<svc> -- 'cat /docker-entrypoint.sh'`), and
+`address already in use` in the logs emits a port-reality hint
+(`inspect ports <ns>`).
+
+JSON mode adds three fields to each per-service object —
+`recent_logs[]`, `effective_command{entrypoint, cmd, wrapper_injects}`,
+`port_reality[{port, host, container, declared_by}]`. The fields
+are always present; on healthy services they default to empty
+arrays and `null` so agents don't need optional-chaining
+gymnastics.
+
 ---
 
 ## 6. Search — the LogQL DSL
