@@ -35,7 +35,18 @@ fn main() -> ExitCode {
     // the global cancel flag (see `exec::cancel`).
     exec::cancel::install_handlers();
 
-    let cli = Cli::parse();
+    // F3 (v0.1.3): `inspect help <verb>` is a synonym for
+    // `inspect <verb> --help`. We rewrite argv *before* clap parsing
+    // so the rendered output is byte-for-byte identical (clap renders
+    // `--help` from the live subcommand tree; `render_long_help` on
+    // a found subcommand omits the `inspect` bin prefix and the
+    // `-V, --version` row, so they would drift). Editorial topics
+    // win over verbs (e.g. `inspect help search` shows the search
+    // topic, not `search --help`); only when the token is a verb
+    // *and* not a topic do we rewrite.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let rewritten = rewrite_help_synonym(raw);
+    let cli = Cli::parse_from(rewritten);
     let result = dispatch(cli);
     // Cancellation (audit §2.2): regardless of which dispatch arm
     // returned, a tripped flag means SIGINT/SIGTERM arrived. Map to
@@ -127,5 +138,164 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Fleet(args) => commands::fleet::run(args),
         Command::Bundle(args) => commands::bundle::run(args),
         Command::Help(args) => commands::help::run(args),
+    }
+}
+
+/// F3 (v0.1.3): rewrite `inspect help <verb> [extra...]` to
+/// `inspect <verb> --help` when `<verb>` is a known top-level
+/// subcommand AND is *not* an editorial help topic. Editorial topics
+/// keep precedence (`inspect help search` → search topic page; only
+/// `inspect search --help` shows clap's flag list). This rewrite
+/// happens before clap parsing so the output is byte-for-byte
+/// identical to `inspect <verb> --help`.
+///
+/// All other argv shapes are returned unchanged. In particular:
+///
+/// * `inspect help` (no token) — unchanged; renders the index.
+/// * `inspect help <topic>` where the token is a topic — unchanged;
+///   `commands::help::run` renders the editorial body.
+/// * `inspect help <unknown>` — unchanged; `commands::help::run`
+///   exits with `error: unknown command or topic: <name>` (F3).
+fn rewrite_help_synonym(raw: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    if raw.len() < 3 {
+        return raw;
+    }
+    if raw[1].as_os_str() != std::ffi::OsStr::new("help") {
+        return raw;
+    }
+    let token = match raw[2].to_str() {
+        Some(s) if !s.starts_with('-') => s,
+        _ => return raw,
+    };
+    // Editorial topic wins over verb synonym.
+    if help::topics::find(token).is_some() {
+        return raw;
+    }
+    if !is_known_top_level_verb(token) {
+        return raw;
+    }
+    // Build `inspect <verb> --help [extra...]`. Anything after the
+    // verb position (typos, unrecognized flags) flows through clap's
+    // own error machinery — we do not silently drop it.
+    let mut out = Vec::with_capacity(raw.len() + 1);
+    out.push(raw[0].clone());
+    out.push(raw[2].clone());
+    out.push(std::ffi::OsString::from("--help"));
+    out.extend(raw.into_iter().skip(3));
+    out
+}
+
+/// Returns `true` when `name` matches a top-level subcommand declared
+/// on the clap tree. Used by [`rewrite_help_synonym`] to decide
+/// whether `inspect help <name>` is a verb synonym or a help-topic /
+/// unknown-token path.
+fn is_known_top_level_verb(name: &str) -> bool {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let hit = cmd
+        .get_subcommands()
+        .any(|s| s.get_name() == name || s.get_all_aliases().any(|a| a == name));
+    hit
+}
+
+#[cfg(test)]
+mod f3_tests {
+    use super::*;
+
+    fn os(s: &str) -> std::ffi::OsString {
+        std::ffi::OsString::from(s)
+    }
+
+    fn rewrite(args: &[&str]) -> Vec<String> {
+        rewrite_help_synonym(args.iter().map(|s| os(s)).collect())
+            .into_iter()
+            .map(|s| s.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn f3_rewrites_help_verb_to_verb_dash_dash_help() {
+        assert_eq!(
+            rewrite(&["inspect", "help", "logs"]),
+            vec!["inspect", "logs", "--help"]
+        );
+        assert_eq!(
+            rewrite(&["inspect", "help", "status"]),
+            vec!["inspect", "status", "--help"]
+        );
+        assert_eq!(
+            rewrite(&["inspect", "help", "restart"]),
+            vec!["inspect", "restart", "--help"]
+        );
+    }
+
+    #[test]
+    fn f3_editorial_topic_takes_precedence_over_verb() {
+        // `search` and `fleet` are BOTH a verb and a topic. The topic
+        // wins so operators see the curated topic body, not clap's
+        // flag list, by default.
+        assert_eq!(
+            rewrite(&["inspect", "help", "search"]),
+            vec!["inspect", "help", "search"]
+        );
+        assert_eq!(
+            rewrite(&["inspect", "help", "fleet"]),
+            vec!["inspect", "help", "fleet"]
+        );
+    }
+
+    #[test]
+    fn f3_unknown_token_passes_through_unchanged() {
+        // commands::help::run will then emit the F3 unknown-or-topic
+        // error and exit 2.
+        assert_eq!(
+            rewrite(&["inspect", "help", "definitely-not-a-thing"]),
+            vec!["inspect", "help", "definitely-not-a-thing"]
+        );
+    }
+
+    #[test]
+    fn f3_bare_help_unchanged() {
+        assert_eq!(
+            rewrite(&["inspect", "help"]),
+            vec!["inspect", "help"]
+        );
+        assert_eq!(rewrite(&["inspect"]), vec!["inspect"]);
+    }
+
+    #[test]
+    fn f3_pure_topic_unchanged() {
+        // `quickstart`, `selectors`, etc. are topic-only (no verb
+        // collision). They must NOT be rewritten.
+        assert_eq!(
+            rewrite(&["inspect", "help", "quickstart"]),
+            vec!["inspect", "help", "quickstart"]
+        );
+        assert_eq!(
+            rewrite(&["inspect", "help", "selectors"]),
+            vec!["inspect", "help", "selectors"]
+        );
+    }
+
+    #[test]
+    fn f3_extra_args_after_verb_are_preserved() {
+        // `inspect help logs --json` should rewrite to
+        // `inspect logs --help --json`. clap will then reject the
+        // unknown flag, surfacing a real error rather than silently
+        // dropping the operator's intent.
+        assert_eq!(
+            rewrite(&["inspect", "help", "logs", "--json"]),
+            vec!["inspect", "logs", "--help", "--json"]
+        );
+    }
+
+    #[test]
+    fn f3_does_not_rewrite_when_token_starts_with_dash() {
+        // `inspect help --json` is the JSON help envelope, not a
+        // verb synonym — never rewrite.
+        assert_eq!(
+            rewrite(&["inspect", "help", "--json"]),
+            vec!["inspect", "help", "--json"]
+        );
     }
 }

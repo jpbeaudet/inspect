@@ -50,6 +50,7 @@ After installation, confirm the binary works:
 ```sh
 inspect --version
 inspect help
+inspect help logs        # synonym for `inspect logs --help` (F3, v0.1.3)
 ```
 
 If `~/.local/bin` is not on `$PATH` (the default install root), the

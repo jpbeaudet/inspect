@@ -1016,3 +1016,134 @@ fn f11_legacy_audit_entry_predates_contract_loud_error() {
         .failure()
         .stderr(contains("predates the revert contract").or(contains("unsupported")));
 }
+
+// -----------------------------------------------------------------------------
+// F3 — `inspect help <command>` as `--help` synonym.
+//
+// The contract:
+//   1. For every known top-level verb, `inspect help <verb>` and
+//      `inspect <verb> --help` produce byte-for-byte identical stdout.
+//   2. Editorial topics (e.g. `quickstart`, `selectors`, `search`,
+//      `fleet`) keep precedence — `inspect help search` renders the
+//      search topic body, not clap's `search --help`.
+//   3. Unknown tokens exit 2 with `error: unknown command or topic:
+//      '<token>'` and a chained hint to `inspect help`. Never silently
+//      fall back to the top-level help.
+//   4. Bare `inspect help` is unchanged (renders the index).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn f3_help_verb_byte_for_byte_matches_dash_dash_help() {
+    // Sample of top-level verbs across every registry section
+    // (read / write / lifecycle / discovery / safety / ssh /
+    // diagnostic). The list is intentionally a representative
+    // sample, not the full registry — `tests/help_contract.rs`
+    // already iterates the full TOP_LEVEL_VERBS list, and a
+    // 50-verb cross product would slow the suite. The contract
+    // is the same: every verb identical.
+    let verbs = [
+        "logs", "status", "health", "ps", "grep", "cat",
+        "restart", "stop", "exec", "edit", "rm", "cp", "chmod",
+        "audit", "revert", "why", "connectivity",
+        "add", "list", "show", "setup", "connect",
+    ];
+    // Note: `search`, `fleet`, and `bundle` are intentionally excluded —
+    // each is also an editorial topic, and per F3 the topic body wins
+    // (verified separately by `f3_editorial_topic_takes_precedence_over_verb_synonym`).
+    for verb in verbs {
+        let via_help = Command::cargo_bin("inspect")
+            .unwrap()
+            .env("INSPECT_HELP_NO_PAGER", "1")
+            .env("NO_COLOR", "1")
+            .args(["help", verb])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let via_flag = Command::cargo_bin("inspect")
+            .unwrap()
+            .env("INSPECT_HELP_NO_PAGER", "1")
+            .env("NO_COLOR", "1")
+            .args([verb, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            via_help, via_flag,
+            "F3 contract violation: `inspect help {verb}` differs from `inspect {verb} --help`"
+        );
+    }
+}
+
+#[test]
+fn f3_editorial_topic_takes_precedence_over_verb_synonym() {
+    // `search` is BOTH a verb and an editorial topic. The topic must
+    // win so curated content (LogQL DSL guide) trumps clap's flag list.
+    let out = Command::cargo_bin("inspect")
+        .unwrap()
+        .env("INSPECT_HELP_NO_PAGER", "1")
+        .env("NO_COLOR", "1")
+        .args(["help", "search"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body = String::from_utf8(out).unwrap();
+    // The topic body has a distinctive uppercase header from the
+    // renderer; clap's --help does not.
+    assert!(
+        body.contains("SEARCH"),
+        "expected curated SEARCH topic header, got:\n{body}"
+    );
+    // And it must NOT be clap's flag-list shape.
+    assert!(
+        !body.contains("\nUsage: inspect search"),
+        "expected curated topic, got clap --help body:\n{body}"
+    );
+}
+
+#[test]
+fn f3_unknown_token_exits_2_with_chained_hint() {
+    Command::cargo_bin("inspect")
+        .unwrap()
+        .env("INSPECT_HELP_NO_PAGER", "1")
+        .env("NO_COLOR", "1")
+        .args(["help", "definitely-not-a-thing"])
+        .assert()
+        .code(2)
+        .stderr(contains("error: unknown command or topic: 'definitely-not-a-thing'"))
+        .stderr(contains("see: inspect help examples"));
+}
+
+#[test]
+fn f3_unknown_token_typo_suggests_real_token() {
+    // Suggester considers BOTH topics and verbs (existing P8
+    // behavior, re-asserted under the F3 contract).
+    Command::cargo_bin("inspect")
+        .unwrap()
+        .env("INSPECT_HELP_NO_PAGER", "1")
+        .env("NO_COLOR", "1")
+        .args(["help", "logz"])
+        .assert()
+        .code(2)
+        .stderr(contains("did you mean: logs?"));
+}
+
+#[test]
+fn f3_bare_help_unchanged_renders_index() {
+    // F3 explicitly preserves the bare-help path. No regressions.
+    Command::cargo_bin("inspect")
+        .unwrap()
+        .env("INSPECT_HELP_NO_PAGER", "1")
+        .env("NO_COLOR", "1")
+        .arg("help")
+        .assert()
+        .success()
+        .stdout(contains("INSPECT"))
+        .stdout(contains("Topics:"))
+        .stdout(contains("Commands:"));
+}

@@ -14,6 +14,28 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F3 — `inspect help <command>` is now a true synonym for
+  `inspect <command> --help` (carry-over field-feedback ergonomic gap;
+  every operator coming from `git help log` / `cargo help build` /
+  `kubectl help get` hit it on first try).** The argv rewrite happens
+  in `src/main.rs::rewrite_help_synonym` *before* clap parses,
+  guaranteeing the rendered output is **byte-for-byte identical** to
+  the `--help` form (no drift on `Usage:` line, no missing
+  `-V, --version` row). Editorial topics keep precedence: `inspect
+  help search` still renders the curated LogQL DSL guide, and
+  `inspect search --help` still shows clap's flag list — the new
+  rewrite only fires when the token is a verb *and not* a topic.
+  `tests/phase_f_v013.rs::f3_help_verb_byte_for_byte_matches_dash_dash_help`
+  pins the contract for 22 representative top-level verbs (read /
+  write / lifecycle / discovery / safety / diagnostic).
+- Unknown `inspect help <foo>` now exits **2** (Error) with `error:
+  unknown command or topic: '<foo>'` and the canonical `see: inspect
+  help examples` chained hint. Pre-F3 it was exit 1 + `unknown help
+  topic` — the change aligns with `git`/`cargo`/`kubectl` and reflects
+  that `<foo>` could be either a verb *or* a topic. The
+  `ERROR_CATALOG` `UnknownHelpTopic` row was updated in lockstep so
+  the see-line still attaches automatically.
+
 - **F2 — `docker inspect` timeout warning noise eliminated (field-feedback
   regression: two of two v0.1.2 first-time users hit a spurious `warning:`
   on every healthy `inspect setup` against hosts with 30+ containers).**

@@ -197,12 +197,15 @@ fn topic_envelope_for_quickstart() {
 }
 
 #[test]
-fn unknown_topic_with_json_still_exits_one() {
+fn unknown_topic_with_json_still_exits_two() {
+    // F3 (v0.1.3): unknown command/topic now exits 2 (Error) on
+    // every help path, including `--json`. Pre-F3 it was 1
+    // (NoMatches).
     Command::cargo_bin("inspect")
         .unwrap()
         .args(["help", "definitely-not-a-topic", "--json"])
         .assert()
-        .code(1);
+        .code(2);
 }
 
 #[test]

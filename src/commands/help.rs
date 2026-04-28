@@ -139,16 +139,19 @@ fn render_no_pager(text: &str) -> Result<ExitKind> {
 
 fn unknown_topic(name: &str) -> Result<ExitKind> {
     let suggestion = help::suggest(name);
-    // HP-5: emit() already appends `see: inspect help examples` for
-    // the "unknown help topic" fragment via the central catalog. We
-    // keep the "did you mean" hint but drop the redundant trailing
-    // see-line that the HP-0 baseline used.
-    crate::error::emit(format!("unknown help topic '{}'", name));
+    // F3 (v0.1.3): `inspect help <unknown>` now exits 2 (Error) with
+    // the canonical `error: unknown command or topic: <name>` line
+    // and a chained hint pointing at the top-level catalog. Pre-F3
+    // wording was "unknown help topic" + exit 1 — that drift was
+    // surprising for operators coming from `git`/`cargo`/`kubectl`,
+    // all of which exit non-zero on `help <unknown>`. The
+    // ERROR_CATALOG fragment was updated in lockstep so the
+    // `see: inspect help …` line still attaches automatically.
+    crate::error::emit(format!("unknown command or topic: '{}'", name));
     if let Some(s) = suggestion {
         eprintln!("  did you mean: {s}?");
     }
-    // Exit code 1 = "no match" per bible §6 contract for `inspect help`.
-    Ok(ExitKind::NoMatches)
+    Ok(ExitKind::Error)
 }
 
 #[cfg(test)]
@@ -181,8 +184,11 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_topic_returns_nomatches() {
+        // F3 (v0.1.3): unknown topic / unknown command now exits with
+        // ExitKind::Error (code 2). Pre-F3 it was NoMatches (code 1)
+        // — see CHANGELOG and INSPECT_v0.1.3_BACKLOG.md §F3.
         let r = run(args(Some("definitely-not-a-topic"))).unwrap();
-        assert!(matches!(r, ExitKind::NoMatches));
+        assert!(matches!(r, ExitKind::Error));
     }
 
     #[test]

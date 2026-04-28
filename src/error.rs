@@ -273,10 +273,15 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("recipes"),
     },
     // ---- help ---------------------------------------------------------
+    // F3 (v0.1.3): wording changed from "unknown help topic" to
+    // "unknown command or topic" so `inspect help <foo>` reflects
+    // both lookup paths (verb synonym + editorial topic). The
+    // fragment match is still substring-based, and the catalog row
+    // continues to point operators at the index page.
     ErrorEntry {
         code: "UnknownHelpTopic",
-        fragment: "unknown help topic",
-        summary: "help topic is not registered",
+        fragment: "unknown command or topic",
+        summary: "neither a known command nor a known help topic",
         help_topic: Some("examples"),
     },
 ];
@@ -355,7 +360,7 @@ mod hp5_tests {
             Some("safety")
         );
         assert_eq!(
-            topic_for_message("unknown help topic 'foo'"),
+            topic_for_message("unknown command or topic: 'foo'"),
             Some("examples")
         );
         assert_eq!(topic_for_message("totally unrelated message"), None);
