@@ -93,6 +93,12 @@ pub struct FormatArgs {
     /// Suppress ANSI color codes in human / table output.
     #[arg(long)]
     pub no_color: bool,
+    /// F7.4 (v0.1.3): suppress the trailing `SUMMARY:` and `NEXT:`
+    /// lines so output is safe to pipe into `tail` / `head` /
+    /// `grep -A` without trailer corruption. Mutually exclusive with
+    /// `--json` / `--jsonl` (those formats are already trailer-free).
+    #[arg(long, conflicts_with_all = ["json", "jsonl"])]
+    pub quiet: bool,
 }
 
 impl FormatArgs {

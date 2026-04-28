@@ -14,6 +14,62 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F7 — Selector + output ergonomic papercuts (field feedback:
+  five separate small papercuts collected over a v0.1.2 destructive
+  migration session that each cost an extra round-trip to the docs
+  or to `--help` to recover from). Five of six sub-items shipped;
+  one (F7.6 `inspect connect` publickey ordering) is deferred to
+  v0.1.5 because the interactive ssh path is not amenable to a
+  reliable, mock-driven contract test.**
+  - **F7.1 — Empty-profile hint redirects to `inspect setup`, not
+    `inspect profile`.** When a service-specific selector
+    (`inspect why arte/atlas-vault`, `inspect logs arte/onyx-vault`)
+    targets a registered namespace whose cached profile contains
+    zero services, the diagnostic now leads with
+    `hint: run 'inspect setup <ns>' to discover services on this
+    namespace` instead of the generic refresh-the-cache hint. The
+    pre-existing `inspect profile / inspect setup --force` hint
+    is preserved for the genuine "selector typo against a
+    populated profile" case (`SelectorError::NoMatches`).
+  - **F7.2 — `arte:/path` shorthand is no longer rejected by the
+    selector parser.** The shape `arte:/etc/hostname` (sugar for
+    `arte/_:/etc/hostname` — host-level read against the
+    namespace's SSH host) used to surface as
+    `invalid selector character ':' ...` because the parser
+    tokenized the absolute path's leading slash as the
+    server/service separator. `parse_selector` now detects the
+    shorthand by checking whether the first colon (outside any
+    regex `/.../`) precedes the first slash; if so, the colon
+    is the service/path separator and the implicit `_` host
+    service is supplied automatically.
+  - **F7.3 — `inspect ports` server-side port filters:
+    `--port <n>` and `--port-range <lo-hi>`.** Filter each
+    output line through a token-aware port matcher (handles
+    both `0.0.0.0:8200` and `8200/tcp` shapes); the SUMMARY's
+    listener count reflects the filtered total. Flags are
+    mutually exclusive at the clap level.
+  - **F7.4 — Global `--quiet` flag suppresses the SUMMARY/NEXT
+    envelope on the Human path.** Pipeline-friendly: data rows
+    are emitted without the leading two-space indent prefix so
+    output is safe to feed directly into `grep`, `awk`, `tail`,
+    `head`, `wc -l`. Mutually exclusive with `--json` /
+    `--jsonl`. Wired through `OutputDoc::with_quiet` and
+    `Renderer::quiet` so every read verb inherits the contract.
+  - **F7.5 — `inspect status` empty-state phrasing + explicit
+    `state` JSON field.** Three states distinguished instead of
+    folding into `0 service(s): 0 healthy, 0 unhealthy, 0 unknown`:
+    `state: "ok"` (≥1 service classified), `"no_services_matched"`
+    (non-empty inventory but zero profile entries; SUMMARY phrases
+    as a config condition and NEXT chains
+    `inspect ps <ns>` + `inspect setup <ns> --force`),
+    `"empty_inventory"` (host clean / docker down). A small
+    `dispatch::plan` change ensures a wildcard selector
+    (`arte/*`) against an empty profile still binds the
+    namespace's `NsCtx` so the verb can still call `docker ps`.
+  - **F7.7 — `inspect status --json` carries the new `state`
+    field.** Already supported via the standard `FormatArgs`
+    flatten.
+
 - **F4 — `inspect why` deep-diagnostic bundle (field feedback: the
   primary operator's multi-hour Vault triage where `why` said
   "unhealthy <- likely root cause" and stopped, forcing a hand-rolled

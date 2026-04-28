@@ -155,7 +155,8 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
         }),
     )
     .with_meta("selector", args.selector.clone())
-    .with_meta("source", aggregated_source.to_json());
+    .with_meta("source", aggregated_source.to_json())
+    .with_quiet(args.format.quiet);
     for n in status_rules(&rows) {
         doc.push_next(n);
     }

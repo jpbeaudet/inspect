@@ -12,7 +12,9 @@ use thiserror::Error;
 
 use crate::profile::cache::load_profile;
 use crate::profile::schema::{Profile, Service};
-use crate::selector::resolve::{resolve as sel_resolve, ResolvedTarget, SelectorError, TargetKind};
+use crate::selector::resolve::{
+    chosen_namespaces_for, resolve as sel_resolve, ResolvedTarget, SelectorError, TargetKind,
+};
 use crate::ssh::options::SshTarget;
 
 use super::runtime::{current_runner, resolve_target, RemoteRunner};
@@ -101,6 +103,32 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                 profile,
             },
         );
+    }
+    // F7.5 (v0.1.3): a wildcard selector ("everything in this
+    // namespace") against an empty profile resolves to zero targets,
+    // but the verb still wants to talk to the namespace's host (e.g.
+    // status's empty-state path needs `docker ps` so it can phrase
+    // "N container(s) discovered but unmatched"). Backfill `nses`
+    // from the namespaces the selector actually matched, even when
+    // no service-level targets came back.
+    if nses.is_empty() {
+        if let Ok(ns_names) = chosen_namespaces_for(selector) {
+            for ns in ns_names {
+                if nses.contains_key(&ns) {
+                    continue;
+                }
+                let (_, target) = resolve_target(&ns).map_err(StepError::Other)?;
+                let profile = load_profile(&ns).map_err(StepError::Other)?;
+                nses.insert(
+                    ns.clone(),
+                    NsCtx {
+                        namespace: ns,
+                        target,
+                        profile,
+                    },
+                );
+            }
+        }
     }
     let mut ns_vec: Vec<NsCtx> = nses.into_values().collect();
     ns_vec.sort_by(|a, b| a.namespace.cmp(&b.namespace));

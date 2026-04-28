@@ -138,7 +138,8 @@ pub fn run(args: ConnectivityArgs) -> Result<ExitKind> {
             },
         }),
     )
-    .with_meta("selector", args.selector.clone());
+    .with_meta("selector", args.selector.clone())
+    .with_quiet(args.format.quiet);
     if !args.probe {
         doc.push_next(crate::verbs::output::NextStep::new(
             format!("inspect connectivity {} --probe", args.selector),

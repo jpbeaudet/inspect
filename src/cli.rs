@@ -608,7 +608,7 @@ pub enum Command {
     Network(SimpleSelectorArgs),
     /// List listening ports.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
-    Ports(SimpleSelectorArgs),
+    Ports(PortsArgs),
     /// Diagnostic walk for a service.
     #[command(long_about = LONG_WHY)]
     Why(WhyArgs),
@@ -1249,6 +1249,32 @@ EXAMPLES\n  \
 pub struct SimpleSelectorArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = "List listening ports. Filter to a single port with \
+`--port <n>` or a range with `--port-range <lo-hi>`.\n\n\
+EXAMPLES\n  \
+  $ inspect ports arte\n  \
+  $ inspect ports arte --port 8200\n  \
+  $ inspect ports 'prod-*' --port-range 8000-9000",
+    after_help = SEE_ALSO_READ,
+)]
+pub struct PortsArgs {
+    /// Selector (server, server/service, etc.).
+    pub selector: String,
+    /// F7.3 (v0.1.3): server-side filter to a single port. The row's
+    /// `:<n>` token in the host- or container-port axis must equal
+    /// `<n>` exactly. Mutually exclusive with `--port-range`.
+    #[arg(long, conflicts_with = "port_range")]
+    pub port: Option<u16>,
+    /// F7.3 (v0.1.3): server-side filter to an inclusive port range
+    /// `<lo>-<hi>`. Mutually exclusive with `--port`.
+    #[arg(long, value_name = "LO-HI")]
+    pub port_range: Option<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

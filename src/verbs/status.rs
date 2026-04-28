@@ -161,12 +161,46 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         ));
     }
 
-    let summary =
-        format!("{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown");
+    // F7.5 (v0.1.3): empty-state phrasing + `state` field.
+    //
+    //   - "ok"                 — at least one service classified
+    //   - "no_services_matched"— inventory non-empty but zero services
+    //   - "empty_inventory"    — inventory empty too (host clean / down)
+    //
+    // The first case exists today; the latter two used to read as
+    // "0 service(s): 0 healthy, 0 unhealthy, 0 unknown" — alarming
+    // when the actual condition is "no service definitions configured
+    // for this namespace."
+    let inventory_count: usize = runtime_by_ns
+        .values()
+        .map(|s| s.services.len())
+        .sum();
+    let state = if total > 0 {
+        "ok"
+    } else if inventory_count > 0 {
+        "no_services_matched"
+    } else {
+        "empty_inventory"
+    };
+    let summary = match state {
+        "ok" => format!(
+            "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
+        ),
+        "no_services_matched" => {
+            let ns0 = first_namespace(&nses);
+            format!(
+                "no service definitions configured for {ns0} — {inventory_count} container(s) discovered but unmatched"
+            )
+        }
+        _ => format!(
+            "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
+        ),
+    };
     let mut doc = OutputDoc::new(
         summary,
         json!({
             "services": services_json,
+            "state": state,
             "totals": {
                 "total": total,
                 "healthy": healthy,
@@ -179,7 +213,24 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     // F8: stable JSON contract — every read-verb response carries
     // `meta.source` so agents can tell live from cached without
     // parsing the SOURCE: prose line.
-    .with_meta("source", aggregated_source.to_json());
+    .with_meta("source", aggregated_source.to_json())
+    .with_quiet(args.format.quiet);
+    // F7.5: chained next-actions for the no-services-matched empty
+    // state. Lead with `inspect ps` (see what the host actually has)
+    // then `inspect setup --force` (re-classify if a service was
+    // expected). Suppressed for the populated-OK and empty-inventory
+    // cases — there's nothing useful to say in either.
+    if state == "no_services_matched" {
+        let ns0 = first_namespace(&nses);
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect ps {ns0}"),
+            "list the containers discovered on this namespace",
+        ));
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect setup {ns0} --force"),
+            "re-run discovery to classify services",
+        ));
+    }
     for n in status_rules(&rows) {
         doc.push_next(n);
     }

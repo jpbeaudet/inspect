@@ -21,6 +21,9 @@ pub struct Renderer {
     pub data: Vec<String>,
     pub next: Vec<String>,
     pub rows: Vec<Value>,
+    /// F7.4 (v0.1.3): when true, [`Self::print`] and the dispatch
+    /// helpers suppress the `SUMMARY:` and `NEXT:` envelope.
+    pub quiet: bool,
 }
 
 impl Renderer {
@@ -39,6 +42,11 @@ impl Renderer {
         self.next.push(s.into());
         self
     }
+    /// F7.4 (v0.1.3): toggle `--quiet` on this renderer.
+    pub fn quiet(&mut self, q: bool) -> &mut Self {
+        self.quiet = q;
+        self
+    }
     /// Phase 10.3 — buffer the per-record envelope so format dispatch
     /// can re-render it as CSV / TSV / YAML / Markdown / template / raw.
     pub fn push_row(&mut self, env: &Envelope) -> &mut Self {
@@ -48,21 +56,31 @@ impl Renderer {
         self
     }
     pub fn print(&self) {
-        println!("SUMMARY: {}", self.summary);
+        if !self.quiet {
+            println!("SUMMARY: {}", self.summary);
+        }
         if self.data.is_empty() {
-            println!("DATA:    (none)");
+            if !self.quiet {
+                println!("DATA:    (none)");
+            }
+        } else if self.quiet {
+            for line in &self.data {
+                println!("{line}");
+            }
         } else {
             println!("DATA:");
             for line in &self.data {
                 println!("  {line}");
             }
         }
-        if self.next.is_empty() {
-            println!("NEXT:    (none)");
-        } else {
-            println!("NEXT:");
-            for line in &self.next {
-                println!("  {line}");
+        if !self.quiet {
+            if self.next.is_empty() {
+                println!("NEXT:    (none)");
+            } else {
+                println!("NEXT:");
+                for line in &self.next {
+                    println!("  {line}");
+                }
             }
         }
     }
@@ -184,6 +202,13 @@ pub struct OutputDoc {
     pub next: Vec<NextStep>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub meta: Map<String, Value>,
+    /// F7.4 (v0.1.3): when true, the human renderer suppresses the
+    /// `SUMMARY:` and `NEXT:` envelope lines so stdout is safe to
+    /// pipe into `tail` / `head` / `grep -A`. Never serialized
+    /// (skip-on-default + skip when false) — JSON output is already
+    /// trailer-free and `--quiet` is mutually exclusive with `--json`.
+    #[serde(skip)]
+    pub quiet: bool,
 }
 
 impl OutputDoc {
@@ -194,6 +219,7 @@ impl OutputDoc {
             data,
             next: Vec::new(),
             meta: Map::new(),
+            quiet: false,
         }
     }
 
@@ -204,6 +230,12 @@ impl OutputDoc {
 
     pub fn with_meta(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.meta.insert(key.to_string(), value.into());
+        self
+    }
+
+    /// F7.4 (v0.1.3): builder hook for the global `--quiet` flag.
+    pub fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
         self
     }
 
@@ -218,21 +250,33 @@ impl OutputDoc {
     /// renderer for `data` lines because the structured shape varies
     /// per command. `next` is rendered as `cmd  -- rationale`.
     pub fn print_human(&self, data_lines: &[String]) {
-        println!("SUMMARY: {}", self.summary);
+        if !self.quiet {
+            println!("SUMMARY: {}", self.summary);
+        }
         if data_lines.is_empty() {
-            println!("DATA:    (none)");
+            if !self.quiet {
+                println!("DATA:    (none)");
+            }
+        } else if self.quiet {
+            // F7.4: pipe-clean DATA only — no envelope, no
+            // indentation prefix, just the data lines as-is.
+            for l in data_lines {
+                println!("{l}");
+            }
         } else {
             println!("DATA:");
             for l in data_lines {
                 println!("  {l}");
             }
         }
-        if self.next.is_empty() {
-            println!("NEXT:    (none)");
-        } else {
-            println!("NEXT:");
-            for n in &self.next {
-                println!("  {}  -- {}", n.cmd, n.rationale);
+        if !self.quiet {
+            if self.next.is_empty() {
+                println!("NEXT:    (none)");
+            } else {
+                println!("NEXT:");
+                for n in &self.next {
+                    println!("  {}  -- {}", n.cmd, n.rationale);
+                }
             }
         }
     }

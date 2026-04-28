@@ -198,7 +198,8 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         }),
     )
     .with_meta("selector", args.selector.clone())
-    .with_meta("source", aggregated_source.to_json());
+    .with_meta("source", aggregated_source.to_json())
+    .with_quiet(args.format.quiet);
     // F4: smart NEXT hints derived from the bundle (entrypoint
     // inspection on bound-twice, host port reality on "address
     // already in use" log lines). These come *before* the generic

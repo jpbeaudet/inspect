@@ -1668,3 +1668,279 @@ fn f4_smart_next_suggests_entrypoint_inspection_on_double_bind() {
         .stdout(contains("NEXT:"))
         .stdout(contains("entrypoint"));
 }
+
+// -----------------------------------------------------------------------------
+// F7 — Selector / output ergonomic papercuts (bundle of small fixes).
+//
+//   1. Pre-setup verb error redirects to `inspect setup <ns>` (not
+//      `inspect profile`) when the namespace is known but its profile
+//      has no services.
+//   2. `arte:/path` shorthand is accepted (was already supported as
+//      sugar for `arte/_:/path`); a regression test pins the contract.
+//   3. `inspect ports --port <n>` / `--port-range <lo-hi>` filter the
+//      table server-side. JSON output respects the same filter.
+//   4. Global `--quiet` flag suppresses SUMMARY:/NEXT: trailers on the
+//      Human path so output is safe to pipe into `tail`/`head`/etc.
+//      Mutually exclusive with `--json` (JSON is already trailer-free).
+//   5. `inspect status` empty-state output: when the inventory is
+//      non-empty but no services were classified, the SUMMARY line
+//      reads "no service definitions configured for <ns> — N
+//      container(s) discovered but unmatched", with a chained NEXT
+//      pointing at `inspect ps <ns>` and `inspect setup <ns> --force`.
+//      The `--json` output gains a `state: "ok" | "no_services_matched"
+//      | "empty_inventory"` field for agents.
+// -----------------------------------------------------------------------------
+
+/// F7.1: empty profile (namespace registered but `inspect setup` never
+/// ran or discovered nothing) — the verb should redirect to
+/// `inspect setup <ns>`, not `inspect profile`.
+#[test]
+fn f7_empty_profile_hint_points_to_setup_not_profile() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    // Deliberately no profile written → empty service set.
+
+    let out = sb
+        .cmd()
+        .args(["why", "arte/atlas-vault"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inspect setup arte"),
+        "empty-profile error must redirect to 'inspect setup <ns>': {stderr}"
+    );
+}
+
+/// F7.2: regression-pin the `arte:/path` host shorthand (already
+/// accepted as sugar for `arte/_:/path`). The field user's typo ran
+/// `inspect cat arte:/etc/hosts`; today it parses fine and the
+/// command continues. We just want to make sure the parser does not
+/// regress to rejecting this form.
+#[test]
+fn f7_host_path_shorthand_is_accepted_as_arte_underscore_path() {
+    let sb = Sandbox::new(json!([
+        { "match": "cat -- '/etc/hostname'", "stdout": "host-arte\n", "exit": 0 }
+    ]));
+    write_minimal_arte(&sb);
+    // `arte:/etc/hostname` should resolve to the host-level target,
+    // identical to `arte/_:/etc/hostname`. We test by running cat and
+    // expecting the mocked stdout, not a "selector character ':'" error.
+    sb.cmd()
+        .args(["cat", "arte:/etc/hostname"])
+        .assert()
+        .success()
+        .stdout(contains("host-arte"));
+}
+
+/// F7.3a: `inspect ports arte --port 8200` returns only rows mentioning
+/// port 8200. Other ports in the same `ss -tlnp` output must be dropped.
+#[test]
+fn f7_ports_filter_by_single_port() {
+    let mock = json!([
+        {
+            "match": "ss -tlnp",
+            "stdout":
+                "State    Recv-Q   Send-Q   Local Address:Port   Peer\n\
+                 LISTEN   0        128      0.0.0.0:22           0.0.0.0:*\n\
+                 LISTEN   0        4096     0.0.0.0:8200         0.0.0.0:*\n\
+                 LISTEN   0        4096     0.0.0.0:9090         0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["ports", "arte", "--port", "8200"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("8200"),
+        "filtered output must include the matching port: {stdout}"
+    );
+    assert!(
+        !stdout.contains(":22 ") && !stdout.contains("0.0.0.0:22\t") && !stdout.contains(":9090"),
+        "filtered output must drop non-matching ports: {stdout}"
+    );
+}
+
+/// F7.3b: `--port-range 8000-9000` returns only rows in that range.
+#[test]
+fn f7_ports_filter_by_port_range() {
+    let mock = json!([
+        {
+            "match": "ss -tlnp",
+            "stdout":
+                "LISTEN   0   128   0.0.0.0:22     0.0.0.0:*\n\
+                 LISTEN   0   4096  0.0.0.0:8200   0.0.0.0:*\n\
+                 LISTEN   0   4096  0.0.0.0:9090   0.0.0.0:*\n\
+                 LISTEN   0   4096  0.0.0.0:11211  0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["ports", "arte", "--port-range", "8000-9999"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("8200"));
+    assert!(!stdout.contains(":22 "));
+    assert!(!stdout.contains("11211"));
+    // 9090 is included (range is inclusive).
+    assert!(stdout.contains("9090"));
+}
+
+/// F7.3c: `--port` and `--port-range` are mutually exclusive.
+#[test]
+fn f7_ports_filter_flags_mutually_exclusive() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["ports", "arte", "--port", "80", "--port-range", "1-1000"])
+        .assert()
+        .failure();
+}
+
+/// F7.4a: `--quiet` suppresses the `SUMMARY:` and `NEXT:` envelope
+/// lines on the Human path so output is safe to pipe into `tail` /
+/// `head` / `grep -A` without trailer corruption.
+#[test]
+fn f7_quiet_suppresses_summary_and_next_on_status() {
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--quiet"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("SUMMARY:"),
+        "--quiet must suppress SUMMARY line: {stdout}"
+    );
+    assert!(
+        !stdout.contains("NEXT:"),
+        "--quiet must suppress NEXT lines: {stdout}"
+    );
+    // DATA section (or its content) should still be present.
+    assert!(
+        stdout.contains("atlas"),
+        "--quiet must keep DATA content: {stdout}"
+    );
+}
+
+/// F7.4b: `--quiet` and `--json` are mutually exclusive (JSON is
+/// already trailer-free; combining the two would be ambiguous).
+#[test]
+fn f7_quiet_and_json_are_mutually_exclusive() {
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["status", "arte", "--quiet", "--json"])
+        .assert()
+        .failure();
+}
+
+/// F7.5a: empty-state phrasing — when the inventory is non-empty but
+/// no services match (e.g. discovery classified zero containers as
+/// services), the SUMMARY reads as a configuration condition, not
+/// "everything is broken." Chained NEXT points at `inspect ps` and
+/// `inspect setup --force`.
+#[test]
+fn f7_status_empty_state_phrases_as_no_services_configured() {
+    // Mock inventory with three containers, but no profile written
+    // (so no service definitions matched).
+    let mock = json!([
+        { "match": "docker ps --format", "stdout": "raw1\nraw2\nraw3\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    // Empty profile (zero services), but inventory has 3 containers.
+    write_profile(sb.home(), "arte", &[]);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no service definitions configured")
+            || stdout.contains("no service definitions"),
+        "empty-state text must phrase as a config condition: {stdout}"
+    );
+    assert!(
+        stdout.contains("inspect ps") && stdout.contains("inspect setup"),
+        "NEXT must guide to ps + setup --force: {stdout}"
+    );
+}
+
+/// F7.5b: status `--json` carries an explicit `state` field so agents
+/// distinguish ok / no_services_matched / empty_inventory without
+/// parsing the SUMMARY prose.
+#[test]
+fn f7_status_json_carries_state_field() {
+    let sb = Sandbox::new(arte_mock(0));
+    write_minimal_arte(&sb);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let line = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(line.lines().next().expect("at least one JSON record"))
+            .expect("status --json must parse");
+    assert_eq!(
+        v["data"]["state"], "ok",
+        "healthy status must carry state=ok: {v}"
+    );
+}
+
+/// F7.5c: state field carries `no_services_matched` when the inventory
+/// is non-empty but no services were classified.
+#[test]
+fn f7_status_json_state_no_services_matched_with_nonempty_inventory() {
+    let mock = json!([
+        { "match": "docker ps --format", "stdout": "raw1\nraw2\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[]);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let line = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(line.lines().next().unwrap()).expect("status --json must parse");
+    assert_eq!(
+        v["data"]["state"], "no_services_matched",
+        "non-empty inventory + zero services must surface as no_services_matched: {v}"
+    );
+}

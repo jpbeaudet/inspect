@@ -193,6 +193,7 @@ grammar is small and consistent.
 | `arte/_` | host scope — for ports, host files, systemd units |
 | `arte/atlas:/etc/atlas.conf` | one file inside a container |
 | `arte/_:/var/log/syslog` | a host-level file |
+| `arte:/etc/hostname` | host-level file shorthand (sugar for `arte/_:/etc/hostname`) |
 | `@plogs` | a saved alias (see §11) |
 
 ### Resolution order
@@ -268,6 +269,25 @@ inspect logs arte/atlas --since 30m --tail 200 --follow
 inspect grep -i 'oom' arte/_ --since 1h
 inspect cat arte/atlas:/etc/atlas.conf
 inspect resolve 'prod-*/storage'
+```
+
+### Filtering `inspect ports`
+
+`inspect ports <ns>` accepts two server-side filters so you don't
+have to pipe through `grep` (and lose the SUMMARY/NEXT envelope):
+
+- `--port <n>` — keep only rows mentioning a specific port number.
+- `--port-range <lo-hi>` — keep only rows in `[lo, hi]` (inclusive).
+
+The filters are mutually exclusive. The token-aware matcher handles
+both the `0.0.0.0:8200` and `8200/tcp` shapes, so it doesn't fire
+on incidental digits inside an interface name or a netns label. The
+SUMMARY's "N listener(s)" count reflects the filtered total, not
+the raw row count.
+
+```sh
+inspect ports arte --port 8200
+inspect ports arte --port-range 8000-8999
 ```
 
 ### 5.1 Logs and grep — line filters and cursors (v0.1.1)
@@ -682,6 +702,7 @@ Every command supports the same output flags:
 | `--md` | Markdown table (great for issue comments) |
 | `--format '<go-template>'` | Go-template over each record |
 | `--raw` | unformatted (e.g. raw log lines) |
+| `--quiet` | suppress the `SUMMARY:` / `NEXT:` envelope on the Human path; data rows emit without the leading two-space indent so output is safe to pipe into `grep`, `awk`, `tail`, `head`, `wc -l`. Mutually exclusive with `--json` / `--jsonl` (those are already pipe-clean by construction). |
 
 The JSON envelope has a `schema_version` field. New fields are
 non-breaking; renames or removals bump the major. See

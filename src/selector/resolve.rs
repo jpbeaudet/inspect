@@ -88,6 +88,22 @@ pub enum SelectorError {
         /// breadcrumb applies, so the format string is unconditional.
         note: String,
     },
+
+    /// F7.1 (v0.1.3): the namespace is registered but its profile
+    /// has zero services — discovery either never ran or matched
+    /// nothing. Lead the hint with `inspect setup <ns>`, not
+    /// `inspect profile`. The original "no targets" framing keeps
+    /// the operator-facing diagnostic consistent.
+    #[error(
+        "selector '{selector}' matched no targets.\n  \
+         servers tried: {namespace}\n  \
+         services available: (none — '{namespace}' has no service definitions yet)\n  \
+         hint: run 'inspect setup {namespace}' to discover services on this namespace"
+    )]
+    EmptyProfile {
+        selector: String,
+        namespace: String,
+    },
 }
 
 /// Resolve a textual selector all the way down to concrete targets.
@@ -101,6 +117,25 @@ pub fn resolve(input: &str) -> Result<Vec<ResolvedTarget>, SelectorError> {
     let expanded = alias::expand_for_verb(input)?;
     let ast = parse_selector(&expanded)?;
     resolve_ast(&ast)
+}
+
+/// Return the list of namespaces a selector resolves to, without
+/// going through service-level resolution. Used by verbs that want
+/// to render an empty-state output (F7.5) for a known namespace
+/// whose profile contains zero services — the verb still needs the
+/// namespace name(s) to address `docker ps` and friends.
+pub fn chosen_namespaces_for(input: &str) -> Result<Vec<String>, SelectorError> {
+    let expanded = alias::expand_for_verb(input)?;
+    let sel = parse_selector(&expanded)?;
+    let all_namespaces = ns_resolver::list_all()?;
+    if all_namespaces.is_empty() {
+        return Err(SelectorError::NoNamespacesConfigured);
+    }
+    let known_names: Vec<String> = all_namespaces.iter().map(|n| n.name.clone()).collect();
+    Ok(match fleet_forced_namespace(&known_names) {
+        Some(ns) => vec![ns],
+        None => match_servers(&sel.server, &known_names),
+    })
 }
 
 /// Resolve an already-parsed selector. Useful when the caller wants to
@@ -161,6 +196,39 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
     }
 
     if targets.is_empty() {
+        // F7.1 (v0.1.3): the namespace is registered but discovery
+        // either never ran or classified zero services. The default
+        // "inspect profile / inspect setup --force" hint sends the
+        // operator down the wrong path (refresh a cache that does
+        // not exist). Lead with `inspect setup <ns>` instead.
+        //
+        // Only fire for selectors that *named* a specific service
+        // (`ServiceSpec::Atoms`) — e.g. `inspect why arte/atlas-vault`.
+        // Bare-namespace expansions (`inspect status arte` →
+        // `arte/*` → `ServiceSpec::All`) and host-level targets
+        // intentionally fall through so the verb layer can render
+        // its own empty-state output (F7.5).
+        let sel_targets_specific_service =
+            matches!(sel.service, Some(ServiceSpec::Atoms(_)));
+        if sel_targets_specific_service
+            && chosen_namespaces.len() == 1
+            && all_services.is_empty()
+            && all_groups.is_empty()
+            && all_pf_aliases.is_empty()
+        {
+            return Err(SelectorError::EmptyProfile {
+                selector: sel.source.clone(),
+                namespace: chosen_namespaces[0].clone(),
+            });
+        }
+        // F7.5 (v0.1.3): a `ServiceSpec::All` selector ("everything in
+        // this namespace") against an empty profile is not an error —
+        // it is "you have no services configured". Return an empty
+        // target list and let the verb layer (status, ps, etc.) emit
+        // its empty-state phrasing instead of a hard-fail diagnostic.
+        if matches!(sel.service, Some(ServiceSpec::All)) && all_services.is_empty() {
+            return Ok(vec![]);
+        }
         let global_aliases: BTreeSet<String> = alias::list()
             .unwrap_or_default()
             .into_iter()
