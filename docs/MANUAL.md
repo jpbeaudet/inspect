@@ -880,6 +880,8 @@ Useful environment variables:
 | `INSPECT_MAX_PARALLEL` | fleet concurrency cap (default 4) |
 | `INSPECT_PREFIX` | install root for the one-line installer |
 | `INSPECT_VERSION` | pin a version for the installer |
+| `INSPECT_DOCKER_INSPECT_TIMEOUT` | seconds; pin a fixed `docker inspect` batch budget. Bypasses the v0.1.3 inventory-scaled formula `max(10s, 250ms × container_count)` capped at 60s. See [RUNBOOK §8](RUNBOOK.md#82-inventory-scaled-timeout-formula). |
+| `INSPECT_DEBUG` / `RUST_LOG=debug` | surface debug-level discovery diagnostics (e.g. slow-but-successful `docker inspect` rounds) on stderr |
 | `NO_COLOR` | disable ANSI in output |
 
 ---

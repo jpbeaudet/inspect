@@ -203,6 +203,61 @@ inspect help search <query>           # keyword search
 
 ---
 
+## 8. Probe author checklist (v0.1.3)
+
+### 8.1 Docker inspect timeout classification — F2 three-bucket rule
+
+**The rule:** every batched remote probe that can time out classifies its
+outcome into one of *exactly three* buckets before deciding what to surface
+to the operator. The default channel is silence; the warning channel is
+reserved for actionable, non-fatal problems; the error channel is reserved
+for "the daemon is unreachable and discovery cannot be trusted".
+
+| Bucket                | What it means                                                                                          | Where it goes                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| **Clean**             | Every container inspected on the first try. No noise.                                                  | Silence. (Healthy hosts must never emit a `warning:` line on first setup.)   |
+| **SlowButSuccessful** | The batched call exceeded its budget but the per-container fallback rescued every container.           | `eprintln!("debug: …")` only when `INSPECT_DEBUG=1` or `RUST_LOG=…debug…`.   |
+| **PartialTimeout**    | After fallback, `N` of `M` containers still failed.                                                    | One summary line: `warning: docker inspect timed out for N/M containers; rerun with --force or check daemon load`. |
+| **GenuineFailure**    | Zero containers inspected — the daemon is down or the socket is gone.                                  | Probe-level fatal (`ProbeResult.fatal = Some(...)`); engine returns `Err`, setup exits non-zero with a chained hint pointing at `inspect run … 'sudo systemctl status docker'` then `inspect setup --force`. |
+
+The classifier is implemented as a pure function
+[`classify_inspect_outcome(total, succeeded, batch_was_slow, last_error)`](../src/discovery/probes.rs)
+so every probe author follows the same rule. Adding a new probe with
+similar timeout characteristics? Reuse this function. Do not invent a
+fourth bucket.
+
+### 8.2 Inventory-scaled timeout formula
+
+The batched `docker inspect` budget is **not** a fixed 10 seconds (the
+v0.1.0–v0.1.2 default that produced the spurious-warning regression on
+30+-container hosts). Instead:
+
+```text
+timeout = max(10s, 250ms * container_count), capped at 60s
+```
+
+| Containers | Budget |
+| ---------- | ------ |
+| 0–40       | 10s (floor) |
+| 80         | 20s    |
+| 100        | 25s    |
+| 240        | 60s (cap) |
+| 1000       | 60s (cap) |
+
+**Operator override.** Set `INSPECT_DOCKER_INSPECT_TIMEOUT=<seconds>` to
+bypass the formula entirely (e.g. on a pathologically slow daemon where
+even 60s isn't enough, or when you intentionally want a tighter budget
+for a flaky discovery run). The override is taken verbatim and is not
+re-clipped against the cap.
+
+The formula lives in
+[`compute_docker_inspect_timeout(count, override_secs)`](../src/discovery/probes.rs);
+unit tests pin every boundary (floor, exact-floor crossover at 40
+containers, scaling region, cap, override).
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
-plan in `archives/IMPLEMENTATION_PLAN.md`. Any deviation between this
+plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
+to lock in the three-bucket discipline. Any deviation between this
 runbook and the bible is a runbook bug.*

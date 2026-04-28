@@ -14,6 +14,38 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F2 — `docker inspect` timeout warning noise eliminated (field-feedback
+  regression: two of two v0.1.2 first-time users hit a spurious `warning:`
+  on every healthy `inspect setup` against hosts with 30+ containers).**
+  The probe now classifies its outcome into one of four buckets — `Clean`,
+  `SlowButSuccessful`, `PartialTimeout`, `GenuineFailure` — and routes
+  each to the right channel:
+  - **Clean** (every container inspected): silent. Healthy hosts no
+    longer emit a single `warning:` line on first setup.
+  - **SlowButSuccessful** (batch slow, fallback rescued every container):
+    debug-level only. Visible under `INSPECT_DEBUG=1` or `RUST_LOG=debug`.
+  - **PartialTimeout** (`N` of `M` per-container probes failed): one
+    summary line — `warning: docker inspect timed out for N/M containers;
+    rerun with --force or check daemon load`. Replaces the old
+    one-warning-per-failed-container noise.
+  - **GenuineFailure** (zero containers inspected, daemon down): probe
+    escalates `ProbeResult.fatal`; engine returns `Err`; setup exits
+    non-zero with a chained hint (`inspect run … 'sudo systemctl status
+    docker'` → `inspect setup --force`).
+
+  The batched timeout is now scaled with inventory size:
+  `timeout = max(10s, 250ms * container_count)` capped at 60s. Operators
+  on pathological daemons can pin a fixed budget via
+  `INSPECT_DOCKER_INSPECT_TIMEOUT=<seconds>` (verbatim, not re-clipped).
+
+  Three-bucket classification + scaling formula are documented in
+  `docs/RUNBOOK.md` §8 ("Probe author checklist") so the next probe
+  author follows the same rule. 8 unit tests in `src/discovery/probes.rs`
+  pin every contract: empty host, field-scale 37/37 = `Clean`, slow-but-
+  successful = no warning, 0/N = `GenuineFailure` with chained hint, 3/50
+  = `PartialTimeout` summary line, override bypasses scaling, formula
+  floor / scaling / cap.
+
 - **F11 — Universal pre-staged `--revert` on every write verb
   (load-bearing for agentic safety; non-negotiable before v0.2.0
   freezes the audit schema).** Every write verb now captures its

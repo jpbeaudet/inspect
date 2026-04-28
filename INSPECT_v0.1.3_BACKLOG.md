@@ -8,7 +8,7 @@
 | Item | Status | Notes |
 |---|---|---|
 | F1 — `inspect status` returns 0 services after `--force` discovery (regression) | ✅ Done | bare-ns selector now rewrites to `<sel>/*` in `verbs/status.rs::run`; reproducer + regression guards in `tests/phase_f_v013.rs`; CHANGELOG updated |
-| F2 — `docker inspect` batched-timeout warning noise during setup | ⬜ Open | small, cosmetic but erodes trust on first run; **2nd and 3rd field users** both hit the 10s default warning on 37-container hosts; 3rd user explicitly suggested scaling the timeout |
+| F2 — `docker inspect` batched-timeout warning noise during setup | ✅ Done | three-bucket classifier (`Clean` / `SlowButSuccessful` / `PartialTimeout` / `GenuineFailure`) in `src/discovery/probes.rs`; healthy hosts now emit zero `warning:` lines; slow-but-successful demoted to debug (`INSPECT_DEBUG=1` / `RUST_LOG=debug`); per-container failures collapsed into ONE summary line (`docker inspect timed out for N/M containers; rerun with --force or check daemon load`); zero-success path escalated to `ProbeResult.fatal` → engine returns `Err` → setup non-zero exit with chained hint to `sudo systemctl status docker`; inventory-scaled budget `max(10s, 250ms × container_count)` capped at 60s; `INSPECT_DOCKER_INSPECT_TIMEOUT=<secs>` operator override (verbatim); 8 unit tests pin every contract (field-scale 37/37, slow-but-successful, 0/N fatal hint, 3/50 partial summary, override bypass, formula floor / scaling / cap, empty host); RUNBOOK §8 + MANUAL §16 + CHANGELOG updated |
 | F3 — `inspect help <command>` not a `--help` synonym | ⬜ Open | small, ergonomics; carry-over from v0.1.2 backlog |
 | F4 — `inspect why` compose-aware deep-diagnostic bundle (logs + effective Cmd + port reality) | ⬜ Open | **load-bearing field request**; turns 15-minute manual triage into 30 seconds |
 | F5 — Container-name vs compose-service-name uniform resolution | ⬜ Open | small/medium; both `arte/onyx-vault` and `arte/luminary-onyx-onyx-vault-1` should resolve, or the error must point at the canonical form |
@@ -891,7 +891,7 @@ Design points:
 
 ---
 
-## Running total: 4 / 25 — **OPEN, FROZEN. F1 ✅, F8 ✅, F9 ✅, F11 ✅ landed; F2 next.**
+## Running total: 5 / 25 — **OPEN, FROZEN. F1 ✅, F2 ✅, F8 ✅, F9 ✅, F11 ✅ landed; F3 next.**
 
 **Why ship the entire backlog, not just F1:** v0.1.4 is now dedicated to Kubernetes. That means the docker / compose / SSH surface — every L-item and every F-item in this backlog — gets no further attention until **v0.1.5 at the earliest**. Slipping any item out of v0.1.3 effectively pushes it past two intervening releases (v0.1.4 k8s + v0.1.5 stabilization) into v0.2.0+ territory. The docker-host install base is the entire current user base of the tool, so leaving their backlog half-shipped while spending a release on k8s would be the wrong call. Ship all 25.
 

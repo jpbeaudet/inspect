@@ -39,6 +39,15 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
     // 2) Docker container inventory (only if docker is present).
     if tooling.docker {
         let r = probe_docker_containers(namespace, target);
+        // F2 (v0.1.3): the docker probe escalates a probe-level fatal
+        // (e.g. daemon down, every per-container fallback failed) to
+        // an `Err` here so setup exits non-zero with a chained hint
+        // instead of folding the line into the warnings list. The
+        // user-visible warning channel is reserved for actionable,
+        // non-fatal noise.
+        if let Some(fatal) = r.fatal {
+            return Err(anyhow::anyhow!(fatal));
+        }
         profile.services.extend(r.services);
         profile.warnings.extend(r.warnings);
 
