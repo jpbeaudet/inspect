@@ -72,10 +72,122 @@ pub struct AuditEntry {
     /// reconstruction without storing the bytes themselves).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin_sha256: Option<String>,
+    /// F11 (v0.1.3): captured inverse of this audit entry. Populated
+    /// at capture-before-apply time by every write verb. `None` on
+    /// pre-F11 (v0.1.2 or earlier) entries — those are treated as
+    /// `revert.kind = "unsupported"` on read. `inspect revert <id>`
+    /// consults this field; legacy entries still revert through the
+    /// `previous_hash` + `snapshot` path for backward compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<Revert>,
+    /// F11 (v0.1.3): `true` when the mutation actually ran on the
+    /// remote, `false` when capture succeeded but dispatch failed (or
+    /// the verb is still in-flight). `None` on legacy entries. Lets
+    /// `inspect revert` no-op cleanly on entries that never applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<bool>,
+    /// F11 (v0.1.3): set when the operator explicitly passed
+    /// `--no-revert` on a verb whose inverse is fundamentally
+    /// undefined (e.g. `inspect exec` of a free-form script).
+    /// `inspect revert <id>` on such entries surfaces a chained hint
+    /// rather than silently no-opping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_revert_acknowledged: bool,
+    /// F11 (v0.1.3): when this entry was the auto-revert of a failed
+    /// apply (`--revert-on-failure` triggered), this links back to the
+    /// original entry so audit readers can see the relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_revert_of: Option<String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// F11 (v0.1.3): inverse-capture taxonomy. Every write verb declares
+/// one of these at capture time. `Unsupported` is reserved for verbs
+/// whose effect is intrinsically non-reversible (free-form `exec`,
+/// SIGHUP `reload`, side-effecting commands with no clean inverse);
+/// applying such verbs requires the operator to opt in via
+/// `--no-revert` so the contract is never silently undermined.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertKind {
+    /// Inverse is a single remote command (e.g. `chmod 0644 <path>`,
+    /// `docker start <ctr>`).
+    CommandPair,
+    /// Inverse is restoring a captured state blob (the existing
+    /// `snapshot` field carries the path; `payload` is the snapshot
+    /// hash for fast lookup).
+    StateSnapshot,
+    /// Multi-step inverse — `payload` is a JSON-encoded ordered list
+    /// of `{kind, payload}` records that should be executed in
+    /// reverse order. Used by bundle steps that touch multiple paths.
+    Composite,
+    /// This verb has no general inverse on this invocation. `inspect
+    /// revert <id>` exits 2 with the chained explanation; never
+    /// silently no-ops.
+    Unsupported,
+}
+
+impl RevertKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CommandPair => "command_pair",
+            Self::StateSnapshot => "state_snapshot",
+            Self::Composite => "composite",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// F11 (v0.1.3): captured inverse for a single write-verb invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Revert {
+    pub kind: RevertKind,
+    /// Structured inverse — a remote command string, a snapshot hash,
+    /// or a JSON-encoded list (for `Composite`). Empty for
+    /// `Unsupported`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub payload: String,
+    /// Timestamp at which the inverse was captured. Always **before**
+    /// the apply step ran (capture-before-apply contract).
+    pub captured_at: DateTime<Utc>,
+    /// One-line human-readable description ("restore /etc/foo (was
+    /// 0644 root:root)"). Used by `inspect revert <id> --dry-run` and
+    /// by `--revert-preview` on write verbs.
+    pub preview: String,
+}
+
+impl Revert {
+    pub fn unsupported(preview: impl Into<String>) -> Self {
+        Self {
+            kind: RevertKind::Unsupported,
+            payload: String::new(),
+            captured_at: Utc::now(),
+            preview: preview.into(),
+        }
+    }
+    pub fn command_pair(payload: impl Into<String>, preview: impl Into<String>) -> Self {
+        Self {
+            kind: RevertKind::CommandPair,
+            payload: payload.into(),
+            captured_at: Utc::now(),
+            preview: preview.into(),
+        }
+    }
+    pub fn state_snapshot(snapshot_hash: impl Into<String>, preview: impl Into<String>) -> Self {
+        Self {
+            kind: RevertKind::StateSnapshot,
+            payload: snapshot_hash.into(),
+            captured_at: Utc::now(),
+            preview: preview.into(),
+        }
+    }
 }
 
 impl AuditEntry {
@@ -104,6 +216,10 @@ impl AuditEntry {
             bundle_step: None,
             stdin_bytes: 0,
             stdin_sha256: None,
+            revert: None,
+            applied: None,
+            no_revert_acknowledged: false,
+            auto_revert_of: None,
         }
     }
 }

@@ -12,7 +12,7 @@ use crate::cli::LifecycleArgs;
 use crate::error::ExitKind;
 use crate::profile::schema::ServiceKind;
 use crate::safety::gate::ConfirmResult;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
+use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan, Step};
 use crate::verbs::output::Renderer;
@@ -113,6 +113,19 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
             .map(|d| d.kind)
             .unwrap_or(ServiceKind::Container);
         let cmd = build_cmd(act, svc, container, kind);
+        // F11 (v0.1.3): capture-before-apply. Build the inverse
+        // *before* dispatching so the audit entry records what
+        // `inspect revert` would run, even on partial failure.
+        let revert = build_revert(act, svc, container, kind);
+        if args.revert_preview {
+            eprintln!(
+                "[inspect] revert preview {ns}/{svc}: {kind} -- {preview}",
+                ns = s.ns.namespace,
+                svc = svc,
+                kind = revert.kind.as_str(),
+                preview = revert.preview,
+            );
+        }
         let started = Instant::now();
         let out = runner.run(
             &s.ns.namespace,
@@ -126,6 +139,8 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
         entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        entry.revert = Some(revert);
+        entry.applied = Some(out.ok());
         store.append(&entry)?;
 
         if out.ok() {
@@ -191,5 +206,38 @@ fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Stri
             // Best-effort SIGHUP into the container.
             format!("docker kill -s HUP {cont_q}")
         }
+    }
+}
+
+/// F11 (v0.1.3): pre-stage the inverse of a lifecycle action so it
+/// can be reapplied via `inspect revert` even if the original step
+/// failed mid-flight. `restart` and `reload` have no clean inverse,
+/// so they record `kind: unsupported` with a human-readable preview.
+fn build_revert(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Revert {
+    let svc_q = shquote(svc);
+    let cont_q = shquote(container);
+    match (kind, act) {
+        (ServiceKind::Systemd, Action::Stop) => Revert::command_pair(
+            format!("systemctl start {svc_q}"),
+            format!("systemctl start {svc}"),
+        ),
+        (ServiceKind::Systemd, Action::Start) => Revert::command_pair(
+            format!("systemctl stop {svc_q}"),
+            format!("systemctl stop {svc}"),
+        ),
+        (_, Action::Stop) => Revert::command_pair(
+            format!("docker start {cont_q}"),
+            format!("docker start {container}"),
+        ),
+        (_, Action::Start) => Revert::command_pair(
+            format!("docker stop {cont_q}"),
+            format!("docker stop {container}"),
+        ),
+        (_, Action::Restart) => Revert::unsupported(format!(
+            "restart has no inverse; re-run `inspect restart {svc}` to repeat"
+        )),
+        (_, Action::Reload) => Revert::unsupported(format!(
+            "reload (SIGHUP) has no inverse for {svc}"
+        )),
     }
 }

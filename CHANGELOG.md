@@ -14,6 +14,57 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F11 — Universal pre-staged `--revert` on every write verb
+  (load-bearing for agentic safety; non-negotiable before v0.2.0
+  freezes the audit schema).** Every write verb now captures its
+  inverse *before* dispatching the mutation. Each `AuditEntry`
+  carries a new `revert: { kind, payload, captured_at, preview }`
+  block (plus `applied`, `no_revert_acknowledged`, and
+  `auto_revert_of` fields), with four kinds:
+  - `command_pair` — single inverse remote command (e.g. `chmod
+    0644 …`, `docker start <ctr>`); used by lifecycle stop/start,
+    `chmod`, `chown`, `mkdir`, `touch`.
+  - `state_snapshot` — restore from snapshot store; used by `cp`,
+    `edit`, `rm` (rm now snapshots the target file before deleting
+    it).
+  - `composite` — ordered list of inverses; reserved for bundle
+    integration in F17.
+  - `unsupported` — verb has no general inverse this invocation
+    (`restart`, `reload`, `exec --no-revert`, legacy v0.1.2 entries
+    on read).
+
+  **`inspect exec --apply` now refuses without `--no-revert`** with
+  a chained hint pointing at `cp` / `chmod` / `restart`, since
+  free-form shell payloads are not generally invertible. Operators
+  acknowledge the trade-off explicitly; the audit entry records
+  `no_revert_acknowledged: true` so post-hoc readers can tell
+  free-form mutations apart from mutations that simply pre-date the
+  contract.
+
+  **`inspect revert` upgraded** to dispatch on `revert.kind`:
+  `command_pair` runs the captured inverse remote command;
+  `state_snapshot` follows the existing snapshot-restore path;
+  `unsupported` exits 2 with a chained explanation. New
+  `--last [N]` walks the N most recent applied entries in reverse
+  chronological order. The `audit-id` argument is now optional (use
+  with `--last`). Dry-run output gains a `REVERT:` block showing
+  the captured `preview` and the inverse command.
+
+  **`--revert-preview` flag** on every write verb prints the
+  captured inverse to stderr before applying, so operators (and
+  driving agents) can see exactly what `inspect revert <new-id>`
+  will undo.
+
+  **Backward compatibility:** v0.1.2 audit entries (which lack the
+  `revert` field) are read as `kind: unsupported` and refuse with a
+  loud chained hint pointing at `inspect audit show` rather than
+  silently no-opping. Snapshot-style legacy entries (with
+  `previous_hash`) still revert through the existing path.
+
+  8 phase_f_v013 acceptance tests cover all four kinds, the
+  `--no-revert` refusal, `--revert-preview`, `--last`, and the
+  legacy-entry refusal.
+
 - **F9 — `inspect run` forwards local stdin to the remote command.**
   3rd field user (BUG-3 follow-up): `inspect run arte 'docker exec
   -i atlas-pg sh' < ./init.sql` returned `SUMMARY: run: 1 ok, 0

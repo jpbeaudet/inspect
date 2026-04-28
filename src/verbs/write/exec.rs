@@ -19,7 +19,7 @@ use anyhow::Result;
 use crate::cli::ExecArgs;
 use crate::error::ExitKind;
 use crate::safety::gate::ConfirmResult;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
+use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -49,6 +49,18 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     // for write); see [INSPECT_v0.1.1_PATCH_SPEC.md] P6/P7.
     let mut gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     gate.fanout_threshold = exec_fanout_threshold();
+    // F11 (v0.1.3): exec is the one write verb whose payload is
+    // free-form shell, so we cannot synthesise an inverse. Refuse
+    // `--apply` unless the operator opts in via `--no-revert`.
+    if args.apply && !args.no_revert {
+        crate::error::emit(
+            "`inspect exec --apply` requires `--no-revert` because the inverse cannot be \
+             synthesised from a free-form shell command. If the change is structured (file, \
+             permission, lifecycle), use the matching write verb (`inspect cp`, `inspect chmod`, \
+             `inspect restart`) which captures a real inverse.",
+        );
+        return Ok(ExitKind::Error);
+    }
     if !gate.should_apply() {
         let mut r = Renderer::new();
         r.summary(format!("DRY RUN. Would exec on {} target(s):", steps.len()));
@@ -183,6 +195,21 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         e.exit = out.exit_code;
         e.duration_ms = dur;
         e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        // F11 (v0.1.3): exec records `unsupported` revert + the
+        // operator's explicit `--no-revert` acknowledgement so audit
+        // readers can tell free-form mutations apart from mutations
+        // that simply pre-date the contract.
+        e.revert = Some(Revert::unsupported(format!(
+            "exec is free-form shell; no inverse captured. Original cmd: {user_cmd}"
+        )));
+        e.no_revert_acknowledged = true;
+        e.applied = Some(out.ok());
+        if args.revert_preview {
+            eprintln!(
+                "[inspect] revert preview {label}: unsupported -- {}",
+                e.revert.as_ref().map(|r| r.preview.as_str()).unwrap_or(""),
+            );
+        }
         store.append(&e)?;
 
         if let Some(prev) = last_inner {

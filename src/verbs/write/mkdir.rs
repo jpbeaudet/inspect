@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::cli::PathArgArgs;
 use crate::error::ExitKind;
 use crate::safety::gate::ConfirmResult;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
+use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -56,6 +56,46 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
 
     for (s, path) in &planned {
+        // F11 (v0.1.3): probe whether the directory already exists.
+        // If it did not, the inverse is `rmdir <path>` (only if the
+        // operator's mkdir actually created it). If it did, mkdir is
+        // a no-op and revert is unsupported.
+        let probe_inner = format!("test -d {} && echo y || echo n", shquote(path));
+        let probe_cmd = match s.container() {
+            Some(container) => format!(
+                "docker exec {} sh -c {}",
+                shquote(container),
+                shquote(&probe_inner)
+            ),
+            None => probe_inner,
+        };
+        let pre_existed = runner
+            .run(&s.ns.namespace, &s.ns.target, &probe_cmd, RunOpts::with_timeout(15))
+            .ok()
+            .map(|o| o.stdout.trim() == "y")
+            .unwrap_or(true);
+        let label = format!(
+            "{}{}:{path}",
+            s.ns.namespace,
+            s.service().map(|x| format!("/{x}")).unwrap_or_default()
+        );
+        let revert = if pre_existed {
+            Revert::unsupported(format!(
+                "{path} already existed before mkdir; revert is a no-op"
+            ))
+        } else {
+            Revert::command_pair(
+                format!("rmdir -- {}", shquote(path)),
+                format!("rmdir {path}"),
+            )
+        };
+        if args.revert_preview {
+            eprintln!(
+                "[inspect] revert preview {label}: {kind} -- {preview}",
+                kind = revert.kind.as_str(),
+                preview = revert.preview,
+            );
+        }
         let inner = format!("mkdir -p -- {}", shquote(path));
         let cmd = match s.container() {
             Some(container) => format!(
@@ -72,15 +112,12 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
             &cmd,
             RunOpts::with_timeout(30),
         )?;
-        let label = format!(
-            "{}{}:{path}",
-            s.ns.namespace,
-            s.service().map(|x| format!("/{x}")).unwrap_or_default()
-        );
         let mut e = AuditEntry::new("mkdir", &label);
         e.exit = out.exit_code;
         e.duration_ms = started.elapsed().as_millis() as u64;
         e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        e.revert = Some(revert);
+        e.applied = Some(out.ok());
         store.append(&e)?;
 
         if out.ok() {

@@ -8,6 +8,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::json;
 
@@ -794,4 +795,224 @@ fn f9_run_no_stdin_with_empty_pipe_is_silent_pass() {
         .assert()
         .success()
         .stdout(contains("hi"));
+}
+
+// =============================================================================
+// F11 — Universal pre-staged --revert on every write verb (load-bearing for
+// agentic safety; non-negotiable before v0.2.0 freezes the audit schema).
+// =============================================================================
+
+fn audit_jsonl_body(home: &std::path::Path) -> String {
+    let dir = home.join("audit");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("audit dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    assert!(!entries.is_empty(), "audit jsonl should exist");
+    std::fs::read_to_string(entries[0].path()).unwrap()
+}
+
+#[test]
+fn f11_chmod_captures_command_pair_revert() {
+    let mock = json!([
+        // F11 capture: stat -c %a returns prior mode
+        { "match": "stat -c %a", "stdout": "0644\n", "exit": 0 },
+        // The actual chmod
+        { "match": "chmod", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "chmod",
+            "arte/atlas:/etc/app.conf",
+            "0600",
+            "--apply",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(body.contains("\"kind\":\"command_pair\""), "body: {body}");
+    assert!(body.contains("chmod 0644"), "inverse missing: {body}");
+    assert!(body.contains("\"applied\":true"), "applied flag missing: {body}");
+}
+
+#[test]
+fn f11_exec_apply_without_no_revert_refuses() {
+    let mock = json!([
+        { "match": "docker exec", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["exec", "arte/atlas", "--apply", "--yes", "--", "echo", "hi"])
+        .assert()
+        .failure()
+        .stderr(contains("--no-revert"))
+        .stderr(contains("inverse"));
+}
+
+#[test]
+fn f11_exec_with_no_revert_records_unsupported_kind() {
+    let mock = json!([
+        { "match": "docker exec", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "exec", "arte/atlas", "--apply", "--yes", "--no-revert",
+            "--", "echo", "hi",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(body.contains("\"kind\":\"unsupported\""), "body: {body}");
+    assert!(body.contains("\"no_revert_acknowledged\":true"), "body: {body}");
+}
+
+#[test]
+fn f11_revert_preview_prints_inverse_before_apply() {
+    let mock = json!([
+        { "match": "stat -c %a", "stdout": "0755\n", "exit": 0 },
+        { "match": "chmod", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "chmod", "arte/atlas:/usr/bin/foo", "0700",
+            "--apply", "--yes", "--revert-preview",
+        ])
+        .assert()
+        .success()
+        .stderr(contains("revert preview"))
+        .stderr(contains("command_pair"))
+        .stderr(contains("chmod 0755"));
+}
+
+#[test]
+fn f11_revert_command_pair_runs_inverse_via_audit_id() {
+    // Two-phase: chmod (capture prior=0644, apply 0600), then revert.
+    let mock = json!([
+        { "match": "stat -c %a", "stdout": "0644\n", "exit": 0 },
+        { "match": "chmod", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["chmod", "arte/atlas:/etc/app.conf", "0600", "--apply", "--yes"])
+        .assert()
+        .success();
+    // Pull audit id.
+    let body = audit_jsonl_body(sb.home());
+    let id = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"chmod\""))
+        .and_then(|l| {
+            let key = "\"id\":\"";
+            l.find(key).map(|i| {
+                let s = &l[i + key.len()..];
+                s.split('"').next().unwrap().to_string()
+            })
+        })
+        .expect("chmod audit id");
+    sb.cmd()
+        .args(["revert", &id, "--apply", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("reverted"));
+}
+
+#[test]
+fn f11_revert_unsupported_refuses_loudly() {
+    // exec with --no-revert produces an unsupported-kind audit; revert
+    // must refuse rather than silently succeed.
+    let mock = json!([
+        { "match": "docker exec", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "exec", "arte/atlas", "--apply", "--yes", "--no-revert",
+            "--", "echo", "hi",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    let id = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"exec\""))
+        .and_then(|l| {
+            let key = "\"id\":\"";
+            l.find(key).map(|i| {
+                let s = &l[i + key.len()..];
+                s.split('"').next().unwrap().to_string()
+            })
+        })
+        .expect("exec audit id");
+    sb.cmd()
+        .args(["revert", &id, "--apply", "--yes"])
+        .assert()
+        .failure()
+        .stderr(contains("--no-revert").or(contains("unsupported")));
+}
+
+#[test]
+fn f11_revert_last_walks_recent_entries() {
+    let mock = json!([
+        { "match": "stat -c %a", "stdout": "0644\n", "exit": 0 },
+        { "match": "chmod", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["chmod", "arte/atlas:/etc/a.conf", "0600", "--apply", "--yes"])
+        .assert()
+        .success();
+    // --last 1 dry-run should preview the inverse of the most recent
+    // applied entry without requiring an audit id.
+    sb.cmd()
+        .args(["revert", "--last", "1"])
+        .assert()
+        .success()
+        .stdout(contains("DRY RUN"))
+        .stdout(contains("REVERT"));
+}
+
+#[test]
+fn f11_legacy_audit_entry_predates_contract_loud_error() {
+    // Synthesise a legacy v0.1.2 entry by hand (no `revert` field, no
+    // previous_hash) and confirm `inspect revert` refuses with the
+    // chained hint instead of silently no-opping.
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    let audit_dir = sb.home().join("audit");
+    std::fs::create_dir_all(&audit_dir).unwrap();
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "id": "1700000000000-abcd",
+        "ts": "2024-01-01T00:00:00Z",
+        "user": "tester",
+        "host": "localhost",
+        "verb": "restart",
+        "selector": "arte/atlas",
+        "args": "",
+        "diff_summary": "",
+        "exit": 0,
+        "duration_ms": 12,
+    });
+    std::fs::write(
+        audit_dir.join("2024-01.jsonl"),
+        format!("{}\n", serde_json::to_string(&legacy).unwrap()),
+    )
+    .unwrap();
+    sb.cmd()
+        .args(["revert", "1700000000000-abcd"])
+        .assert()
+        .failure()
+        .stderr(contains("predates the revert contract").or(contains("unsupported")));
 }

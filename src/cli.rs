@@ -1522,6 +1522,11 @@ pub struct LifecycleArgs {
     /// Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying. Lets
+    /// the operator (or a driving agent) see exactly what
+    /// `inspect revert <new-id>` will undo, before the mutation runs.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1568,6 +1573,15 @@ pub struct ExecArgs {
     /// Disable the live heartbeat. Streaming output is unaffected.
     #[arg(long)]
     pub no_heartbeat: bool,
+    /// F11 (v0.1.3): acknowledge that this exec has no captured
+    /// inverse. Required with `--apply`; without it, `inspect exec`
+    /// refuses free-form mutations.
+    #[arg(long)]
+    pub no_revert: bool,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// For exec, this is always `revert.kind = unsupported`.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1815,6 +1829,9 @@ pub struct PathArgArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1841,6 +1858,9 @@ pub struct ChmodArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1867,6 +1887,9 @@ pub struct ChownArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1897,6 +1920,9 @@ pub struct CpArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1925,6 +1951,9 @@ pub struct EditArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2043,8 +2072,8 @@ EXAMPLES\n  \
     after_help = SEE_ALSO_SAFETY,
 )]
 pub struct RevertArgs {
-    /// Audit id (or unique prefix).
-    pub audit_id: String,
+    /// Audit id (or unique prefix). Optional when `--last` is given.
+    pub audit_id: Option<String>,
     #[arg(long)]
     pub apply: bool,
     /// Override the drift check (current remote != recorded new_hash).
@@ -2054,6 +2083,12 @@ pub struct RevertArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
+    /// F11 (v0.1.3): revert the N most recent applied write entries
+    /// (in reverse chronological order). Stops on the first
+    /// `revert.kind = unsupported` entry with a loud explanation.
+    /// Mutually exclusive with `<audit-id>`.
+    #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "1", conflicts_with = "audit_id")]
+    pub last: Option<usize>,
 }
 
 #[cfg(test)]

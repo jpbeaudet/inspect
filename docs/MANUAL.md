@@ -540,13 +540,56 @@ inspect audit ls --limit 20          # recent mutations
 inspect audit ls --bundle <bundle-id> # entries from one bundle apply
 inspect audit show <id>              # one entry with diff summary
 inspect audit grep "atlas"           # search audit entries
-inspect revert <audit-id>            # preview the reverse diff
+inspect revert <audit-id>            # preview the reverse
 inspect revert <audit-id> --apply    # restore the original
+inspect revert --last 3              # walk the 3 most recent applied entries
 ```
 
 Audit entries record: timestamp, user, host, verb, selector, args,
 diff summary, previous and new SHA-256, snapshot path, exit code,
 duration. Mode `0600`.
+
+### 8.1 The revert contract (v0.1.3)
+
+Every write verb pre-stages its inverse **before** dispatching the
+mutation. The captured inverse lives in the entry's `revert` block
+alongside `applied: true|false` (was the mutation actually run) and
+`no_revert_acknowledged: true` (operator opted in to a free-form
+mutation via `--no-revert`).
+
+There are four `revert.kind` values:
+
+| Kind | When | What `inspect revert` does |
+|---|---|---|
+| `command_pair` | `chmod` / `chown` / `mkdir` / `touch` / lifecycle stop / start | runs a single inverse remote command (e.g. `chmod 0644 …`) |
+| `state_snapshot` | `cp` / `edit` / `rm` (rm snapshots before deleting) | restores the prior file content from the snapshot store |
+| `composite` | bundle steps (multi-step inverse, F17) | replays per-step inverses in reverse |
+| `unsupported` | `restart` / `reload` / `exec --no-revert` / legacy v0.1.2 entries | exits 2 with a chained explanation; never silently no-ops |
+
+**`--revert-preview`** on any write verb prints the captured inverse
+to stderr before applying, so you can see exactly what
+`inspect revert <new-id>` will undo:
+
+```sh
+inspect chmod arte/atlas:/etc/app.conf 0600 --apply --revert-preview
+# stderr: [inspect] revert preview arte/atlas:/etc/app.conf:
+#         command_pair -- chmod 0644 /etc/app.conf
+```
+
+**`inspect exec --apply` is special.** Because the payload is
+free-form shell, no inverse can be synthesised. `--apply` therefore
+**refuses** unless you explicitly pass `--no-revert` to acknowledge
+the trade-off. If your mutation is structured (file content,
+permissions, lifecycle), use the matching write verb instead — they
+all capture real inverses.
+
+**Backward compatibility.** Audit entries written before v0.1.3
+have no `revert` field; they are read as `kind: unsupported` and
+`inspect revert` refuses with a chained hint pointing at
+`inspect audit show`. Snapshot-style legacy entries (with
+`previous_hash` set) still revert through the existing path.
+
+### 8.2 Audit log integrity
 
 If the file changed since your edit (hash mismatch), `revert` warns
 and refuses without `--force`. That is a feature — it stops you from

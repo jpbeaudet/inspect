@@ -24,7 +24,7 @@ use crate::safety::gate::ConfirmResult;
 use crate::safety::{
     diff::{diff_summary, unified_diff},
     snapshot::sha256_hex,
-    AuditEntry, AuditStore, Confirm, SafetyGate, SnapshotStore,
+    AuditEntry, AuditStore, Confirm, Revert, SafetyGate, SnapshotStore,
 };
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
@@ -225,11 +225,25 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         entry.args = local.clone();
         entry.previous_hash = prev_hash.clone().map(|h| format!("sha256:{h}"));
         entry.new_hash = Some(format!("sha256:{new_hash}"));
-        entry.snapshot = prev_hash.map(|h| snaps.path_for(&h).display().to_string());
+        entry.snapshot = prev_hash.clone().map(|h| snaps.path_for(&h).display().to_string());
         entry.diff_summary = diff_summary(&[(prev_text, new_text.clone())]);
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
         entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        // F11 (v0.1.3): pre-stage the inverse. cp restores the prior
+        // file from the snapshot store; first-write has no prior, so
+        // mark the entry unsupported and let `inspect rm --apply` be
+        // the explicit follow-up if the operator wants to undo.
+        entry.revert = Some(match prev_hash.as_ref() {
+            Some(h) => Revert::state_snapshot(
+                format!("sha256:{h}"),
+                format!("restore {label} from snapshot sha256:{}", &h[..12]),
+            ),
+            None => Revert::unsupported(format!(
+                "cp created a new file at {label}; revert by `inspect rm --apply {label}`"
+            )),
+        });
+        entry.applied = Some(out.ok());
         store.append(&entry)?;
 
         if out.ok() {

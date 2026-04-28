@@ -13,6 +13,6 @@ pub mod diff;
 pub mod gate;
 pub mod snapshot;
 
-pub use audit::{validate_reason, AuditEntry, AuditStore};
+pub use audit::{validate_reason, AuditEntry, AuditStore, Revert};
 pub use gate::{Confirm, SafetyGate};
 pub use snapshot::SnapshotStore;

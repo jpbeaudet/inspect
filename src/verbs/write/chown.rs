@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::cli::ChownArgs;
 use crate::error::ExitKind;
 use crate::safety::gate::ConfirmResult;
-use crate::safety::{AuditEntry, AuditStore, Confirm, SafetyGate};
+use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::Renderer;
@@ -66,6 +66,42 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
     for (s, path) in &planned {
+        // F11 (v0.1.3): capture prior owner for the inverse.
+        let stat_inner = format!("stat -c %u:%g -- {}", shquote(path));
+        let stat_cmd = match s.container() {
+            Some(container) => format!(
+                "docker exec {} sh -c {}",
+                shquote(container),
+                shquote(&stat_inner)
+            ),
+            None => stat_inner,
+        };
+        let prev_owner = runner
+            .run(&s.ns.namespace, &s.ns.target, &stat_cmd, RunOpts::with_timeout(15))
+            .ok()
+            .and_then(|o| if o.ok() { Some(o.stdout.trim().to_string()) } else { None })
+            .filter(|s| !s.is_empty() && is_safe_owner(s));
+        let label = format!(
+            "{}{}:{path}",
+            s.ns.namespace,
+            s.service().map(|x| format!("/{x}")).unwrap_or_default()
+        );
+        let revert = match prev_owner.as_deref() {
+            Some(o) => Revert::command_pair(
+                format!("chown {} -- {}", shquote(o), shquote(path)),
+                format!("chown {o} {path}"),
+            ),
+            None => Revert::unsupported(format!(
+                "could not capture prior owner of {path}; revert unavailable"
+            )),
+        };
+        if args.revert_preview {
+            eprintln!(
+                "[inspect] revert preview {label}: {kind} -- {preview}",
+                kind = revert.kind.as_str(),
+                preview = revert.preview,
+            );
+        }
         let inner = format!("chown {} -- {}", shquote(&args.owner), shquote(path));
         let cmd = match s.container() {
             Some(container) => format!(
@@ -82,16 +118,13 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
             &cmd,
             RunOpts::with_timeout(30),
         )?;
-        let label = format!(
-            "{}{}:{path}",
-            s.ns.namespace,
-            s.service().map(|x| format!("/{x}")).unwrap_or_default()
-        );
         let mut e = AuditEntry::new("chown", &label);
         e.args = args.owner.clone();
         e.exit = out.exit_code;
         e.duration_ms = started.elapsed().as_millis() as u64;
         e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        e.revert = Some(revert);
+        e.applied = Some(out.ok());
         store.append(&e)?;
         if out.ok() {
             ok += 1;
