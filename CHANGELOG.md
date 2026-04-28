@@ -5,6 +5,31 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.1.3 (in progress)
+
+Closes the v0.1.3 patch backlog (`INSPECT_v0.1.3_BACKLOG.md`). Field
+feedback from four independent v0.1.2 users plus a multi-hour
+destructive migration session by the primary operator. Implementation
+is in progress; this section grows as items land.
+
+### Fixed
+
+- **F1 — `inspect status <ns>` returns 0 services on healthy hosts
+  (regression).** Bare-namespace selectors (`inspect status arte`,
+  `inspect status prod-*`) were resolving to a single host-level
+  step and the status loop, which only renders service steps,
+  dropped the host fall-through silently, yielding a misleading
+  `0 service(s): 0 healthy, 0 unhealthy, 0 unknown` summary on a
+  healthy 30+-container host. Status now rewrites a service-less
+  selector to its all-services form (`<sel>/*`) before resolution,
+  so `inspect status arte` and `inspect status arte/*` produce the
+  same fan-out. Aliases (`@name`) and explicit selectors (with `/`)
+  pass through unchanged. Independently confirmed by 2nd and 3rd
+  field users; ship-blocker for v0.1.3 under the "one critical
+  issue" rule. Regression guards in `tests/phase_f_v013.rs` cover
+  1, 10, and multi-namespace cases plus parity with the explicit
+  `arte/*` form.
+
 ## [0.1.2] — v0.1.2 backlog (B1-B10)
 
 Closes the v0.1.2 backlog (`INSPECT_v0.1.2_BACKLOG.md`). Two new

@@ -7,7 +7,7 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| F1 — `inspect status` returns 0 services after `--force` discovery (regression) | ⬜ Open | **critical regression**, ship-blocker; **independently confirmed by 2nd and 3rd field users** (3rd user: "reads as everything is missing rather than no service definitions configured") |
+| F1 — `inspect status` returns 0 services after `--force` discovery (regression) | ✅ Done | bare-ns selector now rewrites to `<sel>/*` in `verbs/status.rs::run`; reproducer + regression guards in `tests/phase_f_v013.rs`; CHANGELOG updated |
 | F2 — `docker inspect` batched-timeout warning noise during setup | ⬜ Open | small, cosmetic but erodes trust on first run; **2nd and 3rd field users** both hit the 10s default warning on 37-container hosts; 3rd user explicitly suggested scaling the timeout |
 | F3 — `inspect help <command>` not a `--help` synonym | ⬜ Open | small, ergonomics; carry-over from v0.1.2 backlog |
 | F4 — `inspect why` compose-aware deep-diagnostic bundle (logs + effective Cmd + port reality) | ⬜ Open | **load-bearing field request**; turns 15-minute manual triage into 30 seconds |
@@ -891,7 +891,7 @@ Design points:
 
 ---
 
-## Running total: 0 / 25 — **OPEN, FROZEN. Implementation begins.**
+## Running total: 1 / 25 — **OPEN, FROZEN. F1 ✅ landed; F8 next.**
 
 **Why ship the entire backlog, not just F1:** v0.1.4 is now dedicated to Kubernetes. That means the docker / compose / SSH surface — every L-item and every F-item in this backlog — gets no further attention until **v0.1.5 at the earliest**. Slipping any item out of v0.1.3 effectively pushes it past two intervening releases (v0.1.4 k8s + v0.1.5 stabilization) into v0.2.0+ territory. The docker-host install base is the entire current user base of the tool, so leaving their backlog half-shipped while spending a release on k8s would be the wrong call. Ship all 25.
 

@@ -16,7 +16,22 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::OutputDoc;
 
 pub fn run(args: StatusArgs) -> Result<ExitKind> {
-    let (runner, nses, targets) = plan(&args.selector)?;
+    // F1 (v0.1.3): bare-namespace selectors (`inspect status arte`,
+    // `inspect status prod-*`) historically resolved to a single
+    // host-level step, which the loop below skips, yielding a
+    // misleading "0 service(s)" report on a healthy host. The
+    // selector resolver explicitly defers this re-interpretation
+    // to the verb layer (see `selector::resolve::resolve_services_for_ns`
+    // — the `None` arm comments that "the verb layer can still
+    // re-interpret this for verbs that fan out across all services
+    // (e.g. `status arte` with no service portion)"). Status is
+    // exactly that verb: the user's intent is "show me everything
+    // in this namespace", so we rewrite a service-less selector
+    // to its `/*` form before resolution. Aliases (`@name`) are
+    // expanded later by the resolver and may already carry a
+    // service portion, so they pass through unchanged.
+    let selector = expand_bare_namespace(&args.selector);
+    let (runner, nses, targets) = plan(&selector)?;
 
     let mut total = 0usize;
     let mut healthy = 0usize;
@@ -118,4 +133,47 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
 
     Ok(ExitKind::Success)
+}
+
+/// F1 helper: rewrite a service-less selector (`arte`, `prod-*`,
+/// `arte~staging`) into its all-services equivalent (`arte/*` etc.)
+/// so the status loop fans out over containers + systemd units
+/// instead of collapsing to a single host step.
+///
+/// Pass-through cases:
+/// - selectors that already contain `/` (caller picked an explicit
+///   service / `_` host / glob form)
+/// - alias references starting with `@` (resolved later, may already
+///   carry a service portion)
+/// - empty input (let the parser surface its own diagnostic)
+fn expand_bare_namespace(sel: &str) -> String {
+    if sel.is_empty() || sel.starts_with('@') || sel.contains('/') {
+        return sel.to_string();
+    }
+    format!("{sel}/*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_bare_namespace;
+
+    #[test]
+    fn bare_namespace_gets_all_services_glob() {
+        assert_eq!(expand_bare_namespace("arte"), "arte/*");
+        assert_eq!(expand_bare_namespace("prod-*"), "prod-*/*");
+        assert_eq!(expand_bare_namespace("arte~staging"), "arte~staging/*");
+    }
+
+    #[test]
+    fn explicit_service_form_is_unchanged() {
+        assert_eq!(expand_bare_namespace("arte/atlas"), "arte/atlas");
+        assert_eq!(expand_bare_namespace("arte/*"), "arte/*");
+        assert_eq!(expand_bare_namespace("arte/_"), "arte/_");
+    }
+
+    #[test]
+    fn alias_and_empty_pass_through() {
+        assert_eq!(expand_bare_namespace("@my-alias"), "@my-alias");
+        assert_eq!(expand_bare_namespace(""), "");
+    }
 }
