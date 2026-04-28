@@ -14,6 +14,31 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F5 — Container-name vs compose-service-name uniform resolution
+  (field feedback: 2nd v0.1.2 user typed `arte/luminary-onyx-onyx-vault-1`
+  — the docker name from `docker ps` — got "no targets", then
+  `arte/onyx-vault` — the compose service name — worked; both forms
+  appeared in the discovered inventory).** Selector resolver in
+  `src/selector/resolve.rs::resolve_services_for_ns` now accepts the
+  docker `container_name` as an exact-match synonym for the canonical
+  compose service `name`, and globs match against either axis. The
+  resolved target is always the canonical name so every downstream
+  verb (`logs`, `run`, `restart`, …) addresses the same profile row
+  regardless of which form the operator typed. When the typed form
+  was the docker container name, `inspect` emits a one-line
+  breadcrumb on stderr — `note: '<typed>' is the docker container
+  name; the canonical selector is '<ns>/<canonical>'` — so the
+  operator learns the canonical form. Hint is suppressible via
+  `INSPECT_NO_CANONICAL_HINT=1` for strict-stderr JSON consumers.
+  `inspect status --json` now exposes a stable `aliases: [<docker
+  container name>]` field on every service row (empty array when the
+  canonical name already matches the docker name) so agents can
+  enumerate equivalences without trial-and-error. 6 acceptance tests
+  in `tests/phase_f_v013.rs` cover both selector forms, the
+  canonical-form breadcrumb, the silent-when-no-distinct-alias case,
+  the JSON `aliases` field shape (present + populated, present +
+  empty), and globs across either axis.
+
 - **F3 — `inspect help <command>` is now a true synonym for
   `inspect <command> --help` (carry-over field-feedback ergonomic gap;
   every operator coming from `git help log` / `cargo help build` /

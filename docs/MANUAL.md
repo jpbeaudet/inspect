@@ -200,8 +200,18 @@ grammar is small and consistent.
 1. Container short name (`pulse`, `atlas`).
 2. Aliases declared in the profile.
 3. Groups declared in the profile.
-4. Globs (`*`) and regex (`/.../` or quoted `^...$`).
-5. Subtractive (`~name`) — exclude after match.
+4. Docker container name when distinct from the compose service name —
+   e.g. both `arte/onyx-vault` (compose service) and
+   `arte/luminary-onyx-onyx-vault-1` (the docker name from `docker ps`)
+   resolve to the same target. When you typed the docker form,
+   `inspect` prints a one-line breadcrumb on stderr pointing at the
+   canonical compose form so the next invocation uses it. Suppress the
+   hint with `INSPECT_NO_CANONICAL_HINT=1` for strict-stderr JSON
+   pipelines. Aliases also surface in `inspect status --json` under
+   `services[].aliases` so agents can enumerate equivalences.
+5. Globs (`*`) and regex (`/.../` or quoted `^...$`) — match against
+   either the compose name or the docker container name.
+6. Subtractive (`~name`) — exclude after match.
 
 If a name matches both a service and a group, the service wins and a
 warning is emitted.

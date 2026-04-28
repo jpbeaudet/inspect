@@ -363,6 +363,21 @@ fn resolve_services_for_ns(
             let names: Vec<String> = profile
                 .map(|p| p.services.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
+            // F5: parallel list of (name, container_name) pairs so the
+            // selector resolver can also accept the docker container
+            // name (e.g. `luminary-onyx-onyx-vault-1`) as a synonym
+            // for the canonical compose service name (`onyx-vault`).
+            // We keep the canonical `name` as the resolved target so
+            // every downstream verb stays addressed to the same row in
+            // the profile.
+            let aliased: Vec<(String, String)> = profile
+                .map(|p| {
+                    p.services
+                        .iter()
+                        .map(|s| (s.name.clone(), s.container_name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
             let groups: BTreeMap<String, Vec<String>> =
                 profile.map(|p| p.groups.clone()).unwrap_or_default();
             let pf_aliases: BTreeMap<String, String> =
@@ -376,7 +391,7 @@ fn resolve_services_for_ns(
                 match atom {
                     ServiceAtom::Pattern(p) => {
                         had_positive = true;
-                        // 1) exact short-name match.
+                        // 1) exact short-name (canonical / compose) match.
                         if names.iter().any(|n| n == p) {
                             included.insert(p.clone());
                             continue;
@@ -398,9 +413,24 @@ fn resolve_services_for_ns(
                             }
                             continue;
                         }
-                        // 4) glob.
-                        for n in &names {
-                            if pattern_matches(p, n) {
+                        // 4) F5: exact docker container_name match
+                        //    (when distinct from the compose service
+                        //    name). Resolve to the canonical name and
+                        //    record a one-line breadcrumb for the
+                        //    operator so they learn the canonical form.
+                        if let Some((canon, _)) = aliased
+                            .iter()
+                            .find(|(n, c)| c == p && n != c)
+                        {
+                            included.insert(canon.clone());
+                            push_canonical_hint(ns, p, canon);
+                            continue;
+                        }
+                        // 5) glob — matches against either name or
+                        //    container_name. Resolve to canonical name
+                        //    so service_def() lookups remain stable.
+                        for (n, c) in &aliased {
+                            if pattern_matches(p, n) || pattern_matches(p, c) {
                                 included.insert(n.clone());
                             }
                         }
@@ -448,6 +478,23 @@ fn resolve_services_for_ns(
                 .collect())
         }
     }
+}
+
+/// F5: emit a one-line breadcrumb on stderr when a selector matched
+/// against a service's docker `container_name` (rather than its
+/// canonical compose service `name`). The hint is informational —
+/// the verb still proceeds — and points the operator at the canonical
+/// form so the next invocation uses it. Skipped when the
+/// `INSPECT_NO_CANONICAL_HINT` env var is set (used by JSON consumers
+/// that want a strictly-empty stderr).
+fn push_canonical_hint(ns: &str, typed: &str, canonical: &str) {
+    if std::env::var_os("INSPECT_NO_CANONICAL_HINT").is_some() {
+        return;
+    }
+    eprintln!(
+        "note: '{typed}' is the docker container name; the canonical selector is \
+         '{ns}/{canonical}'"
+    );
 }
 
 /// Glob-style match: `*`, `?`, `[...]`. Plain strings match exactly.

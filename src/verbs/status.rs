@@ -135,6 +135,14 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             _ => unknown += 1,
         }
         let img = svc_def.and_then(|s| s.image.clone()).unwrap_or_default();
+        // F5: surface docker `container_name` as an alias when it is
+        // distinct from the canonical compose service name. Always
+        // emit the field (empty array when no aliases) so the JSON
+        // schema is stable for agent consumers.
+        let aliases: Vec<String> = match svc_def {
+            Some(def) if def.container_name != def.name => vec![def.container_name.clone()],
+            _ => Vec::new(),
+        };
         rows.push(StatusRow {
             server: step.ns.namespace.clone(),
             service: svc_name.to_string(),
@@ -145,6 +153,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             "service": svc_name,
             "status": status_str,
             "image": img,
+            "aliases": aliases,
         }));
         data_lines.push(format!(
             "{ns}/{svc_name:<20} {status_str:<10} {img}",

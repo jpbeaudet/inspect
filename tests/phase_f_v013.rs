@@ -1147,3 +1147,247 @@ fn f3_bare_help_unchanged_renders_index() {
         .stdout(contains("Topics:"))
         .stdout(contains("Commands:"));
 }
+
+// -----------------------------------------------------------------------------
+// F5 — Container-name vs compose-service-name uniform resolution.
+//
+// The 2nd field user typed `arte/luminary-onyx-onyx-vault-1` (the docker
+// container name) after `arte/onyx-vault` (the compose service name); both
+// forms appear in the discovered inventory but only the compose form
+// resolved. F5 makes both forms work and surfaces aliases in JSON.
+// -----------------------------------------------------------------------------
+
+/// F5 helper: write a profile where each service has a distinct
+/// compose service `name` and docker `container_name`.
+fn write_profile_with_aliases(
+    home: &std::path::Path,
+    ns: &str,
+    services: &[(&str, &str, &str, &str)], // (service_name, container_name, image, health_status)
+) {
+    let dir = home.join("profiles");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut svc_yaml = String::new();
+    for (name, container_name, image, hs) in services {
+        svc_yaml.push_str(&format!(
+            "  - name: {name}\n    container_name: {container_name}\n    compose_service: {name}\n    container_id: cid-{container_name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
+        ));
+    }
+    let body = format!(
+        "schema_version: 1\nnamespace: {ns}\nhost: {ns}.example.invalid\ndiscovered_at: 2099-01-01T00:00:00+00:00\nremote_tooling:\n  rg: false\n  jq: false\n  journalctl: false\n  sed: false\n  grep: true\n  netstat: false\n  ss: true\n  systemctl: false\n  docker: true\nservices:\n{svc_yaml}volumes: []\nimages: []\nnetworks: []\n"
+    );
+    let path = dir.join(format!("{ns}.yaml"));
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// F5 helper: mock for a single-container host where the docker
+/// container name (`container_name`) differs from the compose
+/// service name. The runtime cache keys lookup by container_name,
+/// so the mock must return the docker name from `docker ps`.
+fn f5_arte_mock(container_name: &str) -> serde_json::Value {
+    json!([
+        { "match": "docker ps --format", "stdout": format!("{container_name}\n"), "exit": 0 },
+        {
+            "match": "docker inspect",
+            "stdout": format!("/{container_name}\thealthy\t0\n"),
+            "exit": 0
+        }
+    ])
+}
+
+#[test]
+fn f5_container_name_resolves_same_as_service_name() {
+    // The 2nd field user's exact reproducer: both selector forms must
+    // resolve to the same target in `inspect status`.
+    let sb = Sandbox::new(f5_arte_mock("luminary-onyx-onyx-vault-1"));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_aliases(
+        sb.home(),
+        "arte",
+        &[(
+            "onyx-vault",
+            "luminary-onyx-onyx-vault-1",
+            "vault:latest",
+            "ok",
+        )],
+    );
+
+    // Form 1: compose service name (already worked pre-F5).
+    sb.cmd()
+        .args(["status", "arte/onyx-vault"])
+        .assert()
+        .success()
+        .stdout(contains("onyx-vault"));
+
+    // Form 2: docker container name (broken pre-F5).
+    sb.cmd()
+        .args(["status", "arte/luminary-onyx-onyx-vault-1"])
+        .assert()
+        .success()
+        .stdout(contains("onyx-vault"));
+}
+
+#[test]
+fn f5_container_name_form_emits_canonical_hint_on_stderr() {
+    // When the rejected-pre-F5 form resolves, we still want the
+    // operator to learn the canonical name. The hint goes on stderr
+    // (so it doesn't pollute --json or piped stdout) and points at
+    // the compose service name as canonical.
+    let sb = Sandbox::new(f5_arte_mock("luminary-onyx-onyx-vault-1"));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_aliases(
+        sb.home(),
+        "arte",
+        &[(
+            "onyx-vault",
+            "luminary-onyx-onyx-vault-1",
+            "vault:latest",
+            "ok",
+        )],
+    );
+
+    sb.cmd()
+        .args(["status", "arte/luminary-onyx-onyx-vault-1"])
+        .assert()
+        .success()
+        .stderr(contains(
+            "'luminary-onyx-onyx-vault-1' is the docker container name",
+        ))
+        .stderr(contains("canonical selector is 'arte/onyx-vault'"));
+}
+
+#[test]
+fn f5_canonical_hint_silent_when_no_distinct_alias() {
+    // When name == container_name (no compose label, or label promoted
+    // to name with no fall-through), there is nothing to suggest.
+    let sb = Sandbox::new(f5_arte_mock("worker"));
+    write_servers_toml(sb.home(), &["arte"]);
+    // Use the existing helper which sets name == container_name.
+    write_profile(sb.home(), "arte", &[("worker", "alpine", "ok")]);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte/worker"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("docker container name"),
+        "canonical hint should be silent when there is no alias to suggest, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn f5_status_json_carries_aliases_field_per_service() {
+    // Agents need to enumerate equivalences without trial-and-error.
+    let sb = Sandbox::new(f5_arte_mock("luminary-onyx-onyx-vault-1"));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_aliases(
+        sb.home(),
+        "arte",
+        &[(
+            "onyx-vault",
+            "luminary-onyx-onyx-vault-1",
+            "vault:latest",
+            "ok",
+        )],
+    );
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("status --json must parse");
+    let services = body
+        .pointer("/data/services")
+        .and_then(|v| v.as_array())
+        .expect("data.services array");
+    let svc = services
+        .iter()
+        .find(|s| s["service"] == "onyx-vault")
+        .expect("onyx-vault row");
+    let aliases = svc["aliases"]
+        .as_array()
+        .expect("aliases must be an array, even if empty");
+    let alias_strs: Vec<&str> = aliases.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        alias_strs.contains(&"luminary-onyx-onyx-vault-1"),
+        "expected docker container name in aliases, got {alias_strs:?}"
+    );
+}
+
+#[test]
+fn f5_status_json_aliases_empty_when_no_distinct_alias() {
+    // Schema stability: `aliases` is always present, empty array when
+    // there is no distinct docker container name to surface.
+    let sb = Sandbox::new(f5_arte_mock("worker"));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("worker", "alpine", "ok")]);
+
+    let out = sb
+        .cmd()
+        .args(["status", "arte", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let svc = body
+        .pointer("/data/services")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().find(|s| s["service"] == "worker"))
+        .expect("worker row");
+    assert_eq!(
+        svc["aliases"],
+        serde_json::json!([]),
+        "aliases must be an empty array, not missing or null"
+    );
+}
+
+#[test]
+fn f5_glob_matches_either_form() {
+    // Globs work against both name and container_name — operator
+    // intent is "match anything that looks like onyx-vault" without
+    // having to know which axis the inventory used.
+    let sb = Sandbox::new(f5_arte_mock("luminary-onyx-onyx-vault-1"));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_aliases(
+        sb.home(),
+        "arte",
+        &[(
+            "onyx-vault",
+            "luminary-onyx-onyx-vault-1",
+            "vault:latest",
+            "ok",
+        )],
+    );
+
+    // Glob on the compose-name shape.
+    sb.cmd()
+        .args(["status", "arte/onyx-*"])
+        .assert()
+        .success()
+        .stdout(contains("onyx-vault"));
+
+    // Glob on the docker-name shape.
+    sb.cmd()
+        .args(["status", "arte/luminary-onyx-onyx-*-1"])
+        .assert()
+        .success()
+        .stdout(contains("onyx-vault"));
+}
