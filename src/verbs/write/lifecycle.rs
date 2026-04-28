@@ -97,6 +97,13 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
     let mut ok = 0usize;
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
+    // F8 (v0.1.3): track every namespace that successfully had at
+    // least one service mutated, so we can invalidate the runtime
+    // cache exactly once per ns at the end. Without this, the next
+    // `inspect status` would happily serve the pre-restart snapshot
+    // for up to TTL seconds — exactly the 3rd field user's bug.
+    let mut mutated_namespaces: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     for s in &steps {
         let svc = s.service().unwrap_or("?");
@@ -123,6 +130,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
 
         if out.ok() {
             ok += 1;
+            mutated_namespaces.insert(s.ns.namespace.clone());
             renderer.data_line(format!("{}/{svc}: {}", s.ns.namespace, act.past_tense()));
         } else {
             bad += 1;
@@ -133,6 +141,15 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
                 out.stderr.trim()
             ));
         }
+    }
+
+    // F8: invalidate runtime cache for every namespace touched.
+    // Best-effort: invalidation is a file unlink; if it fails (e.g.
+    // permissions) the next read verb's TTL check still protects
+    // freshness within `INSPECT_RUNTIME_TTL_SECS`. We intentionally
+    // never fail the whole verb on this.
+    for ns in &mutated_namespaces {
+        crate::verbs::cache::invalidate(ns);
     }
 
     renderer

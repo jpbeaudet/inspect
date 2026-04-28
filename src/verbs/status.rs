@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::cli::StatusArgs;
 use crate::error::ExitKind;
 use crate::profile::schema::HealthStatus;
-use crate::ssh::exec::RunOpts;
+use crate::verbs::cache::{aggregate_sources, get_runtime, print_source_line, GetOpts};
 use crate::verbs::correlation::{status_rules, StatusRow};
 use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::OutputDoc;
@@ -42,26 +42,62 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     let mut services_json: Vec<Value> = Vec::new();
     let mut rows: Vec<StatusRow> = Vec::new();
 
-    // Optionally reconcile with live state to detect down-but-cached services.
-    let mut live_running: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        std::collections::HashMap::new();
+    // F8 (v0.1.3): pull a runtime snapshot per namespace through the
+    // cache orchestrator. The orchestrator decides live vs cached vs
+    // stale based on TTL and the `--refresh` flag, returns a
+    // [`SourceInfo`] describing the choice, and silently saves any
+    // freshly-fetched snapshot to disk for the next read. The verb
+    // itself never touches `docker ps` directly any more.
+    let opts = GetOpts {
+        force_refresh: args.refresh,
+    };
+    let mut runtime_by_ns: std::collections::HashMap<
+        String,
+        crate::profile::runtime::RuntimeSnapshot,
+    > = std::collections::HashMap::new();
+    // Aggregate the per-ns SourceInfo into a single line for output.
+    // For the common single-namespace case this is just that namespace's
+    // info; for multi-ns selectors we surface "live" if every ns was
+    // refreshed, "stale" if any failed, otherwise "cached".
+    let mut sources: Vec<crate::profile::runtime::SourceInfo> = Vec::new();
+    let mut refresh_warnings: Vec<String> = Vec::new();
     for ns in &nses {
-        let out = runner
-            .run(
-                &ns.namespace,
-                &ns.target,
-                "docker ps --format '{{.Names}}'",
-                RunOpts::with_timeout(15),
-            )
-            .ok();
-        if let Some(o) = out {
-            if o.ok() {
-                let set: std::collections::HashSet<String> =
-                    o.stdout.lines().map(|s| s.to_string()).collect();
-                live_running.insert(ns.namespace.clone(), set);
+        match get_runtime(runner.as_ref(), ns, opts) {
+            Ok((snap, info)) => {
+                if info.stale {
+                    if let Some(reason) = &info.reason {
+                        refresh_warnings.push(format!(
+                            "{}: serving cached data — {}",
+                            ns.namespace, reason
+                        ));
+                    }
+                }
+                runtime_by_ns.insert(ns.namespace.clone(), snap);
+                sources.push(info);
+            }
+            Err(_) => {
+                // Cold cache + refresh failed: fall through to a
+                // dry inventory-only view. Mark the source as stale
+                // with a clear reason so the operator knows runtime
+                // facts are missing.
+                sources.push(crate::profile::runtime::SourceInfo {
+                    mode: crate::profile::runtime::SourceMode::Stale,
+                    runtime_age_s: None,
+                    inventory_age_s: crate::profile::runtime::inventory_age(&ns.namespace)
+                        .map(|d| d.as_secs()),
+                    stale: true,
+                    reason: Some(format!("{}: runtime refresh failed (no cache)", ns.namespace)),
+                });
+                refresh_warnings.push(format!(
+                    "{}: runtime refresh failed and no cache present",
+                    ns.namespace
+                ));
             }
         }
     }
+    let aggregated_source = aggregate_sources(&sources);
+    let fmt = args.format.resolve()?;
+    print_source_line(&aggregated_source, &fmt);
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = match step.service() {
@@ -71,14 +107,20 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         let svc_def = step.service_def();
         let mut status_str = "unknown".to_string();
         if let Some(def) = svc_def {
-            let live_up = live_running
+            // F8: prefer the live runtime snapshot for both
+            // running-state and health. The cached profile's
+            // health_status was the post-`setup` value and is
+            // exactly the field that went stale after the 3rd
+            // user's restart — never read it here directly.
+            let rt = runtime_by_ns
                 .get(&step.ns.namespace)
-                .map(|set| set.contains(&def.name))
-                .unwrap_or(true);
+                .and_then(|s| s.lookup(&def.container_name));
+            let live_up = rt.map(|r| r.running).unwrap_or(true);
             status_str = if !live_up {
                 "down".to_string()
             } else {
-                match def.health_status {
+                let health = rt.and_then(|r| r.health_status).or(def.health_status);
+                match health {
                     Some(HealthStatus::Ok) => "ok".into(),
                     Some(HealthStatus::Unhealthy) => "unhealthy".into(),
                     Some(HealthStatus::Starting) => "starting".into(),
@@ -124,17 +166,36 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             }
         }),
     )
-    .with_meta("selector", args.selector.clone());
+    .with_meta("selector", args.selector.clone())
+    // F8: stable JSON contract — every read-verb response carries
+    // `meta.source` so agents can tell live from cached without
+    // parsing the SOURCE: prose line.
+    .with_meta("source", aggregated_source.to_json());
     for n in status_rules(&rows) {
         doc.push_next(n);
     }
+    // F8: stale-source chained hint — when the cache is degraded,
+    // surface the connectivity check as the next concrete action.
+    if aggregated_source.stale {
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!("inspect connectivity {}", first_namespace(&nses)),
+            "diagnose why runtime refresh failed",
+        ));
+    }
 
-    let fmt = args.format.resolve()?;
+    if !refresh_warnings.is_empty() {
+        // Emit on stderr so JSON consumers don't pollute stdout, but
+        // human operators still see the per-ns reason. Single line per
+        // namespace; never per-service spam.
+        for w in &refresh_warnings {
+            eprintln!("warning: {w}");
+        }
+    }
+
     crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
 
     Ok(ExitKind::Success)
 }
-
 /// F1 helper: rewrite a service-less selector (`arte`, `prod-*`,
 /// `arte~staging`) into its all-services equivalent (`arte/*` etc.)
 /// so the status loop fans out over containers + systemd units
@@ -151,6 +212,15 @@ fn expand_bare_namespace(sel: &str) -> String {
         return sel.to_string();
     }
     format!("{sel}/*")
+}
+
+// `aggregate_sources` lives in `verbs::cache` (shared with `health`,
+// `why`) — see [`crate::verbs::cache::aggregate_sources`].
+
+fn first_namespace(nses: &[crate::verbs::dispatch::NsCtx]) -> String {
+    nses.first()
+        .map(|n| n.namespace.clone())
+        .unwrap_or_else(|| "<ns>".to_string())
 }
 
 #[cfg(test)]

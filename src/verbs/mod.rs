@@ -9,6 +9,7 @@
 //! - `1` — no matches (search-shaped verbs only: `grep`, `find`)
 //! - `2` — error (any failure path)
 
+pub mod cache;
 pub mod cat;
 pub mod correlation;
 pub mod cursor;

@@ -6,14 +6,15 @@
 //! deepest dependency in failing state that has no failing dependency
 //! beneath it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 
 use crate::cli::WhyArgs;
 use crate::error::ExitKind;
+use crate::profile::runtime::{RuntimeSnapshot, SourceInfo};
 use crate::profile::schema::{HealthStatus, Profile, Service};
-use crate::ssh::exec::RunOpts;
+use crate::verbs::cache::{aggregate_sources, get_runtime, print_source_line, GetOpts};
 use crate::verbs::correlation::why_rules;
 use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
 use crate::verbs::output::OutputDoc;
@@ -21,7 +22,11 @@ use crate::verbs::runtime::RemoteRunner;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
-    let live_running = collect_live_running(runner.as_ref(), &nses);
+    let (runtime_by_ns, sources, refresh_warnings) =
+        collect_runtime(runner.as_ref(), &nses, args.refresh);
+    let aggregated_source = aggregate_sources(&sources);
+    let fmt = args.format.resolve()?;
+    print_source_line(&aggregated_source, &fmt);
 
     let mut data_lines: Vec<String> = Vec::new();
     let mut services_json: Vec<serde_json::Value> = Vec::new();
@@ -41,12 +46,12 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         };
         emitted += 1;
         let ns = &step.ns.namespace;
-        let live = live_running.get(ns);
+        let runtime = runtime_by_ns.get(ns);
         let walk = walk_deps(profile, &svc_name);
         let status_map: HashMap<String, NodeStatus> = walk
             .nodes
             .iter()
-            .map(|n| (n.clone(), node_status(profile, live, n)))
+            .map(|n| (n.clone(), node_status(profile, runtime, n)))
             .collect();
         let root = pick_root_cause(&walk, &status_map);
         if let Some(r) = &root {
@@ -111,7 +116,8 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             }
         }),
     )
-    .with_meta("selector", args.selector.clone());
+    .with_meta("selector", args.selector.clone())
+    .with_meta("source", aggregated_source.to_json());
     if let Some((server, root)) = &last_root {
         for n in why_rules(server, Some(root.as_str())) {
             doc.push_next(n);
@@ -125,8 +131,23 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             doc.push_next(n);
         }
     }
+    if aggregated_source.stale {
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!(
+                "inspect connectivity {}",
+                nses.first()
+                    .map(|n| n.namespace.clone())
+                    .unwrap_or_else(|| "<ns>".to_string())
+            ),
+            "diagnose why runtime refresh failed",
+        ));
+    }
+    if !refresh_warnings.is_empty() {
+        for w in &refresh_warnings {
+            eprintln!("warning: {w}");
+        }
+    }
 
-    let fmt = args.format.resolve()?;
     crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
 
     Ok(if overall_failing > 0 {
@@ -136,25 +157,55 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     })
 }
 
-fn collect_live_running(
+/// F8 (v0.1.3): per-namespace runtime snapshot collection through the
+/// cache orchestrator. Returns
+///   (snapshots-by-ns, per-ns SourceInfo entries, refresh warnings)
+/// — the same shape `status` and `health` use. Cold cache + failed
+/// refresh becomes a `Stale` source entry with no snapshot for that
+/// namespace; downstream `node_status` then falls back to the
+/// inventory tier's `health_status`.
+fn collect_runtime(
     runner: &dyn RemoteRunner,
     nses: &[NsCtx],
-) -> HashMap<String, HashSet<String>> {
-    let mut out = HashMap::new();
+    refresh: bool,
+) -> (HashMap<String, RuntimeSnapshot>, Vec<SourceInfo>, Vec<String>) {
+    use crate::profile::runtime::{inventory_age, SourceMode};
+    let opts = GetOpts {
+        force_refresh: refresh,
+    };
+    let mut by_ns = HashMap::new();
+    let mut sources = Vec::new();
+    let mut warnings = Vec::new();
     for ns in nses {
-        if let Ok(o) = runner.run(
-            &ns.namespace,
-            &ns.target,
-            "docker ps --format '{{.Names}}'",
-            RunOpts::with_timeout(15),
-        ) {
-            if o.ok() {
-                let set: HashSet<String> = o.stdout.lines().map(|s| s.to_string()).collect();
-                out.insert(ns.namespace.clone(), set);
+        match get_runtime(runner, ns, opts) {
+            Ok((snap, info)) => {
+                if info.stale {
+                    if let Some(reason) = &info.reason {
+                        warnings.push(format!(
+                            "{}: serving cached data — {}",
+                            ns.namespace, reason
+                        ));
+                    }
+                }
+                by_ns.insert(ns.namespace.clone(), snap);
+                sources.push(info);
+            }
+            Err(_) => {
+                sources.push(SourceInfo {
+                    mode: SourceMode::Stale,
+                    runtime_age_s: None,
+                    inventory_age_s: inventory_age(&ns.namespace).map(|d| d.as_secs()),
+                    stale: true,
+                    reason: Some(format!("{}: runtime refresh failed (no cache)", ns.namespace)),
+                });
+                warnings.push(format!(
+                    "{}: runtime refresh failed and no cache present",
+                    ns.namespace
+                ));
             }
         }
     }
-    out
+    (by_ns, sources, warnings)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,17 +229,31 @@ impl NodeStatus {
     }
 }
 
-fn node_status(profile: &Profile, live: Option<&HashSet<String>>, name: &str) -> NodeStatus {
+/// F8: prefer the runtime snapshot for both running-state and health.
+/// Falls back to the inventory tier's `health_status` only when the
+/// snapshot lacks a row for the container — the bug pattern from the
+/// 3rd field user (where post-restart `health_status` was stuck on
+/// the pre-restart value) is *exactly* what this fixes.
+fn node_status(profile: &Profile, runtime: Option<&RuntimeSnapshot>, name: &str) -> NodeStatus {
     let svc: Option<&Service> = profile.services.iter().find(|s| s.name == name);
     let svc = match svc {
         Some(s) => s,
         None => return NodeStatus::Missing,
     };
-    if let Some(set) = live {
-        if !set.contains(&svc.name) {
+    let rt = runtime.and_then(|s| s.lookup(&svc.container_name));
+    if let Some(r) = rt {
+        if !r.running {
             return NodeStatus::Down;
         }
+        return match r.health_status.or(svc.health_status) {
+            Some(HealthStatus::Ok) => NodeStatus::Ok,
+            Some(HealthStatus::Unhealthy) => NodeStatus::Unhealthy,
+            Some(HealthStatus::Starting) => NodeStatus::Unknown,
+            Some(HealthStatus::Unknown) | None => NodeStatus::Unknown,
+        };
     }
+    // No runtime row for this container — degraded mode. Fall back
+    // to inventory tier and treat it as unknown if missing.
     match svc.health_status {
         Some(HealthStatus::Ok) => NodeStatus::Ok,
         Some(HealthStatus::Unhealthy) => NodeStatus::Unhealthy,

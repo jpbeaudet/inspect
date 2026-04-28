@@ -12,6 +12,44 @@ feedback from four independent v0.1.2 users plus a multi-hour
 destructive migration session by the primary operator. Implementation
 is in progress; this section grows as items land.
 
+### Added
+
+- **F8 — Cache freshness, runtime-tier cache, `SOURCE:` provenance,
+  `inspect cache` verb.** Three field reports converged on the same
+  failure mode: `inspect status` happily served pre-mutation data
+  for an unbounded window, with no way to ask for fresh data and no
+  way to even tell the data was cached. v0.1.3 introduces a tiered
+  cache:
+  - **inventory tier** (existing): `~/.inspect/profiles/<ns>.yaml`,
+    refreshed by `inspect setup`.
+  - **runtime tier** (new): `~/.inspect/cache/<ns>/runtime.json`,
+    populated by every read verb on a cache miss. Default TTL 10s
+    via `INSPECT_RUNTIME_TTL_SECS` (`0` disables the cache, `never`
+    sets infinite TTL).
+  Every read verb (`status`, `health`, `why`) now:
+  - prints a leading `SOURCE: <live|cached|stale> Ns ago …` line in
+    human/table/markdown output (omitted for machine formats so
+    JSON/CSV/TSV grammar stays clean);
+  - carries a stable `meta.source` field on its JSON envelope with
+    `mode`, `runtime_age_s`, `inventory_age_s`, `stale`, `reason`;
+  - accepts `--refresh` (alias `--live`) to force a live fetch;
+  - serves cached data with `mode=stale` and a stderr warning when
+    a refresh fails on top of an existing cache, plus a
+    `inspect connectivity <ns>` chained hint.
+  Mutation verbs (`restart`, `stop`, `start`, `reload`, and
+  `bundle apply`) automatically invalidate the runtime cache for
+  every namespace they touched, so the next read is guaranteed
+  live. `inspect cache show` lists every cached namespace with
+  runtime age, inventory age, staleness, refresh count, and
+  on-disk size; `inspect cache clear [<ns> | --all]` deletes
+  cached snapshots and writes an audit entry per cleared
+  namespace. Concurrent refreshers are serialized via a per-
+  namespace `flock(2)` advisory lock so two parallel `status`
+  calls don't double-fetch. Hot-path correctness is pinned by
+  reproducer tests in `tests/phase_f_v013.rs` (cache hit issues
+  zero remote commands; refresh count is monotonic; post-mutation
+  reads are live; bundle apply invalidates).
+
 ### Fixed
 
 - **F1 — `inspect status <ns>` returns 0 services on healthy hosts

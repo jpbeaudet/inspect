@@ -415,6 +415,34 @@ EXAMPLES
   $ inspect audit show <id>
   $ inspect audit grep \"atlas\"";
 
+const LONG_CACHE: &str = "\
+Inspect or invalidate the local runtime cache.
+
+inspect maintains a two-tier cache for read verbs (status, health, why):
+
+  inventory tier  ~/.inspect/profiles/<ns>.yaml      (the discovered service
+                                                      list, refreshed by
+                                                      `inspect setup`)
+  runtime tier    ~/.inspect/cache/<ns>/runtime.json (per-container
+                                                      running/health/restart
+                                                      counts; default TTL 10s)
+
+The runtime tier is what makes `inspect status` fast. It's invalidated
+automatically by every successful mutation verb (restart, stop, start,
+reload). Lifetime is controlled by INSPECT_RUNTIME_TTL_SECS (default \
+10s; '0' disables; 'never' = infinite).
+
+Subcommands:
+  show   Print one row per cached namespace with runtime/inventory
+         age, staleness, and on-disk size.
+  clear  Delete cached runtime snapshot(s). With no namespace,
+         clears every cached namespace.
+
+EXAMPLES
+  $ inspect cache show
+  $ inspect cache clear arte
+  $ inspect cache clear --all";
+
 const LONG_REVERT: &str = "\
 Revert a previous mutation by audit id. Dry-run by default (shows the \
 reverse diff); `--apply` restores the original content. Refuses if the \
@@ -637,6 +665,11 @@ pub enum Command {
     /// Revert a previous mutation by audit id.
     #[command(long_about = LONG_REVERT)]
     Revert(RevertArgs),
+
+    // ---- v0.1.3 F8 cache management ------------------------------------------
+    /// Inspect or invalidate the runtime cache.
+    #[command(long_about = LONG_CACHE)]
+    Cache(CacheArgs),
 
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
@@ -871,6 +904,11 @@ EXAMPLES\n  \
 pub struct WhyArgs {
     /// Selector resolving to one or more services to diagnose.
     pub selector: String,
+    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// before walking the dependency graph. Removes the post-restart
+    /// "reads as still unhealthy" symptom. `--live` is an alias.
+    #[arg(long, alias = "live")]
+    pub refresh: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1193,6 +1231,11 @@ EXAMPLES\n  \
 pub struct StatusArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
+    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// before answering. Use after a mutation to confirm the change
+    /// took effect. `--live` is an alias.
+    #[arg(long, alias = "live")]
+    pub refresh: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1209,6 +1252,11 @@ EXAMPLES\n  \
 )]
 pub struct HealthArgs {
     pub selector: String,
+    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// before probing. Use after a mutation to confirm health
+    /// recovered. `--live` is an alias.
+    #[arg(long, alias = "live")]
+    pub refresh: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1905,6 +1953,43 @@ pub struct AuditGrepArgs {
 
 #[derive(Debug, Args)]
 pub struct AuditVerifyArgs {
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+// ---- F8 cache management ----------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_CACHE,
+)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub command: CacheCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// List cached namespaces with their runtime/inventory ages.
+    Show(CacheShowArgs),
+    /// Delete cached runtime snapshot(s).
+    Clear(CacheClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheShowArgs {
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct CacheClearArgs {
+    /// Namespace whose runtime snapshot to delete. Mutually exclusive
+    /// with `--all`.
+    pub namespace: Option<String>,
+    /// Clear every cached namespace.
+    #[arg(long)]
+    pub all: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

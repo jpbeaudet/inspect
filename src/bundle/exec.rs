@@ -329,6 +329,30 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
         }
     }
 
+    // F8: invalidate the runtime cache for every namespace any
+    // completed step touched. Bundles can run arbitrary `exec` /
+    // `run` bodies — we can't reliably classify them as mutating
+    // vs read-only at parse time, so we conservatively invalidate.
+    // Worst case: one extra `docker ps` on the next read verb.
+    // Best case: no operator ever sees stale data after a bundle
+    // run (the F8 invariant must hold for `bundle apply` too, not
+    // just for the `restart` lifecycle verb).
+    let mut bundle_touched: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for &i in &completed {
+        let s = &bundle.steps[i];
+        if let Some(t) = s.target.as_deref().or(bundle.host.as_deref()) {
+            // Strip any `/service` suffix; cache is keyed by namespace.
+            let ns = t.split('/').next().unwrap_or(t).to_string();
+            if !ns.is_empty() && !ns.starts_with('@') && !ns.contains('*') {
+                bundle_touched.insert(ns);
+            }
+        }
+    }
+    for ns in &bundle_touched {
+        crate::verbs::cache::invalidate(ns);
+    }
+
     let dur = started.elapsed().as_secs();
     eprintln!(
         "[inspect] bundle `{name}` id={id} complete in {dur}s — {n} step(s) ok{post}",

@@ -120,6 +120,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Watch(args) => verbs::watch::run(args),
         Command::Audit(args) => commands::audit::run(args),
         Command::Revert(args) => commands::revert::run(args),
+        Command::Cache(args) => commands::cache::run(args),
         Command::Why(args) => commands::why::run(args),
         Command::Connectivity(args) => commands::connectivity::run(args),
         Command::Recipe(args) => commands::recipe::run(args),
