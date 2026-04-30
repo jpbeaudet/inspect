@@ -14,6 +14,61 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F12 — Per-namespace remote env overlay (field feedback: the
+  primary operator repeatedly hit
+  `bash: cargo: command not found` /
+  `LANG: cannot set locale` after `inspect connect arte` because
+  the SSH non-login shell PATH on the target jumped over
+  `~/.cargo/bin` and locale was unset, forcing a per-session
+  `export PATH=…` ritual before every `inspect run`).** Each
+  namespace can now persist a small environment overlay that is
+  prefixed onto every remote command issued by `inspect run` and
+  `inspect exec` for that namespace.
+  - **Config.** New optional `[servers.<ns>.env]` table in
+    `~/.inspect/servers.toml` (string→string map). Keys are
+    POSIX-validated (`[A-Za-z_][A-Za-z0-9_]*`); invalid keys
+    fail the dispatch boundary in `verbs/runtime::resolve_target`
+    so every verb path catches them, not just `connect`.
+  - **Dispatch.** `NsCtx` now carries an `env_overlay: BTreeMap`
+    populated from `resolved.config.env`. The overlay is rendered
+    deterministically as
+    `env KEY1="VAL1" KEY2="VAL2" -- <cmd>` and prepended to the
+    remote command before quoting/transport. Values are
+    double-quoted so `$VAR` still expands on the remote, but
+    `;`/`&`/`|` stay literal; `"`, `\`, and backtick are
+    escaped.
+  - **Per-call overrides.** `inspect run` and `inspect exec` gain
+    `--env KEY=VAL` (repeatable; user wins on collision),
+    `--env-clear` (drop the namespace overlay for this call only),
+    and `--debug` (prints the rendered command to stderr before
+    transport — useful when you don't yet trust the overlay).
+  - **`inspect connect` overlay management.**
+    - `--show` — print the current overlay (`PATH:` line +
+      `ENV:` block; exits 0 when none).
+    - `--set-path <p>` — pin remote PATH for this namespace.
+    - `--set-env KEY=VAL` (repeatable) and
+      `--unset-env KEY` (repeatable) — atomic 0600 round-trip
+      through `write_atomic_0600`. The `[env]` table is dropped
+      from the TOML when the last entry is removed, so the file
+      stays tidy.
+    - `--detect-path` — opens an SSH probe, compares login vs
+      non-login PATH, and offers to pin the login PATH when it
+      adds entries the non-login shell is missing. Prompts on a
+      tty; auto-declines (with a one-line note) when stdin is not
+      a tty so CI runs are deterministic.
+  - **Audit.** `AuditEntry` gains `env_overlay` and `rendered_cmd`
+    so the JSONL log captures exactly what shipped to the remote.
+  - **Tests.** 18 acceptance tests in `phase_f_v013.rs` cover:
+    overlay applied to `run` and `exec`, audit fields recorded,
+    `--env-clear` clears, `--env` user-wins-collision merge,
+    no-overlay path stays clean (no `env --` prefix), `--debug`
+    stderr, semicolon stays literal in values, invalid keys
+    rejected at config and CLI boundaries, `connect --show`
+    output, `--set-path` idempotency, `--set-env`/`--unset-env`
+    round-trip, last-entry drops the `[env]` table, invalid
+    `KEY=VAL` rejected, unknown namespace rejected,
+    `--show`/`--set-env` mutual exclusion at clap.
+
 - **F10 — 4th-user polish bundle (seven first-hour friction points
   surfaced by a fresh operator on a partly-discovered namespace).
   All seven sub-items shipped.**

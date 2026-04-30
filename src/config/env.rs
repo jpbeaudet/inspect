@@ -45,6 +45,11 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         key_path,
         key_passphrase_env,
         key_inline,
+        // F12 (v0.1.3): env-overlay overrides via env vars are out of
+        // scope for v0.1.3 (would conflict with the existing
+        // `INSPECT_<NS>_*` suffix-matching scheme used by
+        // `enumerate_env_namespaces`). The overlay is config-file only.
+        env: None,
     })
 }
 

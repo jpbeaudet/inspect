@@ -943,6 +943,48 @@ If something looks wrong:
 For the full reference: `inspect help ssh` (and `inspect help ssh
 --verbose` for the deep details on `ControlMaster`).
 
+### 15.1 Per-namespace remote env overlay (v0.1.3)
+
+The non-login SSH shell that `inspect run` / `inspect exec` lands
+in often has a leaner `PATH` and no `LANG` than your interactive
+`inspect connect` shell. That's why a clean target where
+`cargo build` works after `connect` will turn around and fail with
+`bash: cargo: command not found` from a `run` two minutes later.
+
+`inspect` lets each namespace persist a small environment overlay
+that is prefixed onto every remote `run`/`exec` for that namespace.
+Values are double-quoted, so `$VAR` still expands on the remote,
+but `;`/`&`/`|` stay literal — the overlay can't smuggle a second
+command past the safety contract.
+
+```sh
+# See the current overlay
+inspect connect arte --show
+
+# Pin the right PATH (interactive walk: probes login vs non-login PATH
+# and offers to write the union when the login PATH adds entries)
+inspect connect arte --detect-path
+
+# Or set values directly (atomic 0600 round-trip on ~/.inspect/servers.toml)
+inspect connect arte --set-path '$HOME/.cargo/bin:$HOME/.local/bin:$PATH'
+inspect connect arte --set-env LANG=C.UTF-8 --set-env RUST_BACKTRACE=1
+
+# Drop a single key
+inspect connect arte --unset-env RUST_BACKTRACE
+```
+
+Per-call overrides on `inspect run` and `inspect exec`:
+
+| Flag | Effect |
+|---|---|
+| `--env KEY=VAL` (repeatable) | merge onto the namespace overlay (user wins on collision) |
+| `--env-clear` | drop the namespace overlay for *this* call only |
+| `--debug` | print the rendered remote command to stderr before transport |
+
+The overlay is recorded in the audit log alongside the rendered
+command, so `inspect why --revert` (and any forensic walk back over
+`~/.inspect/audit/`) sees exactly what shipped.
+
 ---
 
 ## 16. Configuration reference

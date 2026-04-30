@@ -14,6 +14,7 @@
 
 pub mod cancel;
 pub mod engine;
+pub mod env_overlay;
 pub mod field_filter;
 pub mod format;
 pub mod map_stage;

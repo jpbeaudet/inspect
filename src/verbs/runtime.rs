@@ -203,6 +203,11 @@ pub fn current_runner() -> Box<dyn RemoteRunner> {
 pub fn resolve_target(namespace: &str) -> Result<(ResolvedNamespace, SshTarget)> {
     use crate::config::resolver as ns_resolver;
     let ns = ns_resolver::resolve(namespace)?;
+    // F12 (v0.1.3): the resolver itself does not validate (so callers
+    // can introspect partial configs); every dispatch site DOES need
+    // validation, including the new env-overlay key check, so do it
+    // here at the single boundary every verb crosses.
+    ns.config.validate(&ns.name)?;
     let target = SshTarget::from_resolved(&ns)?;
     Ok((ns, target))
 }

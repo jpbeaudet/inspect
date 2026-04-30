@@ -48,6 +48,7 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
     };
 
     let cfg = NamespaceConfig {
+        env: None,
         host: Some(host),
         user: Some(user),
         port,

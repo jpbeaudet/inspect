@@ -64,6 +64,12 @@ pub enum ConfigError {
     #[error("conflicting key sources: only one of key_path or key_inline may be set")]
     ConflictingKeySources,
 
+    #[error(
+        "invalid env-overlay key '{key}' for namespace '{namespace}': must match \
+         [A-Za-z_][A-Za-z0-9_]* (POSIX shell variable name)"
+    )]
+    InvalidEnvKey { namespace: String, key: String },
+
     #[error("config IO error at '{path}': {source}")]
     Io {
         path: String,

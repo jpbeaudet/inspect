@@ -257,6 +257,42 @@ containers, scaling region, cap, override).
 
 ---
 
+## 9. Per-namespace remote env overlay (v0.1.3, F12)
+
+**The rule:** the per-namespace env overlay is rendered and prepended
+at the verb boundary (`run`, `exec`), not inside the SSH executor.
+Any new write verb that calls `dispatch::plan` and inherits an
+`NsCtx` already has the overlay populated; to honor it, the verb
+must:
+
+1. Optionally accept `--env KEY=VAL` / `--env-clear` / `--debug` and
+   parse user-side env via `exec::env_overlay::parse_kv` *before* the
+   per-step loop. Validation failure must abort the whole batch.
+2. Per step, compute the effective overlay with
+   `exec::env_overlay::merge(&ns.env_overlay, &user_env, env_clear)`
+   and call `exec::env_overlay::apply_to_cmd(&cmd, &effective)` to
+   produce the rendered command before quoting/transport.
+3. Record `env_overlay` (the effective map) and `rendered_cmd` on the
+   `AuditEntry` so revert and forensics see exactly what shipped.
+4. When `--debug` is set, print the rendered command to stderr
+   *before* sending it. The format is stable
+   (`debug: rendered: <cmd>`) and is the supported way for operators
+   to verify what they're about to ship.
+
+**Quoting.** Values are double-quoted. `$VAR` still expands on the
+remote (so `PATH="$HOME/.cargo/bin:$PATH"` works as written), but
+`;`/`&`/`|` stay literal — the overlay can't smuggle a second
+command past the safety contract. `"`, `\`, and backtick inside
+values are escaped.
+
+**Validation boundary.** POSIX env-key validation
+(`[A-Za-z_][A-Za-z0-9_]*`) lives in `NamespaceConfig::validate` and
+is invoked from `verbs/runtime::resolve_target`, so every dispatch
+path catches an invalid key — not just the writers that read the
+overlay. New verbs do not need to re-validate.
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline. Any deviation between this

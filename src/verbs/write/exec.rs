@@ -87,6 +87,17 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
 
+    // F12 (v0.1.3): per-invocation env-overlay overrides. Validate
+    // once before the per-step loop so a typo in `--env` short-
+    // circuits the whole exec invocation.
+    let user_env: Vec<(String, String)> = {
+        let mut out = Vec::with_capacity(args.env.len());
+        for raw in &args.env {
+            out.push(crate::exec::env_overlay::parse_kv(raw)?);
+        }
+        out
+    };
+
     // B7: heartbeat configuration. 0 = disabled.
     let heartbeat_secs: u64 = if args.no_heartbeat {
         0
@@ -105,6 +116,18 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             }
             None => user_cmd.clone(),
         };
+        // F12 (v0.1.3): apply per-namespace env overlay (merged with
+        // `--env` overrides). Empty overlay → cmd unchanged.
+        let effective_overlay = crate::exec::env_overlay::merge(
+            Some(&s.ns.env_overlay),
+            &user_env,
+            args.env_clear,
+        );
+        let cmd =
+            crate::exec::env_overlay::apply_to_cmd(&cmd, &effective_overlay).into_owned();
+        if args.debug {
+            eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
+        }
         let started = Instant::now();
         let label = format!(
             "{}{}",
@@ -204,6 +227,10 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         )));
         e.no_revert_acknowledged = true;
         e.applied = Some(out.ok());
+        if !effective_overlay.is_empty() {
+            e.env_overlay = Some(effective_overlay.clone());
+        }
+        e.rendered_cmd = Some(cmd.clone());
         if args.revert_preview {
             eprintln!(
                 "[inspect] revert preview {label}: unsupported -- {}",

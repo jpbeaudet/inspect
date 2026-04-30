@@ -1,5 +1,7 @@
 //! Namespace data model.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
@@ -23,11 +25,39 @@ pub struct NamespaceConfig {
     /// `show --json` purposes — never written to `servers.toml`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_inline: Option<String>,
+    /// F12 (v0.1.3): per-namespace remote environment overlay. Applied
+    /// transparently to every `inspect run` / `inspect exec` invocation
+    /// against this namespace as `env KEY1="VAL1" KEY2="VAL2" -- <cmd>`.
+    /// Values are passed through the remote shell with double-quoting,
+    /// so `$HOME`/`$PATH` references on the right-hand side expand on
+    /// the remote (intentional: the operator wants the remote user's
+    /// home, not the local one). Shell metacharacters (`;`, `&`, `|`,
+    /// backticks) are preserved as literal text inside the quoted value.
+    /// `None` (the default) means no overlay is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 impl NamespaceConfig {
     /// Merge `other` over `self`: any field set in `other` takes precedence.
     pub fn merge_over(&self, other: &NamespaceConfig) -> NamespaceConfig {
+        // F12 (v0.1.3): env overlay merge semantics. When both file
+        // and env override carry a map, `other`'s keys win on
+        // collision but file-only keys survive. This matches the
+        // resolver's general "env over file" idiom (env is a
+        // partial overlay, not a replacement).
+        let env = match (self.env.as_ref(), other.env.as_ref()) {
+            (None, None) => None,
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (Some(a), Some(b)) => {
+                let mut merged = a.clone();
+                for (k, v) in b {
+                    merged.insert(k.clone(), v.clone());
+                }
+                Some(merged)
+            }
+        };
         NamespaceConfig {
             host: other.host.clone().or_else(|| self.host.clone()),
             user: other.user.clone().or_else(|| self.user.clone()),
@@ -38,6 +68,7 @@ impl NamespaceConfig {
                 .clone()
                 .or_else(|| self.key_passphrase_env.clone()),
             key_inline: other.key_inline.clone().or_else(|| self.key_inline.clone()),
+            env,
         }
     }
 
@@ -59,8 +90,38 @@ impl NamespaceConfig {
         if self.key_path.is_some() && self.key_inline.is_some() {
             return Err(ConfigError::ConflictingKeySources);
         }
+        // F12 (v0.1.3): every env-overlay key must be a POSIX-portable
+        // identifier ([A-Za-z_][A-Za-z0-9_]*). Reject anything else
+        // here so a typo'd config does not silently produce a remote
+        // command line that the shell parses as something else
+        // (`KEY-NAME=val` would split on `-` in some shells, or be
+        // taken as a flag to `env`).
+        if let Some(map) = self.env.as_ref() {
+            for k in map.keys() {
+                if !is_valid_env_key(k) {
+                    return Err(ConfigError::InvalidEnvKey {
+                        namespace: namespace.to_string(),
+                        key: k.clone(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// F12 (v0.1.3): `[A-Za-z_][A-Za-z0-9_]*`, max 256 chars. Mirrors
+/// POSIX 3.231 (Name) which `sh`, `env`, and `printenv` all enforce.
+pub fn is_valid_env_key(s: &str) -> bool {
+    if s.is_empty() || s.len() > 256 {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Where a namespace was sourced from after merging.
@@ -107,6 +168,7 @@ mod tests {
             key_path: None,
             key_passphrase_env: None,
             key_inline: None,
+            env: None,
         }
     }
 

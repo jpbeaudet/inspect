@@ -11,9 +11,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{audit_dir, ensure_home, set_dir_mode_0700, set_file_mode_0600};
-
-#[cfg(unix)]
+use crate::paths::{audit_dir, ensure_home, set_dir_mode_0700, set_file_mode_0600};#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +96,22 @@ pub struct AuditEntry {
     /// original entry so audit readers can see the relationship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_revert_of: Option<String>,
+    /// F12 (v0.1.3): per-namespace remote env overlay applied to this
+    /// invocation, merged with any per-invocation `--env` flags. `None`
+    /// (or absent) means no overlay was applied. The map is recorded
+    /// structurally so `inspect audit show <id>` can render it without
+    /// re-parsing the rendered command line; legacy entries (pre-F12)
+    /// elide the field via `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_overlay: Option<std::collections::BTreeMap<String, String>>,
+    /// F12 (v0.1.3): the final remote command line that was dispatched
+    /// (including the `env KEY="VAL" ... -- ` overlay prefix when one
+    /// was applied, and any `docker exec <ctr> sh -c ...` wrapping).
+    /// Recorded for byte-for-byte replay by `inspect revert` /
+    /// future audit-driven re-run tooling. Distinct from `args`,
+    /// which records the operator-typed intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_cmd: Option<String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -220,6 +234,8 @@ impl AuditEntry {
             applied: None,
             no_revert_acknowledged: false,
             auto_revert_of: None,
+            env_overlay: None,
+            rendered_cmd: None,
         }
     }
 }

@@ -797,7 +797,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
     }
     let runner = current_runner();
     for ns in &ns_atoms {
-        let Ok((_, target)) = resolve_target(ns) else {
+        let Ok((resolved, target)) = resolve_target(ns) else {
             continue;
         };
         let profile = load_profile(ns).ok().flatten();
@@ -805,6 +805,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
             namespace: (*ns).to_string(),
             target,
             profile,
+            env_overlay: resolved.config.env.clone().unwrap_or_default(),
         };
         let Ok((snapshot, _)) = get_runtime(runner.as_ref(), &ctx, GetOpts::default()) else {
             continue;

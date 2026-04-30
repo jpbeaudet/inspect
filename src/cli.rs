@@ -1071,6 +1071,33 @@ pub struct ConnectArgs {
     /// Disable interactive prompts entirely (CI mode).
     #[arg(long)]
     pub non_interactive: bool,
+    /// F12 (v0.1.3): print the namespace's configured env overlay
+    /// (the `[namespaces.<ns>.env]` block in `~/.inspect/servers.toml`)
+    /// and exit without opening a session. Mutually exclusive with the
+    /// other env-mutation flags.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_env", "unset_env", "set_path", "detect_path"],
+    )]
+    pub show: bool,
+    /// F12 (v0.1.3): set `PATH` for this namespace (shorthand for
+    /// `--set-env PATH=<value>`). Persists immediately.
+    #[arg(long, value_name = "PATH")]
+    pub set_path: Option<String>,
+    /// F12 (v0.1.3): set an env-overlay entry for this namespace
+    /// (repeatable, `--set-env KEY=VALUE`). Persists immediately.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub set_env: Vec<String>,
+    /// F12 (v0.1.3): remove an env-overlay entry for this namespace
+    /// (repeatable, `--unset-env KEY`). Persists immediately.
+    #[arg(long, value_name = "KEY")]
+    pub unset_env: Vec<String>,
+    /// F12 (v0.1.3): probe the remote login PATH and, if it differs
+    /// from the non-login PATH, prompt to pin the diff into the env
+    /// overlay. Non-tty invocation auto-declines (never writes config
+    /// without confirmation).
+    #[arg(long)]
+    pub detect_path: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1663,6 +1690,20 @@ pub struct ExecArgs {
     /// For exec, this is always `revert.kind = unsupported`.
     #[arg(long)]
     pub revert_preview: bool,
+    /// F12 (v0.1.3): per-invocation env-overlay entry, repeatable.
+    /// Merges on top of the namespace overlay (operator wins on
+    /// collision).
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+    /// F12 (v0.1.3): drop the namespace's env overlay for this
+    /// invocation only.
+    #[arg(long)]
+    pub env_clear: bool,
+    /// F12 (v0.1.3): print the rendered remote command line (including
+    /// the `env KEY="VAL" -- ` overlay prefix and any `docker exec`
+    /// wrapping) to stderr before dispatch.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1734,6 +1775,24 @@ pub struct RunArgs {
     /// so `--clean-output --tty` is a clap-level rejection.
     #[arg(long = "tty")]
     pub tty: bool,
+    /// F12 (v0.1.3): per-invocation env-overlay entry, repeatable.
+    /// Merges on top of the namespace overlay (operator wins on
+    /// collision). With `--env-clear`, replaces the namespace overlay
+    /// entirely.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+    /// F12 (v0.1.3): drop the namespace's env overlay for this
+    /// invocation only. Composes with `--env`: pass `--env-clear --env
+    /// LANG=C` to dispatch with only `LANG=C`. The audit entry still
+    /// records what the namespace overlay would have been.
+    #[arg(long)]
+    pub env_clear: bool,
+    /// F12 (v0.1.3): print the rendered remote command line (including
+    /// the `env KEY="VAL" -- ` overlay prefix and any container
+    /// wrapping) to stderr before dispatch. Use to confirm what
+    /// actually crosses the SSH channel.
+    #[arg(long)]
+    pub debug: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

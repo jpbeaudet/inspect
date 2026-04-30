@@ -5,7 +5,7 @@
 //! namespace are surfaced through [`StepError`] but do not abort the
 //! caller's loop unless it chooses to.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use thiserror::Error;
@@ -32,6 +32,16 @@ pub struct NsCtx {
     pub namespace: String,
     pub target: SshTarget,
     pub profile: Option<Profile>,
+    /// F12 (v0.1.3): per-namespace remote env overlay, sourced from
+    /// `[namespaces.<ns>.env]` in `~/.inspect/servers.toml` (merged
+    /// with any env-var overrides). Empty when no overlay is
+    /// configured. Verbs that dispatch operator-supplied free-form
+    /// commands (`run`, `exec`) consult this map and prepend an
+    /// `env KEY="VAL" ... -- ` to the remote command line via
+    /// [`crate::exec::env_overlay::apply_to_cmd`]. Read verbs
+    /// (`logs`, `ps`, `status`, etc.) issue inspect-internal
+    /// commands and ignore this field — see F12 spec scope.
+    pub env_overlay: BTreeMap<String, String>,
 }
 
 /// A flat resolution: namespace context + a single target inside it.
@@ -93,7 +103,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
         if nses.contains_key(&t.namespace) {
             continue;
         }
-        let (_, target) = resolve_target(&t.namespace).map_err(StepError::Other)?;
+        let (resolved, target) = resolve_target(&t.namespace).map_err(StepError::Other)?;
         let profile = load_profile(&t.namespace).map_err(StepError::Other)?;
         nses.insert(
             t.namespace.clone(),
@@ -101,6 +111,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                 namespace: t.namespace.clone(),
                 target,
                 profile,
+                env_overlay: resolved.config.env.clone().unwrap_or_default(),
             },
         );
     }
@@ -117,7 +128,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                 if nses.contains_key(&ns) {
                     continue;
                 }
-                let (_, target) = resolve_target(&ns).map_err(StepError::Other)?;
+                let (resolved, target) = resolve_target(&ns).map_err(StepError::Other)?;
                 let profile = load_profile(&ns).map_err(StepError::Other)?;
                 nses.insert(
                     ns.clone(),
@@ -125,6 +136,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                         namespace: ns,
                         target,
                         profile,
+                        env_overlay: resolved.config.env.clone().unwrap_or_default(),
                     },
                 );
             }

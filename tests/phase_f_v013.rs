@@ -2359,3 +2359,403 @@ fn f10_run_clean_output_and_tty_mutually_exclusive() {
         .assert()
         .failure();
 }
+
+// =============================================================================
+// F12 — Per-namespace remote environment overlay.
+//
+// Spec: `[namespaces.<ns>.env]` in servers.toml carries a string-string map
+// that is prepended to every `inspect run` / `inspect exec` invocation as
+// `env KEY="VAL" ... -- <cmd>`. Composes with `--env KEY=VALUE` (per-
+// invocation merge) and `--env-clear` (per-invocation drop). `inspect connect
+// <ns> --show|--set-path|--set-env|--unset-env` manages the overlay without
+// opening a session.
+// =============================================================================
+
+fn write_servers_toml_with_env(home: &std::path::Path, ns: &str, env_kvs: &[(&str, &str)]) {
+    let mut body = format!(
+        "schema_version = 1\n\n[namespaces.{ns}]\nhost = \"{ns}.example.invalid\"\nuser = \"deploy\"\nport = 22\n",
+    );
+    if !env_kvs.is_empty() {
+        body.push_str(&format!("\n[namespaces.{ns}.env]\n"));
+        for (k, v) in env_kvs {
+            // TOML basic string: escape backslash and quote, leave $ alone
+            // so the test cases that need `$PATH` can write it literally.
+            let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+            body.push_str(&format!("{k} = \"{escaped}\"\n"));
+        }
+    }
+    let path = home.join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn read_servers_toml(home: &std::path::Path) -> String {
+    std::fs::read_to_string(home.join("servers.toml")).unwrap()
+}
+
+fn read_audit_entries(home: &std::path::Path, verb: &str) -> Vec<serde_json::Value> {
+    let dir = home.join("audit");
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&p).unwrap().lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("verb").and_then(|s| s.as_str()) == Some(verb) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+fn f12_run_mock() -> serde_json::Value {
+    // Mock matches against the rendered cmd, which under F12 looks like
+    // `env PATH="/extra/bin:$PATH" -- echo hi`. We match on the env
+    // prefix substring so the test fails cleanly if F12 stops emitting
+    // the prefix; the no-overlay sentinel (`echo hi`) lives second so
+    // the env-prefixed match wins by file order.
+    json!([
+        { "match": "env PATH=\"/extra/bin:$PATH\" --", "stdout": "WITH_OVERLAY\n", "exit": 0 },
+        { "match": "env LANG=\"C.UTF-8\" --", "stdout": "WITH_LANG_ONLY\n", "exit": 0 },
+        { "match": "env MALICIOUS=", "stdout": "MALICIOUS_LITERAL\n", "exit": 0 },
+        { "match": "echo hi", "stdout": "PLAIN_ECHO\n", "exit": 0 },
+        // F12 audit: cat for exec dispatches with mock-aware echo so the
+        // exec call site can capture stdout deterministically.
+        { "match": "cat", "stdout": "exec-out\n", "exit": 0 }
+    ])
+}
+
+#[test]
+fn f12_env_overlay_applied_to_run() {
+    // Overlay configured at file-level → rendered remote cmd carries
+    // the `env PATH="/extra/bin:$PATH" -- ` prefix. Asserted via the
+    // mock entry that only matches when the prefix is present.
+    let sb = Sandbox::new(f12_run_mock());
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
+    sb.cmd()
+        .args(["run", "arte", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("WITH_OVERLAY"));
+}
+
+#[test]
+fn f12_env_overlay_applied_to_exec_with_audit_record() {
+    // Exec with overlay records `env_overlay` map and `rendered_cmd`
+    // string in the audit entry, so post-hoc readers can replay.
+    let sb = Sandbox::new(f12_run_mock());
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args([
+            "exec",
+            "arte/atlas",
+            "--apply",
+            "--no-revert",
+            "--yes",
+            "--",
+            "cat",
+        ])
+        .assert()
+        .success();
+    let entries = read_audit_entries(sb.home(), "exec");
+    assert_eq!(entries.len(), 1, "expected one exec audit entry");
+    let e = &entries[0];
+    let overlay = e
+        .get("env_overlay")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| panic!("env_overlay missing on exec entry: {e}"));
+    assert_eq!(
+        overlay.get("PATH").and_then(|v| v.as_str()),
+        Some("/extra/bin:$PATH"),
+    );
+    let rendered = e
+        .get("rendered_cmd")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("rendered_cmd missing on exec entry: {e}"));
+    assert!(
+        rendered.starts_with("env PATH=\"/extra/bin:$PATH\" -- "),
+        "rendered_cmd should start with overlay prefix, got: {rendered}",
+    );
+}
+
+#[test]
+fn f12_env_clear_drops_namespace_overlay_for_one_invocation() {
+    // `--env-clear` alone → cmd dispatches with no `env ... --`
+    // prefix even though the namespace has an overlay. Followed by
+    // `--env-clear --env LANG=C.UTF-8` → only the user entry survives.
+    let sb = Sandbox::new(f12_run_mock());
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
+    sb.cmd()
+        .args(["run", "arte", "--env-clear", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("PLAIN_ECHO"));
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--env-clear",
+            "--env",
+            "LANG=C.UTF-8",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("WITH_LANG_ONLY"));
+}
+
+#[test]
+fn f12_env_flag_without_clear_merges_on_top_of_namespace_overlay() {
+    // With `[namespaces.arte.env].PATH = ...` configured AND
+    // `--env LANG=C.UTF-8`, both keys reach the rendered cmd.
+    let sb = Sandbox::new(json!([
+        // Tighter match: BOTH the namespace and the user entry must
+        // appear in the prefix for this matcher to fire.
+        { "match": "env LANG=\"C.UTF-8\" PATH=\"/extra/bin:$PATH\" --", "stdout": "BOTH\n", "exit": 0 }
+    ]));
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
+    sb.cmd()
+        .args(["run", "arte", "--env", "LANG=C.UTF-8", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("BOTH"));
+}
+
+#[test]
+fn f12_env_user_wins_collision_with_namespace_overlay() {
+    // `--env PATH=/user/bin` overrides the namespace's `PATH=/ns/bin`.
+    let sb = Sandbox::new(json!([
+        { "match": "env PATH=\"/user/bin\" --", "stdout": "USER\n", "exit": 0 },
+        { "match": "env PATH=\"/ns/bin\" --", "stdout": "NAMESPACE\n", "exit": 0 }
+    ]));
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/ns/bin")]);
+    sb.cmd()
+        .args(["run", "arte", "--env", "PATH=/user/bin", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("USER"));
+}
+
+#[test]
+fn f12_no_overlay_no_env_prefix_added() {
+    // Regression guard: namespace WITHOUT an env block AND no `--env`
+    // flag must dispatch the cmd byte-for-byte unchanged (no `env` prefix).
+    let sb = Sandbox::new(json!([
+        { "match": "env ", "stdout": "UNEXPECTED_PREFIX\n", "exit": 0 },
+        { "match": "echo hi", "stdout": "CLEAN\n", "exit": 0 }
+    ]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["run", "arte", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("CLEAN").and(contains("UNEXPECTED_PREFIX").not()));
+}
+
+#[test]
+fn f12_run_debug_prints_rendered_command_to_stderr() {
+    // `--debug` echoes the rendered remote command (with overlay
+    // prefix) to stderr before dispatch.
+    let sb = Sandbox::new(f12_run_mock());
+    write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
+    sb.cmd()
+        .args(["run", "arte", "--debug", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stderr(contains("rendered command for arte: env PATH=\"/extra/bin:$PATH\" -- echo hi"));
+}
+
+#[test]
+fn f12_overlay_value_with_semicolon_does_not_split() {
+    // Quoting-safety contract: `MALICIOUS = "v;rm -rf /"` is
+    // dispatched as a single env-var string, not as two commands.
+    // The mock asserts the literal `;` survives in the rendered cmd.
+    let sb = Sandbox::new(f12_run_mock());
+    write_servers_toml_with_env(
+        sb.home(),
+        "arte",
+        &[("MALICIOUS", "v;rm -rf /")],
+    );
+    sb.cmd()
+        .args(["run", "arte", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("MALICIOUS_LITERAL"));
+}
+
+#[test]
+fn f12_invalid_env_key_in_config_is_rejected() {
+    // POSIX shell variable name rule: `[A-Za-z_][A-Za-z0-9_]*`.
+    // A key like `BAD-KEY` would split on `-` in some shells, so we
+    // refuse it at validation time.
+    let sb = Sandbox::new(json!([]));
+    let body = "schema_version = 1\n\n[namespaces.arte]\nhost = \"arte.example.invalid\"\nuser = \"deploy\"\nport = 22\n\n[namespaces.arte.env]\n\"BAD-KEY\" = \"value\"\n";
+    let path = sb.home().join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    sb.cmd()
+        .args(["run", "arte", "--", "echo", "hi"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid env-overlay key 'BAD-KEY'"));
+}
+
+#[test]
+fn f12_env_flag_invalid_key_is_rejected_pre_dispatch() {
+    let sb = Sandbox::new(f12_run_mock());
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["run", "arte", "--env", "1FOO=x", "--", "echo", "hi"])
+        .assert()
+        .failure()
+        .stderr(contains("must match"));
+}
+
+#[test]
+fn f12_connect_show_lists_overlay() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_with_env(
+        sb.home(),
+        "arte",
+        &[("PATH", "$HOME/.local/bin:$PATH"), ("LANG", "C.UTF-8")],
+    );
+    sb.cmd()
+        .args(["connect", "arte", "--show"])
+        .assert()
+        .success()
+        .stdout(
+            contains("env overlay for 'arte' (2 entries)")
+                .and(contains("LANG=C.UTF-8"))
+                .and(contains("PATH=$HOME/.local/bin:$PATH")),
+        );
+}
+
+#[test]
+fn f12_connect_show_empty_overlay() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["connect", "arte", "--show"])
+        .assert()
+        .success()
+        .stdout(contains("(none configured)"));
+}
+
+#[test]
+fn f12_connect_set_path_writes_config_idempotently() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    // First write.
+    sb.cmd()
+        .args(["connect", "arte", "--set-path", "$HOME/.local/bin:$PATH"])
+        .assert()
+        .success();
+    let body = read_servers_toml(sb.home());
+    assert!(
+        body.contains("PATH = \"$HOME/.local/bin:$PATH\""),
+        "servers.toml missing PATH entry: {body}",
+    );
+    // Second write with the same value: no-op (idempotent), still
+    // present.
+    sb.cmd()
+        .args(["connect", "arte", "--set-path", "$HOME/.local/bin:$PATH"])
+        .assert()
+        .success()
+        .stdout(contains("already applied"));
+}
+
+#[test]
+fn f12_connect_set_env_and_unset_env_round_trip() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "connect",
+            "arte",
+            "--set-env",
+            "LANG=C.UTF-8",
+            "--set-env",
+            "PYTHONUNBUFFERED=1",
+        ])
+        .assert()
+        .success();
+    let body = read_servers_toml(sb.home());
+    assert!(body.contains("LANG = \"C.UTF-8\""));
+    assert!(body.contains("PYTHONUNBUFFERED = \"1\""));
+    sb.cmd()
+        .args(["connect", "arte", "--unset-env", "LANG"])
+        .assert()
+        .success();
+    let body = read_servers_toml(sb.home());
+    assert!(!body.contains("LANG ="));
+    assert!(body.contains("PYTHONUNBUFFERED = \"1\""));
+}
+
+#[test]
+fn f12_connect_unset_last_env_drops_table() {
+    // Unsetting the last entry empties the map; we drop the
+    // `[namespaces.<ns>.env]` block entirely so the TOML stays tidy.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_with_env(sb.home(), "arte", &[("LANG", "C.UTF-8")]);
+    sb.cmd()
+        .args(["connect", "arte", "--unset-env", "LANG"])
+        .assert()
+        .success();
+    let body = read_servers_toml(sb.home());
+    assert!(
+        !body.contains("[namespaces.arte.env]"),
+        "expected env block to be removed when last entry was unset, got:\n{body}",
+    );
+}
+
+#[test]
+fn f12_connect_set_env_invalid_kv_rejected() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["connect", "arte", "--set-env", "no-equals-sign"])
+        .assert()
+        .failure();
+    sb.cmd()
+        .args(["connect", "arte", "--set-env", "BAD-KEY=val"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn f12_connect_set_env_unknown_namespace_rejected() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["connect", "ghost", "--set-env", "FOO=bar"])
+        .assert()
+        .failure()
+        .stderr(contains("not configured"));
+}
+
+#[test]
+fn f12_show_and_mutate_flags_are_mutually_exclusive() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["connect", "arte", "--show", "--set-env", "FOO=bar"])
+        .assert()
+        .failure();
+}

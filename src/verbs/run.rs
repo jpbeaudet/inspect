@@ -234,6 +234,17 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
+    // F12 (v0.1.3): per-invocation env overrides. Validate once,
+    // before the per-step loop, so a typo in `--env` short-circuits
+    // the whole run instead of failing N times.
+    let user_env: Vec<(String, String)> = {
+        let mut out = Vec::with_capacity(args.env.len());
+        for raw in &args.env {
+            out.push(crate::exec::env_overlay::parse_kv(raw)?);
+        }
+        out
+    };
+
     let timeout_secs = args.timeout_secs.unwrap_or(120);
     let mut ok = 0usize;
     let mut bad = 0usize;
@@ -299,6 +310,20 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             cmd
         };
 
+        // F12 (v0.1.3): apply the per-namespace env overlay (merged
+        // with `--env` overrides). Overlay is empty when neither the
+        // namespace config nor `--env` provides anything, in which
+        // case `apply_to_cmd` returns the cmd borrowed unchanged.
+        let effective_overlay = crate::exec::env_overlay::merge(
+            Some(&s.ns.env_overlay),
+            &user_env,
+            args.env_clear,
+        );
+        let cmd = crate::exec::env_overlay::apply_to_cmd(&cmd, &effective_overlay).into_owned();
+        if args.debug {
+            eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
+        }
+
         let opts = RunOpts::with_timeout(timeout_secs);
         let opts = match &stdin_payload {
             Some(bytes) => opts.with_stdin(bytes.clone()),
@@ -360,6 +385,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     e.reason = reason.clone();
                     e.stdin_bytes = stdin_bytes_len;
                     e.stdin_sha256 = stdin_sha256.clone();
+                    if !effective_overlay.is_empty() {
+                        e.env_overlay = Some(effective_overlay.clone());
+                    }
+                    e.rendered_cmd = Some(cmd.clone());
                     let _ = store.append(&e);
                 }
             }
@@ -378,6 +407,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     entry.stdin_bytes = stdin_bytes_len;
                     entry.stdin_sha256 = stdin_sha256.clone();
                     entry.diff_summary = format!("transport_error: {e}");
+                    if !effective_overlay.is_empty() {
+                        entry.env_overlay = Some(effective_overlay.clone());
+                    }
+                    entry.rendered_cmd = Some(cmd.clone());
                     let _ = store.append(&entry);
                 }
             }
