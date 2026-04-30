@@ -514,8 +514,85 @@ the transport exit-class contract.
 
 ---
 
+## 11. Script mode for `inspect run` (v0.1.3, F14)
+
+`inspect run --file <path>` and `inspect run --stdin-script` ship
+the entire script body to the remote via the same byte-for-byte
+stdin pipe F9 forwards on, dispatching `bash -s -- <args>` (or
+`<interp> -` for non-bash interpreters declared via shebang).
+
+### 11.1 Dispatch shape
+
+| Local invocation | Rendered remote command |
+|---|---|
+| `inspect run arte/_ --file s.sh` (host target, bash shebang or none) | `bash -s` |
+| `inspect run arte/_ --file s.sh -- a b` | `bash -s -- 'a' 'b'` |
+| `inspect run arte/atlas --file s.sh` (container target) | `docker exec -i 'atlas' bash -s` |
+| `inspect run arte/_ --file py.py` (`#!/usr/bin/env python3`) | `python3 -` |
+| `inspect run arte/_ --stdin-script` | identical to `--file`, body from stdin |
+
+Args after `--` are POSIX-shell-quoted before crossing the SSH
+boundary. The script body itself is never re-quoted — it crosses
+intact in the stdin pipe.
+
+### 11.2 Audit fields
+
+Every script-mode invocation writes a per-step audit entry. New
+optional fields (omitted on non-script-mode entries):
+
+- `script_path` — absolute local path (`null` for `--stdin-script`)
+- `script_sha256` — hex SHA-256 of the body
+- `script_bytes` — body length
+- `script_interp` — selected interpreter (`bash` / `sh` / `python3` / ...)
+- `script_body` — full body, present only under `--audit-script-body`
+
+The body itself is dedup-stored at
+`~/.inspect/scripts/<script_sha256>.sh` (mode 0600, inside the 0700
+home) so audit reconstruction works even after the operator deletes
+the local file. The store is content-addressed; identical scripts
+across many invocations share one on-disk file.
+
+### 11.3 Mutual-exclusion contract
+
+| Combination | Outcome |
+|---|---|
+| `--file` + `--stdin-script` | clap rejects (exit 2) |
+| `--file` + `--no-stdin` | clap rejects (exit 2) |
+| `--stdin-script` + `--no-stdin` | clap rejects (exit 2) |
+| `--stdin-script` with tty / empty stdin | runtime exits 2 with `--file`-pointing hint |
+| `--file <missing>` | runtime exits 2 with the path in the error |
+| `--file <directory>` | runtime exits 2 (rejects directories) |
+| `--file <path>` above `--stdin-max` cap | runtime exits 2 with the `inspect cp` chained hint |
+
+### 11.4 Composes with the rest of v0.1.3
+
+Script mode dispatches through the same SSH executor as bare
+`inspect run`, so:
+
+- F12 namespace env overlay applies (the script sees the configured
+  `PATH`, `LANG`, `KUBECONFIG`, ...).
+- F13 stale-session auto-reauth fires identically; a script-mode
+  step that hits `transport_stale` is retried after reauth, and
+  the audit entry stamps `retry_of` / `reauth_id` /
+  `failure_class` exactly as for argv-cmd-mode runs.
+- F9 size cap (`--stdin-max`) protects against pathological script
+  sizes (default 10 MiB; raise with `--stdin-max 100m`, set to
+  `0` to disable, or use `inspect cp` for bulk transfer +
+  remote-side execution).
+- F10.7 `--clean-output` and the F7.4 `--quiet` summary
+  suppression compose unchanged.
+
+`inspect run --file` itself remains read-by-default (per the F11
+run/exec split). `inspect exec` is **not** gaining `--file` in
+v0.1.3 — that's a v0.1.5 follow-up that will require the
+`# inspect-revert: <inverse-script-path>` directive contract for
+revertability.
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
-in F13 (auto-reauth + transport exit class). Any deviation between
-this runbook and the bible is a runbook bug.*
+in F13 (auto-reauth + transport exit class); §11 in F14 (script
+mode). Any deviation between this runbook and the bible is a
+runbook bug.*

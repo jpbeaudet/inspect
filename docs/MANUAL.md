@@ -613,6 +613,91 @@ discards input. With `--no-stdin` and an empty pipe (`< /dev/null`,
 `true | inspect run …`), the run proceeds normally without
 forwarding, since there is no data to drop.
 
+### 7.6 `inspect run --file` / `--stdin-script` (v0.1.3)
+
+Multi-step bash heredocs with embedded `psql -c "..."`,
+`python -c '...'`, and `cypher-shell <<CYPHER` blocks used to
+require an escape pass at every shell layer crossed (your shell →
+ssh → bash → docker exec → psql). Script mode replaces that with
+"the script body never crosses a shell-parsing boundary on the
+local side."
+
+```sh
+# Field-tested migration heredoc — zero local quote-escapes:
+inspect run arte/atlas --file migrate-vault.sh
+
+# Same script body via heredoc-on-stdin (the canonical form for
+# scripts you don't want on disk):
+inspect run arte/atlas --stdin-script <<'BASH'
+set -euo pipefail
+psql -c "SELECT 'embedded \"double\" quote';"
+python3 -c 'print("hi from $")'
+docker exec atlas-vault sh -c "vault operator step-down"
+BASH
+
+# Args after `--` become $1, $2, ... in the script:
+inspect run arte/atlas --file deploy.sh -- v1.2.3 production
+# remote: bash -s -- 'v1.2.3' 'production' (script's $1 / $2)
+```
+
+**How it works.** The script body rides in via the same byte-for-byte
+stdin pipe F9 forwards on, and the remote command becomes
+`bash -s -- <args>` (or `<interp> -` for non-bash interpreters
+declared via shebang). No local shell beyond the one that invoked
+`inspect` ever parses the script, so embedded quotes, `$`,
+`\`, and heredocs survive untouched.
+
+**Shebang dispatch.** A leading
+`#!/usr/bin/env <interp>` or `#!/path/to/<interp>` line picks the
+remote interpreter:
+
+| Interpreter | Remote dispatch |
+|---|---|
+| `bash` / `sh` / `zsh` / `ksh` / `dash` | `<interp> -s -- <args>` |
+| `python3` / `python` / `node` / `ruby` / ... | `<interp> - <args>` (POSIX `-` reads stdin) |
+| `(none)` | `bash -s -- <args>` (default) |
+
+Interpreter names are sanitized to `[A-Za-z0-9_.-]`; anything else
+falls back to `bash` (defense against malformed shebangs).
+
+**Container-targeted scripts.** Selectors that resolve to a
+container render as `docker exec -i <ctr> <interp> -s …` — the `-i`
+keeps stdin attached so the script body flows in.
+
+**Audit.** Every script-mode invocation writes a per-step audit
+entry with:
+
+- `script_path` — absolute path of the local file (`null` for
+  `--stdin-script`)
+- `script_sha256` — hex SHA-256 of the body
+- `script_bytes` — body length
+- `script_interp` — selected interpreter
+- `rendered_cmd` — the actual remote command line (e.g.
+  `docker exec -i 'atlas' bash -s -- 'v1.2.3'`)
+
+The body itself is dedup-stored at
+`~/.inspect/scripts/<sha256>.sh` (mode 0600) so post-mortem
+reconstruction works even if the operator deletes the local file.
+With `--audit-script-body`, the body is also inlined under
+`script_body` in the audit JSONL.
+
+**Mutual exclusion.**
+
+- `--file` and `--stdin-script` together → clap exit 2.
+- `--file` or `--stdin-script` with `--no-stdin` → clap exit 2.
+- `--stdin-script` with a tty (or empty stdin) → exit 2 with a
+  chained `--file`-pointing recovery hint.
+
+**Size cap.** Script-mode shares F9's `--stdin-max` budget
+(default 10 MiB). Above the cap, exit 2 with the standard
+`inspect cp` chained hint.
+
+**Composes with the rest of v0.1.3.** Script mode dispatches
+through the same SSH executor as bare `inspect run`, so the
+namespace env overlay (F12), stale-session auto-reauth (F13), and
+all output-shape contracts (F7.4 `--quiet`, F10.7 `--clean-output`,
+F8 cache, F9 stdin audit) compose unchanged.
+
 ---
 
 ## 8. Audit and revert

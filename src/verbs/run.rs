@@ -150,8 +150,221 @@ fn read_stdin_capped(cap_bytes: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// F14 (v0.1.3): a resolved script-mode payload. The body is shipped
+/// to the remote via `bash -s` (or a different interpreter declared in
+/// the script's shebang); `script_path` is `Some(path)` for `--file`
+/// mode and `None` for `--stdin-script` mode.
+pub(crate) struct ScriptSource {
+    pub body: Vec<u8>,
+    pub sha256: String,
+    pub interp: String,
+    pub script_path: Option<String>,
+}
+
+/// F14 (v0.1.3): interpreter dispatched on the remote when no shebang
+/// is declared. `bash -s` is a strict superset of `sh -s` for the
+/// cross-layer-quoting use case the operator's field feedback called
+/// out; if a target lacks `bash`, the operator declares `#!/bin/sh`
+/// in the script and F14 honors it.
+const DEFAULT_SCRIPT_INTERP: &str = "bash";
+
+/// F14 (v0.1.3): parse the first line of a script for `#!` and pick
+/// the interpreter. Recognizes `#!/usr/bin/env <interp>` and
+/// `#!/path/to/<interp>` forms. Falls back to [`DEFAULT_SCRIPT_INTERP`]
+/// when no shebang is present or the line is malformed.
+fn detect_interpreter(body: &[u8]) -> String {
+    if !body.starts_with(b"#!") {
+        return DEFAULT_SCRIPT_INTERP.to_string();
+    }
+    // First line only; cap at 256 bytes so a binary file with a
+    // leading "#!" doesn't pull a multi-megabyte slice through here.
+    let end = body
+        .iter()
+        .take(256)
+        .position(|&b| b == b'\n')
+        .unwrap_or_else(|| body.len().min(256));
+    let line = std::str::from_utf8(&body[2..end]).unwrap_or("").trim();
+    if line.is_empty() {
+        return DEFAULT_SCRIPT_INTERP.to_string();
+    }
+    // Tokens after `#!`: [path, ...rest]. For `/usr/bin/env <interp>`
+    // the second token is the interpreter; otherwise the basename of
+    // the first token is.
+    let mut toks = line.split_whitespace();
+    let first = match toks.next() {
+        Some(t) => t,
+        None => return DEFAULT_SCRIPT_INTERP.to_string(),
+    };
+    let basename = first.rsplit('/').next().unwrap_or(first);
+    if basename == "env" {
+        if let Some(interp) = toks.next() {
+            return sanitize_interp(interp);
+        }
+        return DEFAULT_SCRIPT_INTERP.to_string();
+    }
+    sanitize_interp(basename)
+}
+
+/// F14 (v0.1.3): allow only `[A-Za-z0-9_.-]` in interpreter names so
+/// a hostile or malformed shebang cannot inject shell metacharacters
+/// into the rendered remote command. Anything else falls back to
+/// [`DEFAULT_SCRIPT_INTERP`].
+fn sanitize_interp(s: &str) -> String {
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return DEFAULT_SCRIPT_INTERP.to_string();
+    }
+    s.to_string()
+}
+
+/// F14 (v0.1.3): does this interpreter accept `-s` as the
+/// "read-script-from-stdin" flag? Bash and `sh` (POSIX) do; everything
+/// else (python, node, ruby, ...) takes a bare `-` instead.
+fn interp_uses_dash_s(interp: &str) -> bool {
+    matches!(interp, "bash" | "sh" | "zsh" | "ksh" | "dash")
+}
+
+/// F14 (v0.1.3): render the remote dispatch shape for a script-mode
+/// invocation. For bash-family interpreters this is `bash -s -- a b c`
+/// (positional args land in `$1` / `$2` / ...). For others (python,
+/// node, ...) this is `python3 - a b c` (POSIX convention; args land
+/// in `sys.argv[1:]` etc.).
+fn render_script_invocation(interp: &str, args: &[String]) -> String {
+    // Interpreter is a controlled identifier (parsed from the
+    // shebang's basename or the F14 default `bash`); rendering it
+    // unquoted keeps the audit `rendered_cmd` field readable and
+    // matches the standard `bash -s` / `python3 -` shape operators
+    // expect to see in dispatch logs.
+    let stdin_marker = if interp_uses_dash_s(interp) { "-s" } else { "-" };
+    if args.is_empty() {
+        return format!("{interp} {stdin_marker}");
+    }
+    let quoted: Vec<String> = args.iter().map(|a| shquote(a)).collect();
+    if interp_uses_dash_s(interp) {
+        format!("{interp} -s -- {}", quoted.join(" "))
+    } else {
+        // POSIX `<interp> - arg1 arg2`: most non-bash REPL-style
+        // interpreters accept `-` as "read from stdin" with positional
+        // args after.
+        format!("{interp} - {}", quoted.join(" "))
+    }
+}
+
+/// F14 (v0.1.3): resolve the script-mode payload (or `None` if the
+/// caller is in classic argv-cmd mode). Reads the file or stdin once,
+/// hashes it, and detects the interpreter from the shebang. Honors
+/// the same `--stdin-max` cap as F9 stdin forwarding.
+pub(crate) fn resolve_script_source(
+    args: &RunArgs,
+    cap_bytes: u64,
+) -> Result<Option<ScriptSource>> {
+    if let Some(path) = args.file.as_deref() {
+        let p = std::path::Path::new(path);
+        let meta = std::fs::metadata(p)
+            .map_err(|e| anyhow::anyhow!("--file '{}' is not readable: {e}", path))?;
+        if meta.is_dir() {
+            return Err(anyhow::anyhow!(
+                "--file '{}' is a directory; expected a script file",
+                path
+            ));
+        }
+        if cap_bytes != 0 && meta.len() > cap_bytes {
+            return Err(anyhow::anyhow!(
+                "--file '{}' is {} bytes, above the {}-byte cap — pass \
+                 --stdin-max <SIZE> to raise (or `0` to disable), or use \
+                 'inspect cp' for bulk transfer + remote-side execution",
+                path,
+                meta.len(),
+                cap_bytes
+            ));
+        }
+        let body = std::fs::read(p)
+            .map_err(|e| anyhow::anyhow!("--file '{}': read failed: {e}", path))?;
+        if body.is_empty() {
+            return Err(anyhow::anyhow!("--file '{}' is empty", path));
+        }
+        let sha = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex::encode(h.finalize())
+        };
+        let interp = detect_interpreter(&body);
+        let abs = std::fs::canonicalize(p)
+            .map(|x| x.display().to_string())
+            .unwrap_or_else(|_| path.to_string());
+        return Ok(Some(ScriptSource {
+            body,
+            sha256: sha,
+            interp,
+            script_path: Some(abs),
+        }));
+    }
+    if args.stdin_script {
+        if local_stdin_is_tty() {
+            return Err(anyhow::anyhow!(
+                "--stdin-script requires piped stdin (got a tty) — pass \
+                 --file <path> for a script on disk, or pipe the script: \
+                 `inspect run <ns> --stdin-script <<'BASH' ... BASH`"
+            ));
+        }
+        let body = read_stdin_capped(cap_bytes)?;
+        if body.is_empty() {
+            return Err(anyhow::anyhow!(
+                "--stdin-script: stdin is empty — pipe a script body, or \
+                 pass --file <path>"
+            ));
+        }
+        let sha = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex::encode(h.finalize())
+        };
+        let interp = detect_interpreter(&body);
+        return Ok(Some(ScriptSource {
+            body,
+            sha256: sha,
+            interp,
+            script_path: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// F14 (v0.1.3): write the script body to the content-addressed store
+/// at `~/.inspect/scripts/<sha256>.sh` (mode 0600 inside a 0700 dir),
+/// idempotently. Errors are non-fatal — the audit entry still
+/// references the body by hash even if the dedup write failed; the
+/// operator can recover from the original `--file` path.
+fn store_script_body(body: &[u8], sha: &str) -> Result<()> {
+    let dir = crate::paths::scripts_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+        let _ = crate::paths::set_dir_mode_0700(&dir);
+    }
+    let path = dir.join(format!("{sha}.sh"));
+    if path.exists() {
+        return Ok(());
+    }
+    // Write to a temp path first then rename so a concurrent reader
+    // never sees a half-written script body.
+    let tmp = dir.join(format!(".{sha}.tmp"));
+    std::fs::write(&tmp, body)?;
+    let _ = crate::paths::set_file_mode_0600(&tmp);
+    std::fs::rename(&tmp, &path)?;
+    let _ = crate::paths::set_file_mode_0600(&path);
+    Ok(())
+}
+
 pub fn run(args: RunArgs) -> Result<ExitKind> {
-    if args.cmd.is_empty() {
+    // F14 (v0.1.3): script mode (`--file` / `--stdin-script`) does not
+    // require a command after `--`. Classic argv-cmd mode still does.
+    let script_mode_requested = args.file.is_some() || args.stdin_script;
+    if !script_mode_requested && args.cmd.is_empty() {
         crate::error::emit("run requires a command after `--`");
         return Ok(ExitKind::Error);
     }
@@ -168,10 +381,19 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let json = matches!(fmt, crate::format::OutputFormat::Json);
 
     // ---------------------------------------------------------------
-    // F9 (v0.1.3): stdin handling. Decide what (if anything) to
+    // F9 / F14 (v0.1.3): stdin handling. Decide what (if anything) to
     // forward to the remote command's stdin BEFORE we resolve targets
     // or dial out — both --no-stdin's loud-failure and the size-cap
     // exit must fire pre-dispatch, with zero remote commands issued.
+    //
+    // F14 cases:
+    //   * `--file <path>`    : script body is the local file; remote
+    //                          command becomes `bash -s -- <args>`
+    //                          and the body rides on the stdin pipe.
+    //   * `--stdin-script`   : script body is local stdin (must be
+    //                          non-tty, non-empty).
+    //   * neither set        : F9 contract — pipe local stdin to the
+    //                          remote command verbatim.
     // ---------------------------------------------------------------
     let cap_bytes = match args.stdin_max.as_deref() {
         Some(s) => match parse_stdin_max(s) {
@@ -183,7 +405,23 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         },
         None => DEFAULT_STDIN_MAX,
     };
-    let stdin_payload: Option<Vec<u8>> = if local_stdin_is_tty() {
+    // F14: resolve the script source first. If this fails (file
+    // missing, stdin tty, payload above cap), exit 2 BEFORE dispatch
+    // — same invariant as F9.
+    let script: Option<ScriptSource> = match resolve_script_source(&args, cap_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::error::emit(format!("{e}"));
+            return Ok(ExitKind::Error);
+        }
+    };
+    let stdin_payload: Option<Vec<u8>> = if let Some(s) = &script {
+        // F14: script body claims the remote stdin pipe. Local stdin
+        // is NOT additionally forwarded — the spec is explicit that
+        // operators wanting both pipe a script via `--file` and let
+        // F9 forward stdin (a v0.1.5 follow-up).
+        Some(s.body.clone())
+    } else if local_stdin_is_tty() {
         // Tty: never forward, never read — match v0.1.2 behavior so a
         // bare `inspect run arte 'cat'` from a terminal does not hang.
         None
@@ -272,7 +510,21 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     };
     let stdin_audited = stdin_payload.is_some() && audit_store.is_some();
+    // F14 (v0.1.3): dedup-store the script body once, before the
+    // per-step loop. Errors here are non-fatal — the audit entry
+    // still references the body by hash, and the operator's `--file`
+    // is still on disk.
+    if let Some(sc) = &script {
+        if let Err(e) = store_script_body(&sc.body, &sc.sha256) {
+            eprintln!("warning: script dedup-store write failed ({e}); proceeding");
+        }
+    }
     // F13 (v0.1.3): track transport-class outcomes across steps so the
+    // SUMMARY trailer / JSON `failure_class` field / exit code can
+    // reflect a uniform transport failure when every failed step
+    // shares the same class. `Some(c)` means every transport failure
+    // seen so far classified as `c`; `None` after a divergent class
+    // means we won't promote to `ExitKind::Transport`.
     // SUMMARY trailer / JSON `failure_class` field / exit code can
     // reflect a uniform transport failure when every failed step
     // shares the same class. `Some(c)` means every transport failure
@@ -301,13 +553,28 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // Wrap in `docker exec` when the selector points at a container.
         // Apply server-side line filter (--filter-line-pattern) by piping
         // through `grep -E`, mirroring the same pushdown logs/grep use.
-        let inner = match s.container() {
-            Some(container) => format!(
-                "docker exec {} sh -c {}",
-                shquote(container),
-                shquote(&user_cmd)
-            ),
-            None => user_cmd.clone(),
+        //
+        // F14 (v0.1.3): in script-mode, the remote command becomes
+        // `<interp> -s -- <args>` (or `<interp> - <args>` for non-bash
+        // interpreters). The container variant adds `-i` so docker
+        // exec keeps stdin attached for the script body to flow in.
+        let inner = if let Some(sc) = &script {
+            let invocation = render_script_invocation(&sc.interp, &args.cmd);
+            match s.container() {
+                Some(container) => {
+                    format!("docker exec -i {} {}", shquote(container), invocation)
+                }
+                None => invocation,
+            }
+        } else {
+            match s.container() {
+                Some(container) => format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&user_cmd)
+                ),
+                None => user_cmd.clone(),
+            }
         };
         let cmd = match &args.filter_line_pattern {
             Some(pat) => format!("{inner} | grep -E {}", shquote(pat)),
@@ -414,6 +681,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // every audit entry produced for this step so a downstream
         // consumer can correlate the original failed attempt and its
         // retry across the audit log.
+        // F14: also stamp script-mode metadata (path / sha256 / bytes
+        // / interp / optional inline body) so the audit JSONL is the
+        // single source of truth for "what script ran here?".
+        let script_ref = script.as_ref();
         let stamp_audit = |e: &mut crate::safety::audit::AuditEntry,
                            class: Option<&str>| {
             if exit.retried {
@@ -424,6 +695,18 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             }
             if let Some(c) = class {
                 e.failure_class = Some(c.to_string());
+            }
+            if let Some(sc) = script_ref {
+                e.script_path = sc.script_path.clone();
+                e.script_sha256 = Some(sc.sha256.clone());
+                e.script_bytes = Some(sc.body.len() as u64);
+                e.script_interp = Some(sc.interp.clone());
+                if args.audit_script_body {
+                    // Best-effort UTF-8; binary scripts are pathological
+                    // for an audit log anyway, and lossy decode keeps
+                    // the field readable.
+                    e.script_body = Some(String::from_utf8_lossy(&sc.body).into_owned());
+                }
             }
         };
 

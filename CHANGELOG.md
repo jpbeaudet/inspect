@@ -14,7 +14,72 @@ is in progress; this section grows as items land.
 
 ### Added
 
-### Added
+- **F14 — `inspect run --file <script>` / `--stdin-script` script
+  mode (field feedback: *"the biggest individual time-sink was
+  nested quoting. Every layer (your shell → ssh → bash →
+  docker exec → psql/python -c) needs its own escape pass… I'd pay
+  almost any feature in tradeoffs to never quote-escape across
+  layers again."*).** Reads the entire bash payload from a file or
+  stdin and ships it as the remote command body via `bash -s`
+  (or the interpreter declared in the script's shebang) so nested
+  `psql -c "..."`, `python -c '...'`, and `cypher-shell <<CYPHER`
+  heredocs reach the remote interpreter byte-for-byte without
+  any local escape pass.
+  - **`--file <path>`.** Reads the script body from the local
+    filesystem; rejects directories and missing paths with a
+    chained recovery hint. Honors the F9 `--stdin-max` cap
+    (default 10 MiB; raise with `--stdin-max <SIZE>`, set to `0`
+    to disable, or use `inspect cp` for bulk transfer + remote
+    execution).
+  - **`--stdin-script`.** Reads the script body from local stdin
+    (heredoc form: `inspect run arte --stdin-script <<'BASH' …
+    BASH`). Mutually exclusive with `--file`, `--no-stdin`, and
+    a tty stdin (clap-rejected or runtime-rejected with chained
+    `--file`-pointing hint).
+  - **Args after `--` become positional.** `inspect run <ns>
+    --file s.sh -- alpha beta` runs `bash -s -- alpha beta` on
+    the remote so the script's `$1` / `$2` are `alpha` / `beta`.
+    Args are POSIX-shell-quoted before crossing the SSH boundary;
+    the script body itself is never re-quoted.
+  - **Shebang-driven interpreter dispatch.** A leading
+    `#!/usr/bin/env <interp>` or `#!/path/to/<interp>` line
+    selects the remote interpreter (`bash` / `sh` / `zsh` / `ksh`
+    / `dash` use `-s`; `python3` / `node` / `ruby` / etc. use
+    POSIX `-`). Without a shebang, defaults to `bash -s`.
+    Interpreter names are sanitized to `[A-Za-z0-9_.-]`; anything
+    else falls back to `bash` (defense against malformed or
+    hostile shebangs).
+  - **Container-targeted dispatch.** Selectors that resolve to a
+    container render as `docker exec -i <ctr> <interp> -s …` so
+    the script body flows in via the docker-exec stdin pipe.
+  - **Audit shape.** Every script-mode invocation writes a
+    per-step audit entry with `script_path`, `script_sha256`,
+    `script_bytes`, and `script_interp`. With
+    `--audit-script-body`, the full body is inlined under
+    `script_body`; without it, the body is dedup-stored once at
+    `~/.inspect/scripts/<sha256>.sh` (mode 0600 inside the 0700
+    home) so audit reconstruction works even after the operator
+    deletes the local file.
+  - **Composes with F9 / F12 / F13.** Script mode dispatches
+    through the same SSH executor as bare `inspect run`, so the
+    namespace env overlay (F12) is applied, stale-session
+    auto-reauth (F13) fires identically, and the size cap shares
+    F9's `--stdin-max` byte budget.
+  - **`AuditEntry` schema.** Five new optional fields
+    (`script_path`, `script_sha256`, `script_bytes`,
+    `script_body`, `script_interp`). Pre-F14 entries omit the
+    fields via `skip_serializing_if`.
+  - **Test coverage.** 14 acceptance tests in
+    `tests/phase_f_v013.rs` (`f14_*`) covering: byte-for-byte
+    heredoc fidelity, `--file` ↔ `--stdin-script` equivalence,
+    mutual-exclusion clap rejections, positional-args dispatch,
+    audit shape (path / sha / bytes / interp / inline body /
+    dedup store), shebang-driven `python3 -` dispatch,
+    container-targeted `docker exec -i` form, missing-path /
+    directory / size-cap / empty-stdin rejection, and the
+    "no `--` required for script mode" regression guard.
+
+### Added (prior in v0.1.3)
 
 - **F13 — Stale-session auto-reauth + distinct transport exit class
   (field feedback: the primary operator's most painful pattern was

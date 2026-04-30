@@ -1809,6 +1809,31 @@ pub struct RunArgs {
     /// `servers.toml` has the same effect persistently.
     #[arg(long)]
     pub no_reauth: bool,
+    /// F14 (v0.1.3): script mode — read the entire bash payload from
+    /// `<PATH>` on the local filesystem and ship it as the remote
+    /// command body via `bash -s` (or the interpreter declared in the
+    /// script's shebang). The script is **never parsed by any local
+    /// shell** beyond the one that invoked `inspect`, so embedded
+    /// `psql -c "..."` / `python -c '...'` / `cypher-shell` heredocs
+    /// reach the remote interpreter byte-for-byte. Arguments after
+    /// `--` become the script's positional `$1` / `$2` / ... .
+    /// Mutually exclusive with `--no-stdin` and `--stdin-script`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["no_stdin", "stdin_script"])]
+    pub file: Option<String>,
+    /// F14 (v0.1.3): script mode — read the script body from local
+    /// stdin and ship it as the remote command body via `bash -s`.
+    /// Stdin must NOT be a tty; the heredoc form
+    /// `inspect run arte --stdin-script <<'BASH' ... BASH` is the
+    /// canonical use. Mutually exclusive with `--no-stdin` and
+    /// `--file` (clap-enforced).
+    #[arg(long, conflicts_with_all = ["no_stdin"])]
+    pub stdin_script: bool,
+    /// F14 (v0.1.3): record the full script body inline in the audit
+    /// entry. Off by default to keep the JSONL small; the body is
+    /// otherwise dedup-stored under `~/.inspect/scripts/<sha256>.sh`
+    /// (mode 0600) and the audit entry references it by hash.
+    #[arg(long)]
+    pub audit_script_body: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

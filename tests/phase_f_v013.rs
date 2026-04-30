@@ -2980,3 +2980,433 @@ fn f13_audit_entry_records_failure_class_and_reauth_id() {
         "run audit entry missing failure_class=ok: {run_entry}"
     );
 }
+
+// =============================================================================
+// F14 — `inspect run --file <script>` / `--stdin-script` heredoc-on-stdin
+// script mode. Eliminates cross-layer quoting (your shell → ssh → bash →
+// docker exec → psql/python -c) by shipping the local script body as the
+// remote command body via `bash -s` — the body is never re-parsed by any
+// local shell beyond the one that already invoked `inspect`.
+// =============================================================================
+
+fn f14_script_mock() -> serde_json::Value {
+    json!([
+        // Script-mode dispatch: `bash -s` reads the script body from
+        // remote stdin. With `echo_stdin: true` the mock surfaces the
+        // body in stdout so tests can assert byte-for-byte fidelity.
+        { "match": "bash -s", "stdout": "", "exit": 0, "echo_stdin": true },
+        // Non-bash interpreter dispatch (shebang test): `python3 -`.
+        { "match": "python3 -", "stdout": "", "exit": 0, "echo_stdin": true },
+        // Container-targeted variant: `docker exec -i <ctr> bash -s`.
+        { "match": "docker exec -i", "stdout": "", "exit": 0, "echo_stdin": true }
+    ])
+}
+
+#[test]
+fn f14_run_file_ships_script_via_bash_s_no_quoting_needed() {
+    // The headline contract: a script with embedded `psql -c "..."`
+    // and `python -c '...'` heredocs that would normally require an
+    // escape pass for every shell layer reaches the remote
+    // interpreter byte-for-byte under `--file`.
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let script_dir = sb.home().join("scripts-fixture");
+    std::fs::create_dir_all(&script_dir).unwrap();
+    let script_path = script_dir.join("migrate.sh");
+    let body = "#!/bin/bash\n\
+                set -euo pipefail\n\
+                psql -c \"SELECT 'embedded \\\"double\\\" quote';\"\n\
+                python3 -c 'print(\"hi from $\")'\n\
+                cypher-shell <<'CYPHER'\n\
+                MATCH (n) RETURN count(n);\n\
+                CYPHER\n";
+    std::fs::write(&script_path, body).unwrap();
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--file",
+            script_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // Embedded quote-bearing strings must reach the remote intact.
+    assert!(
+        stdout.contains("SELECT 'embedded \\\"double\\\" quote';"),
+        "psql heredoc should survive byte-for-byte: {stdout}"
+    );
+    assert!(
+        stdout.contains("print(\"hi from $\")"),
+        "python -c body should survive byte-for-byte: {stdout}"
+    );
+    assert!(
+        stdout.contains("MATCH (n) RETURN count(n);"),
+        "cypher-shell heredoc should survive byte-for-byte: {stdout}"
+    );
+}
+
+#[test]
+fn f14_stdin_script_matches_file_output_byte_for_byte() {
+    // The heredoc form: `cat fixture.sh | inspect run … --stdin-script`
+    // produces identical output to `inspect run … --file fixture.sh`.
+    let body = "#!/bin/bash\necho marker-from-stdin-script\n";
+    let sb1 = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb1.home(), &["arte"]);
+    write_profile(sb1.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let script_path = sb1.home().join("s.sh");
+    std::fs::write(&script_path, body).unwrap();
+    let a1 = sb1
+        .cmd()
+        .args(["run", "arte/atlas", "--file", script_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let out1 = String::from_utf8(a1.get_output().stdout.clone()).unwrap();
+    drop(sb1);
+
+    let sb2 = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb2.home(), &["arte"]);
+    write_profile(sb2.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let a2 = sb2
+        .cmd()
+        .args(["run", "arte/atlas", "--stdin-script"])
+        .write_stdin(body)
+        .assert()
+        .success();
+    let out2 = String::from_utf8(a2.get_output().stdout.clone()).unwrap();
+    assert_eq!(out1, out2, "--file and --stdin-script must produce identical output");
+    assert!(out1.contains("marker-from-stdin-script"));
+}
+
+#[test]
+fn f14_stdin_script_with_tty_exits_2_with_file_hint() {
+    // Mutual exclusion: `--stdin-script` without piped stdin (would be
+    // a tty in real life) is rejected loud. assert_cmd's default
+    // stdin is /dev/null which `read` treats as empty non-tty; the
+    // empty-stdin branch likewise exits 2 with the recovery hint.
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--stdin-script"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--stdin-script") && stderr.contains("--file"),
+        "stderr should chain to --file hint: {stderr}"
+    );
+}
+
+#[test]
+fn f14_run_file_and_stdin_script_are_clap_mutually_exclusive() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "echo x\n").unwrap();
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--file",
+            p.to_str().unwrap(),
+            "--stdin-script",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn f14_run_file_args_after_dash_dash_become_positional() {
+    // `inspect run … --file s.sh -- alpha beta` runs `bash -s -- alpha beta`
+    // on the remote so `$1` / `$2` are `alpha` / `beta`. The mock matches
+    // the `bash -s` substring in the rendered command line.
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "#!/bin/bash\necho \"$1 $2\"\n").unwrap();
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--audit-script-body",
+            "--file",
+            p.to_str().unwrap(),
+            "--",
+            "alpha",
+            "beta",
+        ])
+        .assert()
+        .success();
+    // Verify the audit entry recorded the rendered command containing
+    // `bash -s -- alpha beta`.
+    let body = audit_jsonl_body(sb.home());
+    let line = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    assert!(
+        line.contains("bash -s -- 'alpha' 'beta'"),
+        "rendered_cmd should contain bash -s -- 'alpha' 'beta': {line}"
+    );
+}
+
+#[test]
+fn f14_run_file_audit_records_script_path_sha256_and_bytes() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    let body = "#!/bin/bash\necho hello-from-script\n";
+    std::fs::write(&p, body).unwrap();
+    sb.cmd()
+        .args(["run", "arte/atlas", "--file", p.to_str().unwrap()])
+        .assert()
+        .success();
+    // Expected SHA-256 of the script body
+    let expected_sha = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(body.as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    let jsonl = audit_jsonl_body(sb.home());
+    let line = jsonl
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        v.get("script_sha256").and_then(|s| s.as_str()),
+        Some(expected_sha.as_str()),
+        "script_sha256 mismatch: {line}"
+    );
+    assert_eq!(
+        v.get("script_bytes").and_then(|n| n.as_u64()),
+        Some(body.len() as u64),
+        "script_bytes mismatch: {line}"
+    );
+    let path_field = v
+        .get("script_path")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
+    assert!(
+        path_field.ends_with("s.sh"),
+        "script_path should reflect the source file: {line}"
+    );
+    assert_eq!(
+        v.get("script_interp").and_then(|s| s.as_str()),
+        Some("bash"),
+        "script_interp should be bash: {line}"
+    );
+    // Without --audit-script-body the body field is omitted.
+    assert!(
+        v.get("script_body").is_none(),
+        "script_body should be absent without --audit-script-body: {line}"
+    );
+    // The dedup-store should contain the body.
+    let stored = sb.home().join("scripts").join(format!("{expected_sha}.sh"));
+    assert!(stored.exists(), "script body should be dedup-stored at {stored:?}");
+    let stored_body = std::fs::read_to_string(&stored).unwrap();
+    assert_eq!(stored_body, body, "stored body should match source");
+}
+
+#[test]
+fn f14_run_file_audit_script_body_inline() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    let body = "#!/bin/bash\necho inline-body-test\n";
+    std::fs::write(&p, body).unwrap();
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--audit-script-body",
+            "--file",
+            p.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let jsonl = audit_jsonl_body(sb.home());
+    let line = jsonl
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    assert!(
+        line.contains("inline-body-test"),
+        "script_body should be inlined under --audit-script-body: {line}"
+    );
+}
+
+#[test]
+fn f14_run_file_above_size_cap_exits_2() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "x".repeat(2048)).unwrap();
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--stdin-max",
+            "1k",
+            "--file",
+            p.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("cap") && stderr.contains("inspect cp"),
+        "size-cap error should chain to inspect cp: {stderr}"
+    );
+}
+
+#[test]
+fn f14_run_file_missing_path_exits_2_with_hint() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--file", "/nonexistent/path.sh"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--file") && stderr.contains("/nonexistent/path.sh"),
+        "missing --file should surface the path: {stderr}"
+    );
+}
+
+#[test]
+fn f14_run_file_directory_rejected() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let dir = sb.home().join("script-dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--file", dir.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("directory"),
+        "directory --file should be rejected: {stderr}"
+    );
+}
+
+#[test]
+fn f14_run_file_shebang_dispatches_python() {
+    // A script whose shebang declares `#!/usr/bin/env python3` is
+    // dispatched via `python3 -` (POSIX read-from-stdin convention)
+    // instead of `bash -s`. The mock matches the `python3 -` substring.
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("py.py");
+    let body = "#!/usr/bin/env python3\nprint('python-dispatch')\n";
+    std::fs::write(&p, body).unwrap();
+    sb.cmd()
+        .args(["run", "arte/atlas", "--file", p.to_str().unwrap()])
+        .assert()
+        .success();
+    let jsonl = audit_jsonl_body(sb.home());
+    let line = jsonl
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        v.get("script_interp").and_then(|s| s.as_str()),
+        Some("python3"),
+        "shebang should select python3 interpreter: {line}"
+    );
+    let rendered = v
+        .get("rendered_cmd")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
+    assert!(
+        rendered.contains("python3 -"),
+        "rendered_cmd should dispatch via `python3 -`: {rendered}"
+    );
+}
+
+#[test]
+fn f14_run_file_container_target_uses_docker_exec_i() {
+    // Container-targeted dispatch: `docker exec -i <ctr> bash -s ...`
+    // (the `-i` keeps stdin attached so the script body flows in).
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "#!/bin/bash\necho container-marker\n").unwrap();
+    sb.cmd()
+        .args(["run", "arte/atlas", "--file", p.to_str().unwrap()])
+        .assert()
+        .success();
+    let jsonl = audit_jsonl_body(sb.home());
+    let line = jsonl
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    let rendered = v
+        .get("rendered_cmd")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
+    assert!(
+        rendered.contains("docker exec -i"),
+        "container-targeted script should use `docker exec -i`: {rendered}"
+    );
+    assert!(
+        rendered.contains("bash -s"),
+        "container-targeted script should still dispatch via `bash -s`: {rendered}"
+    );
+}
+
+#[test]
+fn f14_run_file_no_dash_dash_required_for_script_mode() {
+    // Regression guard: classic argv-cmd mode requires `--`, but
+    // script mode does not. `inspect run arte/atlas --file s.sh`
+    // (no trailing `--`, no positional args) must succeed.
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "#!/bin/bash\necho no-dash-dash\n").unwrap();
+    sb.cmd()
+        .args(["run", "arte/atlas", "--file", p.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn f14_no_stdin_with_file_is_clap_rejected() {
+    let sb = Sandbox::new(f14_script_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, "echo x\n").unwrap();
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--no-stdin",
+            "--file",
+            p.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+}

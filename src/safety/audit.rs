@@ -128,6 +128,38 @@ pub struct AuditEntry {
     /// etc. when the verb terminated with a transport failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
+    /// F14 (v0.1.3): when this verb invocation was script-mode
+    /// (`inspect run --file <path>`), the absolute local path the
+    /// script was read from. `None` for `--stdin-script` and for
+    /// non-script-mode invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_path: Option<String>,
+    /// F14 (v0.1.3): SHA-256 (hex) of the script body shipped to the
+    /// remote via `bash -s`. Always present for script-mode
+    /// invocations (both `--file` and `--stdin-script`); never
+    /// present for non-script-mode runs. Lets `inspect audit show`
+    /// retrieve the byte-exact script from `~/.inspect/scripts/`
+    /// even if the operator's local file has been deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_sha256: Option<String>,
+    /// F14 (v0.1.3): byte length of the script body. Always present
+    /// for script-mode invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_bytes: Option<u64>,
+    /// F14 (v0.1.3): the full script body, recorded inline in the
+    /// audit entry only when the operator passed
+    /// `--audit-script-body`. Off by default to keep the JSONL
+    /// readable; the body is otherwise dedup-stored in
+    /// `~/.inspect/scripts/<sha256>.sh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_body: Option<String>,
+    /// F14 (v0.1.3): remote interpreter dispatched for the script
+    /// body (`bash`, `sh`, `python3`, ...). Recorded so audit
+    /// readers can reproduce the exact dispatch shape without
+    /// re-parsing the rendered command. `None` for non-script-mode
+    /// invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_interp: Option<String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -255,6 +287,11 @@ impl AuditEntry {
             retry_of: None,
             reauth_id: None,
             failure_class: None,
+            script_path: None,
+            script_sha256: None,
+            script_bytes: None,
+            script_body: None,
+            script_interp: None,
         }
     }
 }
