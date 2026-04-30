@@ -518,7 +518,7 @@ fn f8_bundle_apply_invalidates_runtime_cache() {
     let mock = json!([
         { "match": "docker ps --format", "stdout": "atlas\n", "exit": 0 },
         { "match": "docker inspect", "stdout": "/atlas\thealthy\t0\n", "exit": 0 },
-        // bundle exec body — wrapped as `docker exec atlas sh -c '...'`
+        // bundle exec body — wrapped as `docker exec sh -c '...'`
         { "match": "docker exec", "stdout": "ok\n", "exit": 0 }
     ]);
     let sb = Sandbox::new(mock);
@@ -2758,4 +2758,225 @@ fn f12_show_and_mutate_flags_are_mutually_exclusive() {
         .args(["connect", "arte", "--show", "--set-env", "FOO=bar"])
         .assert()
         .failure();
+}
+
+// =============================================================================
+// F13 — stale-session auto-reauth + distinct transport exit class.
+//
+// Verifies the production contract:
+//   • exit code 12 = transport_stale, 13 = unreachable, 14 = auth_failed
+//   • SUMMARY trailer carries a chained `ssh_error:` recovery hint
+//   • JSON stream gains a final `phase=summary, failure_class=…` envelope
+//   • auto-reauth fires exactly once per verb invocation, gated by both
+//     `--no-reauth` (per-call) and `auto_reauth = false` (per-namespace).
+//
+// Tests run against the in-process mock medium driven by:
+//   • MockEntry.transport_class — synthesises `Err("transport:<class>")`
+//   • MockEntry.max_uses — lets a stale entry fire once then yield to a
+//     fallback ok entry on the post-reauth retry.
+//   • INSPECT_MOCK_REAUTH=fail — drives the failed-reauth → AuthFailed
+//     escalation path.
+// =============================================================================
+
+#[test]
+fn f13_no_reauth_stale_exits_12_with_summary_trailer() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale" }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--no-reauth", "--", "cat"])
+        .assert()
+        .code(12)
+        .stdout(contains("ssh_error: stale connection").and(contains("--reauth")));
+}
+
+#[test]
+fn f13_stale_auto_reauth_retries_and_succeeds() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale", "max_uses": 1 },
+        { "match": "sh -c 'cat'", "stdout": "after-reauth\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .env("INSPECT_MOCK_REAUTH", "ok")
+        .args(["run", "arte/atlas", "--", "cat"])
+        .assert()
+        .success()
+        .stdout(contains("after-reauth"))
+        .stderr(contains("re-authenticating"));
+}
+
+#[test]
+fn f13_stale_auto_reauth_failure_exits_14() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale" }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .env("INSPECT_MOCK_REAUTH", "fail")
+        .args(["run", "arte/atlas", "--", "cat"])
+        .assert()
+        .code(14)
+        .stdout(contains("ssh_error: auth failed"));
+}
+
+#[test]
+fn f13_unreachable_exits_13_with_connectivity_hint() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "unreachable" }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "cat"])
+        .assert()
+        .code(13)
+        .stdout(contains("ssh_error: unreachable").and(contains("inspect connectivity")));
+}
+
+#[test]
+fn f13_per_namespace_auto_reauth_false_disables_retry() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale" }
+    ]);
+    let sb = Sandbox::new(mock);
+    // Custom servers.toml with auto_reauth = false on the arte namespace.
+    let body = "schema_version = 1\n\n\
+                [namespaces.arte]\n\
+                host = \"arte.example.invalid\"\n\
+                user = \"deploy\"\n\
+                port = 22\n\
+                auto_reauth = false\n";
+    let path = sb.home().join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        // No --no-reauth, no INSPECT_MOCK_REAUTH override: per-namespace
+        // opt-out must be honored on its own.
+        .args(["run", "arte/atlas", "--", "cat"])
+        .assert()
+        .code(12)
+        .stdout(contains("ssh_error: stale connection"));
+}
+
+#[test]
+fn f13_command_failed_uses_inner_exit_not_transport() {
+    // Plain non-zero remote exit must still surface as ExitKind::Inner
+    // (P11 contract) and must NOT collide with the new 12/13/14 codes.
+    let mock = json!([
+        { "match": "sh -c", "stdout": "", "exit": 7 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "false"])
+        .assert()
+        .code(7);
+}
+
+#[test]
+fn f13_json_summary_envelope_carries_failure_class_ok() {
+    let mock = json!([
+        { "match": "sh -c", "stdout": "hi\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let out = sb.cmd()
+        .args(["run", "arte/atlas", "--json", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body = String::from_utf8(out).unwrap();
+    let summary_line = body
+        .lines()
+        .find(|l| l.contains("\"phase\":\"summary\""))
+        .expect("expected a phase=summary envelope on the JSON stream");
+    assert!(
+        summary_line.contains("\"failure_class\":\"ok\""),
+        "summary envelope missing failure_class=ok: {summary_line}"
+    );
+}
+
+#[test]
+fn f13_json_summary_envelope_carries_failure_class_transport_stale() {
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale" }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb.cmd()
+        .args(["run", "arte/atlas", "--no-reauth", "--json", "--", "cat"])
+        .assert()
+        .code(12);
+    let body = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let summary_line = body
+        .lines()
+        .find(|l| l.contains("\"phase\":\"summary\""))
+        .expect("expected a phase=summary envelope on the JSON stream");
+    assert!(
+        summary_line.contains("\"failure_class\":\"transport_stale\""),
+        "summary envelope missing failure_class=transport_stale: {summary_line}"
+    );
+}
+
+#[test]
+fn f13_audit_entry_records_failure_class_and_reauth_id() {
+    // Drive the stale → reauth → success path and assert that the
+    // post-retry audit entry carries `retry_of` + `reauth_id`, and
+    // that a `connect.reauth` audit entry was written between them.
+    let mock = json!([
+        { "match": "sh -c 'cat'", "transport_class": "stale", "max_uses": 1 },
+        { "match": "sh -c 'cat'", "stdout": "ok\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    // Use --audit-stdin-hash + stdin payload to force per-step audit.
+    sb.cmd()
+        .env("INSPECT_MOCK_REAUTH", "ok")
+        .args(["run", "arte/atlas", "--", "cat"])
+        .write_stdin("payload\n")
+        .assert()
+        .success();
+
+    // Read the audit log (audit/<yyyy-mm>-<user>.jsonl).
+    let dir = sb.home().join("audit");
+    let mut body = String::new();
+    for entry in std::fs::read_dir(&dir).expect("audit dir should exist") {
+        let p = entry.unwrap().path();
+        if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            body.push_str(&std::fs::read_to_string(&p).unwrap());
+        }
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    assert!(
+        lines.iter().any(|l| l.contains("\"verb\":\"connect.reauth\"")),
+        "expected a connect.reauth audit entry in {body}"
+    );
+    let run_entry = lines
+        .iter()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    assert!(
+        run_entry.contains("\"reauth_id\":"),
+        "run audit entry missing reauth_id: {run_entry}"
+    );
+    assert!(
+        run_entry.contains("\"retry_of\":"),
+        "run audit entry missing retry_of: {run_entry}"
+    );
+    assert!(
+        run_entry.contains("\"failure_class\":\"ok\""),
+        "run audit entry missing failure_class=ok: {run_entry}"
+    );
 }

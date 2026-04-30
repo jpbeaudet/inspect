@@ -22,6 +22,12 @@ pub enum ExitKind {
     NoMatches,
     Error,
     Inner(u8),
+    /// F13 (v0.1.3): SSH transport-level failure. Maps to dedicated
+    /// exit codes 12 / 13 / 14 (stale / unreachable / auth_failed) so
+    /// wrapper agents can distinguish a dead socket from a real
+    /// remote command failure. The verb's own SUMMARY trailer carries
+    /// the matching `ssh_error:` chained hint.
+    Transport(crate::ssh::transport::TransportClass),
 }
 
 impl ExitKind {
@@ -31,6 +37,7 @@ impl ExitKind {
             ExitKind::NoMatches => 1,
             ExitKind::Error => 2,
             ExitKind::Inner(n) => n,
+            ExitKind::Transport(t) => t.exit_code(),
         }
     }
 }

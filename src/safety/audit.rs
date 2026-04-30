@@ -112,6 +112,22 @@ pub struct AuditEntry {
     /// which records the operator-typed intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rendered_cmd: Option<String>,
+    /// F13 (v0.1.3): when this entry is the retry of a verb that hit
+    /// a transport-stale failure, links to the original (failed)
+    /// invocation's audit id. Lets `inspect audit show <id>` display
+    /// the full retry chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// F13 (v0.1.3): when the auto-reauth path fired between this
+    /// entry's dispatch and a previous failed attempt, links to the
+    /// `connect.reauth` entry that re-established the master socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reauth_id: Option<String>,
+    /// F13 (v0.1.3): SSH transport classification on this entry.
+    /// `None` for ordinary command runs; `Some("transport_stale")` /
+    /// etc. when the verb terminated with a transport failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -236,6 +252,9 @@ impl AuditEntry {
             auto_revert_of: None,
             env_overlay: None,
             rendered_cmd: None,
+            retry_of: None,
+            reauth_id: None,
+            failure_class: None,
         }
     }
 }

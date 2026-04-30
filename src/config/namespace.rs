@@ -36,6 +36,14 @@ pub struct NamespaceConfig {
     /// `None` (the default) means no overlay is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
+    /// F13 (v0.1.3): per-namespace opt-out for stale-session
+    /// auto-reauth. Default (when `None`) is `true` — every dispatch
+    /// that hits a transport-stale failure transparently re-auths
+    /// and retries once. Operators who want every session expiry to
+    /// surface as a hard failure (e.g. CI runners) set
+    /// `auto_reauth = false` in `~/.inspect/servers.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_reauth: Option<bool>,
 }
 
 impl NamespaceConfig {
@@ -69,6 +77,7 @@ impl NamespaceConfig {
                 .or_else(|| self.key_passphrase_env.clone()),
             key_inline: other.key_inline.clone().or_else(|| self.key_inline.clone()),
             env,
+            auto_reauth: other.auto_reauth.or(self.auto_reauth),
         }
     }
 
@@ -169,6 +178,7 @@ mod tests {
             key_passphrase_env: None,
             key_inline: None,
             env: None,
+            auto_reauth: None,
         }
     }
 

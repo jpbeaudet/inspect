@@ -293,7 +293,229 @@ overlay. New verbs do not need to re-validate.
 
 ---
 
+
+---
+
+## 10. Stale-session auto-reauth + transport exit class (v0.1.3, F13)
+
+The dispatch boundary that ships operator-supplied commands to a
+remote (`inspect run`, `inspect exec`) splits failures into four
+buckets, each with its own exit code and operator playbook. Wrappers
+and CI scripts can branch on `$?` reliably:
+
+| Bucket | Exit | OpenSSH stderr it fires on | Operator action |
+|---|---:|---|---|
+| `transport_stale` | `12` | `Connection closed by`, `Control socket … connect: No such file or directory`, `master process … exited`, `mux_client_request_session: session request failed`, `ControlPath unusable` | re-establish the master socket; default behaviour is to reauth + retry once |
+| `transport_unreachable` | `13` | `Could not resolve hostname`, `Connection refused`, `Connection timed out`, `No route to host`, `Network is unreachable`, `Host key verification failed` | network / DNS / firewall problem; `inspect connectivity <ns>` to diagnose |
+| `transport_auth_failed` | `14` | `Permission denied (publickey)`, `Too many authentication failures`, `error in libcrypto`, or auto-reauth that itself fails | wrong/expired key, wrong passphrase env, or revoked authorized_keys; `inspect connect <ns>` interactively |
+| `command_failed` | remote `1..125` | non-zero exit from the operator's command, classifier returned `None` | the remote command reported failure; the contract is identical to a direct ssh |
+
+`ExitKind::Inner` is clamped to `1..=125`, so the three transport
+codes never collide with a remote command's exit. A wrapper script
+can do:
+
+```sh
+inspect run arte/api -- ./migrate.sh
+case $? in
+  0)            echo "ok" ;;
+  12)           echo "stale session; reauth + retry" ;;
+  13)           echo "host unreachable; check network" ;;
+  14)           echo "auth failed; rotate key" ;;
+  1|2|125|126|127) echo "remote command failed with code $?" ;;
+  *)            echo "other error" ;;
+esac
+```
+
+### 10.1 Auto-reauth contract
+
+Default behaviour on `transport_stale`:
+
+1. Stderr gets a single
+   `note: persistent session for <ns> expired — re-authenticating…`
+   line.
+2. An audit entry with `verb=connect.reauth`,
+   `args=trigger=transport_stale,original_verb=run,selector=<sel>`
+   is written to `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
+3. The persistent master socket is torn down via
+   `ssh::exit_master(socket_path, target)` and re-established with
+   the same `AuthSelection { passphrase_env, allow_interactive,
+   skip_existing_mux_check: false }` interactive `inspect connect`
+   would use. Askpass / agent / `*_PASSPHRASE_ENV` env-var paths
+   are unchanged.
+4. The original step is re-dispatched exactly once. Whatever it
+   returns (success, command_failed, transport_*) is final.
+5. The retry's audit entry stamps `retry_of=transport_stale@<label>`
+   and `reauth_id=<id of the connect.reauth entry>` so a downstream
+   consumer can correlate the pair with a single `jq` filter.
+
+A failed reauth (e.g. agent unlocked, but the network dropped
+between the unlock and the retry) escalates to
+`transport_auth_failed` (exit 14) so the operator sees the
+auth-shaped problem rather than the transport-shaped one. There is
+no exponential backoff and no second retry — the contract is one
+attempt to recover, then surface the truth.
+
+### 10.2 Operator opt-outs
+
+| Knob | Scope | Effect |
+|---|---|---|
+| `--no-reauth` on `run` / `exec` | per-invocation | classify + exit 12, do not retry |
+| `[namespaces.<ns>] auto_reauth = false` in `~/.inspect/servers.toml` | per-namespace, persistent | classify + exit 12, do not retry |
+
+Both knobs ANd into the runtime check
+`policy.allow_reauth = !args.no_reauth && s.ns.auto_reauth`. CI
+runners that prefer a hard stale-failure surface over a transparent
+re-auth typically set the namespace flag for their service-account
+namespaces and leave operator namespaces with the default.
+
+### 10.3 SUMMARY trailer + JSON contract
+
+When every failed step shares the same transport class, the
+human-format summary appends a chained recovery hint:
+
+```
+SUMMARY: run: 0 ok, 1 failed (ssh_error: stale connection — run
+  'inspect disconnect arte && inspect connect arte' or pass --reauth)
+```
+
+The JSON contract gains a final envelope per verb invocation:
+
+```json
+{"_schema_version":1,"_source":"run","_medium":"run",
+ "server":"arte/api","phase":"summary","ok":0,"failed":1,
+ "failure_class":"transport_stale"}
+```
+
+`failure_class` is one of
+`ok | command_failed | transport_stale | transport_unreachable | transport_auth_failed | transport_mixed`.
+The streaming line envelopes earlier in the run remain unchanged so
+`inspect run … --json | jq -c '.line'` continues to work and a new
+consumer can opt into the summary by filtering on
+`select(.phase=="summary")`.
+
+### 10.4 Disabling for `connect`-only diagnostics
+
+`inspect connect`, `inspect disconnect`, `inspect connectivity`,
+`inspect why` and the read verbs (`logs`, `ps`, `status`, …) do
+**not** flow through the F13 wrapper — they would either be the
+recovery action itself (`connect`) or are read-only diagnostics
+where reauth has no useful semantics. Only `run` and `exec` (the
+two verbs that ship operator-supplied free-form commands) carry
+the transport exit-class contract.
+
+---
+
+## 10. Stale-session auto-reauth + transport exit class (v0.1.3, F13)
+
+The dispatch boundary that ships operator-supplied commands to a
+remote (`inspect run`, `inspect exec`) splits failures into four
+buckets, each with its own exit code and operator playbook. Wrappers
+and CI scripts can branch on `$?` reliably:
+
+| Bucket | Exit | OpenSSH stderr it fires on | Operator action |
+|---|---:|---|---|
+| `transport_stale` | `12` | `Connection closed by`, `Control socket … connect: No such file or directory`, `master process … exited`, `mux_client_request_session: session request failed`, `ControlPath unusable` | re-establish the master socket; default behaviour is to reauth + retry once |
+| `transport_unreachable` | `13` | `Could not resolve hostname`, `Connection refused`, `Connection timed out`, `No route to host`, `Network is unreachable`, `Host key verification failed` | network / DNS / firewall problem; `inspect connectivity <ns>` to diagnose |
+| `transport_auth_failed` | `14` | `Permission denied (publickey)`, `Too many authentication failures`, `error in libcrypto`, or auto-reauth that itself fails | wrong/expired key, wrong passphrase env, or revoked authorized_keys; `inspect connect <ns>` interactively |
+| `command_failed` | remote `1..125` | non-zero exit from the operator's command, classifier returned `None` | the remote command reported failure; the contract is identical to a direct ssh |
+
+`ExitKind::Inner` is clamped to `1..=125`, so the three transport
+codes never collide with a remote command's exit. A wrapper script
+can do:
+
+```sh
+inspect run arte/api -- ./migrate.sh
+case $? in
+  0)            echo "ok" ;;
+  12)           echo "stale session; reauth + retry" ;;
+  13)           echo "host unreachable; check network" ;;
+  14)           echo "auth failed; rotate key" ;;
+  1|2|125|126|127) echo "remote command failed with code $?" ;;
+  *)            echo "other error" ;;
+esac
+```
+
+### 10.1 Auto-reauth contract
+
+Default behaviour on `transport_stale`:
+
+1. Stderr gets a single
+   `note: persistent session for <ns> expired — re-authenticating…`
+   line.
+2. An audit entry with `verb=connect.reauth`,
+   `args=trigger=transport_stale,original_verb=run,selector=<sel>`
+   is written to `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
+3. The persistent master socket is torn down via
+   `ssh::exit_master(socket_path, target)` and re-established with
+   the same `AuthSelection { passphrase_env, allow_interactive,
+   skip_existing_mux_check: false }` interactive `inspect connect`
+   would use. Askpass / agent / `*_PASSPHRASE_ENV` env-var paths
+   are unchanged.
+4. The original step is re-dispatched exactly once. Whatever it
+   returns (success, command_failed, transport_*) is final.
+5. The retry's audit entry stamps `retry_of=transport_stale@<label>`
+   and `reauth_id=<id of the connect.reauth entry>` so a downstream
+   consumer can correlate the pair with a single `jq` filter.
+
+A failed reauth (e.g. agent unlocked, but the network dropped
+between the unlock and the retry) escalates to
+`transport_auth_failed` (exit 14) so the operator sees the
+auth-shaped problem rather than the transport-shaped one. There is
+no exponential backoff and no second retry — the contract is one
+attempt to recover, then surface the truth.
+
+### 10.2 Operator opt-outs
+
+| Knob | Scope | Effect |
+|---|---|---|
+| `--no-reauth` on `run` / `exec` | per-invocation | classify + exit 12, do not retry |
+| `[namespaces.<ns>] auto_reauth = false` in `~/.inspect/servers.toml` | per-namespace, persistent | classify + exit 12, do not retry |
+
+Both knobs ANd into the runtime check
+`policy.allow_reauth = !args.no_reauth && s.ns.auto_reauth`. CI
+runners that prefer a hard stale-failure surface over a transparent
+re-auth typically set the namespace flag for their service-account
+namespaces and leave operator namespaces with the default.
+
+### 10.3 SUMMARY trailer + JSON contract
+
+When every failed step shares the same transport class, the
+human-format summary appends a chained recovery hint:
+
+```
+SUMMARY: run: 0 ok, 1 failed (ssh_error: stale connection — run
+  'inspect disconnect arte && inspect connect arte' or pass --reauth)
+```
+
+The JSON contract gains a final envelope per verb invocation:
+
+```json
+{"_schema_version":1,"_source":"run","_medium":"run",
+ "server":"arte/api","phase":"summary","ok":0,"failed":1,
+ "failure_class":"transport_stale"}
+```
+
+`failure_class` is one of
+`ok | command_failed | transport_stale | transport_unreachable | transport_auth_failed | transport_mixed`.
+The streaming line envelopes earlier in the run remain unchanged so
+`inspect run … --json | jq -c '.line'` continues to work and a new
+consumer can opt into the summary by filtering on
+`select(.phase=="summary")`.
+
+### 10.4 Disabling for `connect`-only diagnostics
+
+`inspect connect`, `inspect disconnect`, `inspect connectivity`,
+`inspect why` and the read verbs (`logs`, `ps`, `status`, …) do
+**not** flow through the F13 wrapper — they would either be the
+recovery action itself (`connect`) or are read-only diagnostics
+where reauth has no useful semantics. Only `run` and `exec` (the
+two verbs that ship operator-supplied free-form commands) carry
+the transport exit-class contract.
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
-to lock in the three-bucket discipline. Any deviation between this
-runbook and the bible is a runbook bug.*
+to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
+in F13 (auto-reauth + transport exit class). Any deviation between
+this runbook and the bible is a runbook bug.*

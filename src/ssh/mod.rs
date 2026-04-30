@@ -12,6 +12,7 @@ pub mod concurrency;
 pub mod exec;
 pub mod master;
 pub mod options;
+pub mod transport;
 pub mod ttl;
 
 #[allow(unused_imports)]

@@ -985,6 +985,72 @@ The overlay is recorded in the audit log alongside the rendered
 command, so `inspect why --revert` (and any forensic walk back over
 `~/.inspect/audit/`) sees exactly what shipped.
 
+### 15.2 Stale-session auto-reauth (v0.1.3)
+
+OpenSSH's `ControlPersist`-backed master socket can go silent when
+the remote sshd's idle timeout expires, when an iptables rule cuts
+the long-lived TCP connection, or when the `inspect connect`
+session's own `ServerAliveInterval` decides the peer is dead. The
+v0.1.2 contract surfaced these as plain `exit 255` — the same code
+the remote command itself returns when it can't be found — leaving
+shell wrappers no way to tell "I need to re-auth" apart from "this
+command is broken."
+
+v0.1.3 splits the failure surface and, by default, transparently
+re-auths once on stale sessions:
+
+| Class | Exit | When it fires |
+|---|---:|---|
+| `transport_stale` | `12` | master socket / `ControlPersist` expired |
+| `transport_unreachable` | `13` | DNS failure, no route, `Connection refused`, `Host key verification failed` |
+| `transport_auth_failed` | `14` | every key rejected, or auto-reauth itself failed |
+| `command_failed` | remote exit | non-zero exit from the operator's command |
+| `ok` | `0` | success |
+
+Default behaviour on `transport_stale`:
+
+1. `inspect` prints
+   `note: persistent session for <ns> expired — re-authenticating…`
+   to stderr.
+2. The persistent master socket is torn down and re-established
+   through the same code path as interactive `inspect connect <ns>`
+   (askpass / agent / `*_PASSPHRASE_ENV` semantics preserved).
+3. The original step is re-run **exactly once**.
+4. The retry's outcome — pass or fail — is final. There is no
+   exponential backoff and no second retry.
+
+Both the failed-original and the retry get audit entries linked by
+`reauth_id`; the `connect.reauth` audit entry records the trigger
+(`trigger=transport_stale,original_verb=run,selector=<sel>`) so a
+post-hoc audit walker can reconstruct the cause.
+
+**Opting out.** Two knobs disable auto-reauth:
+
+```sh
+# One-shot (CI runner that wants stale failures to surface as 12):
+inspect run arte/api --no-reauth -- ./migrate.sh
+
+# Persistently for a namespace:
+inspect connect arte --set-auto-reauth false
+# (or hand-edit ~/.inspect/servers.toml: `[namespaces.arte]\nauto_reauth = false\n`)
+```
+
+When auto-reauth is disabled and the dispatch hits `transport_stale`,
+the SUMMARY trailer carries the chained recovery hint:
+
+```
+SUMMARY: run: 0 ok, 1 failed (ssh_error: stale connection — run
+  'inspect disconnect arte && inspect connect arte' or pass --reauth)
+```
+
+The structured `--json` output gains a final `phase=summary`
+envelope per `run`/`exec` invocation:
+
+```json
+{"_schema_version":1,"_source":"run","_medium":"run","server":"arte/api",
+ "phase":"summary","ok":0,"failed":1,"failure_class":"transport_stale"}
+```
+
 ---
 
 ## 16. Configuration reference

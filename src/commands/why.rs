@@ -806,6 +806,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
             target,
             profile,
             env_overlay: resolved.config.env.clone().unwrap_or_default(),
+            auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
         };
         let Ok((snapshot, _)) = get_runtime(runner.as_ref(), &ctx, GetOpts::default()) else {
             continue;

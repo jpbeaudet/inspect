@@ -50,6 +50,9 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         // `INSPECT_<NS>_*` suffix-matching scheme used by
         // `enumerate_env_namespaces`). The overlay is config-file only.
         env: None,
+        // F13 (v0.1.3): auto_reauth has no env-var override path; it is
+        // a per-namespace policy that lives in `servers.toml`.
+        auto_reauth: None,
     })
 }
 

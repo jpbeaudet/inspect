@@ -14,6 +14,67 @@ is in progress; this section grows as items land.
 
 ### Added
 
+### Added
+
+- **F13 — Stale-session auto-reauth + distinct transport exit class
+  (field feedback: the primary operator's most painful pattern was
+  a stale `ControlPersist` socket returning `exit 255` minutes into
+  a multi-host migration with stderr indistinguishable from a real
+  command failure — every wrapper script's
+  `if inspect run …; then` branch lit up the wrong way, requiring
+  manual `inspect disconnect && inspect connect` and a from-scratch
+  retry).** `inspect run` and `inspect exec` now classify every
+  dispatch failure into one of three transport buckets and, by
+  default, re-auth + retry once on stale sessions transparently.
+  - **New exit codes.** `12` = `transport_stale`,
+    `13` = `transport_unreachable`, `14` = `transport_auth_failed`.
+    These three never collide with `ExitKind::Inner` (clamped to
+    `1..=125`) so wrappers can branch on
+    `case $? in 12) …;; 13) …;; 14) …; esac` reliably. Mixed
+    multi-target failures still collapse to the existing
+    `ExitKind::Error`.
+  - **Auto-reauth.** When a step's stderr classifies as
+    `transport_stale` (OpenSSH's `Connection closed`,
+    `Control socket … unavailable`, `master process … exited`,
+    or `mux_client_request_session: session request failed`),
+    the dispatch wrapper writes a one-line
+    `note: persistent session for <ns> expired —
+    re-authenticating…` notice to stderr, records a
+    `connect.reauth` audit entry, calls the same code path as
+    interactive `inspect connect <ns>`, and re-runs the original
+    step exactly once. A failed reauth escalates to
+    `transport_auth_failed` (exit 14) with a chained
+    `inspect connect <ns>` recovery hint.
+  - **SUMMARY trailer.** When every failed step shares the same
+    transport class, the human-format summary appends
+    `(ssh_error: <class> — <recovery hint>)` after
+    `run: N ok, M failed`.
+  - **JSON contract.** Every `run` / `exec` invocation now emits
+    a final `phase=summary` envelope with `ok`, `failed`, and
+    `failure_class ∈ {ok, command_failed, transport_stale,
+    transport_unreachable, transport_auth_failed,
+    transport_mixed}`. Streaming line envelopes earlier in the
+    run remain unchanged.
+  - **Audit linkage.** `AuditEntry` gains three optional fields
+    (`retry_of`, `reauth_id`, `failure_class`). The
+    `connect.reauth` entry's id is stamped onto the post-retry
+    audit entry's `reauth_id` so a downstream consumer can
+    trivially correlate the failed attempt and its retry across
+    the audit log.
+  - **Opt-out.** Per-invocation `--no-reauth` on `run` / `exec`
+    surfaces stale failures as exit 12 instead of retrying.
+    Per-namespace `auto_reauth = false` in
+    `~/.inspect/servers.toml` does the same persistently.
+  - **Implementation.** New module `src/ssh/transport.rs` houses
+    the pure classifier and `summary_hint` strings; new
+    `src/exec/dispatch.rs` houses the reauth-aware dispatch
+    wrapper that both `verbs/run.rs` and `verbs/write/exec.rs`
+    flow through. The `RemoteRunner` trait gains a `reauth`
+    method; `LiveRunner::reauth` delegates to a new
+    `commands::connect::reauth_namespace` helper that tears
+    down the dead master socket and re-runs `ssh::start_master`
+    with the same `AuthSelection` as interactive connect.
+
 - **F12 — Per-namespace remote env overlay (field feedback: the
   primary operator repeatedly hit
   `bash: cargo: command not found` /

@@ -42,6 +42,13 @@ pub struct NsCtx {
     /// (`logs`, `ps`, `status`, etc.) issue inspect-internal
     /// commands and ignore this field — see F12 spec scope.
     pub env_overlay: BTreeMap<String, String>,
+    /// F13 (v0.1.3): per-namespace policy on stale-session
+    /// auto-reauth. Sourced from `[servers.<ns>].auto_reauth` in
+    /// `~/.inspect/servers.toml`; defaults to `true` when the field
+    /// is absent. `--no-reauth` on `run` / `exec` overrides this
+    /// per-invocation. Verbs that wrap dispatch consult this field
+    /// before invoking the reauth path.
+    pub auto_reauth: bool,
 }
 
 /// A flat resolution: namespace context + a single target inside it.
@@ -112,6 +119,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                 target,
                 profile,
                 env_overlay: resolved.config.env.clone().unwrap_or_default(),
+                auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
             },
         );
     }
@@ -137,6 +145,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                         target,
                         profile,
                         env_overlay: resolved.config.env.clone().unwrap_or_default(),
+                        auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
                     },
                 );
             }

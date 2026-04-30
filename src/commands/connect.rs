@@ -366,3 +366,35 @@ fn is_local_stdin_tty() -> bool {
         true
     }
 }
+
+/// F13 (v0.1.3): re-establish the persistent master socket for an
+/// already-resolved namespace. Called by the dispatch wrapper when a
+/// transport-stale failure is detected. Honors the same auth path as
+/// interactive `inspect connect <ns>` — passphrase from
+/// `key_passphrase_env` when set; otherwise interactive prompt when
+/// stdin is a tty; otherwise refuses and returns Err so the caller
+/// can surface `Transport::AuthFailed` exit code 14.
+pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
+    let resolved = resolver::resolve(namespace)?;
+    resolved.config.validate(&resolved.name)?;
+    let target = SshTarget::from_resolved(&resolved)?;
+    let (ttl, _ttl_source) = ssh::ttl::resolve(None)?;
+    let allow_interactive = is_local_stdin_tty();
+    let passphrase_env = resolved.config.key_passphrase_env.as_deref();
+    // Tear down whatever is left of the dead master so start_master
+    // re-opens a fresh ControlPersist channel.
+    let socket = ssh::socket_path(&resolved.name);
+    let _ = ssh::exit_master(&socket, &target);
+    ssh::start_master(
+        &resolved.name,
+        &target,
+        &ttl,
+        AuthSelection {
+            passphrase_env,
+            allow_interactive,
+            skip_existing_mux_check: false,
+        },
+    )
+    .map(|_| ())
+    .with_context(|| format!("reauth '{}'", resolved.name))
+}

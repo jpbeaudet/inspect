@@ -1704,6 +1704,14 @@ pub struct ExecArgs {
     /// wrapping) to stderr before dispatch.
     #[arg(long)]
     pub debug: bool,
+    /// F13 (v0.1.3): disable stale-session auto-reauth for this
+    /// invocation. When set, a transport-stale dispatch failure
+    /// surfaces as exit 12 with the chained `ssh_error: stale
+    /// connection` SUMMARY hint instead of being transparently
+    /// retried. Per-namespace `auto_reauth = false` in
+    /// `servers.toml` has the same effect persistently.
+    #[arg(long)]
+    pub no_reauth: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1793,6 +1801,14 @@ pub struct RunArgs {
     /// actually crosses the SSH channel.
     #[arg(long)]
     pub debug: bool,
+    /// F13 (v0.1.3): disable stale-session auto-reauth for this
+    /// invocation. When set, a transport-stale dispatch failure
+    /// surfaces as exit 12 with the chained `ssh_error: stale
+    /// connection` SUMMARY hint instead of being transparently
+    /// retried. Per-namespace `auto_reauth = false` in
+    /// `servers.toml` has the same effect persistently.
+    #[arg(long)]
+    pub no_reauth: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

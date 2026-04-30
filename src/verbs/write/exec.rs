@@ -104,6 +104,9 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     } else {
         args.heartbeat.unwrap_or(30)
     };
+    // F13 (v0.1.3): track transport-class outcomes across steps.
+    let mut uniform_transport: Option<crate::ssh::transport::TransportClass> = None;
+    let mut transport_failures = 0usize;
 
     for s in &steps {
         let cmd = match s.container() {
@@ -179,13 +182,32 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             println!("  {}", masked);
         };
 
-        let stream_result = runner.run_streaming_capturing(
-            &s.ns.namespace,
-            &s.ns.target,
-            &cmd,
-            RunOpts::with_timeout(args.timeout_secs.unwrap_or(120)),
-            &mut on_line,
-        );
+        let stream_result = {
+            let policy = crate::exec::dispatch::ReauthPolicy {
+                allow_reauth: !args.no_reauth && s.ns.auto_reauth,
+            };
+            let cmd_ref = &cmd;
+            let timeout = args.timeout_secs.unwrap_or(120);
+            let runner_ref = runner.as_ref();
+            crate::exec::dispatch::dispatch_with_reauth(
+                &s.ns.namespace,
+                &s.ns.target,
+                runner_ref,
+                Some(&store),
+                "exec",
+                &label,
+                policy,
+                || {
+                    runner_ref.run_streaming_capturing(
+                        &s.ns.namespace,
+                        &s.ns.target,
+                        cmd_ref,
+                        RunOpts::with_timeout(timeout),
+                        &mut on_line,
+                    )
+                },
+            )
+        };
 
         // Stop the heartbeat regardless of success/failure.
         stop_heartbeat.store(true, Ordering::Relaxed);
@@ -193,8 +215,61 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             let _ = h.join();
         }
 
-        let out = stream_result?;
         let dur = started.elapsed().as_millis() as u64;
+
+        // F13: classify dispatch outcome and split the existing
+        // success / command-failed code paths from the new
+        // transport-failure path.
+        let (out, dispatch_class, dispatch_retried, dispatch_reauth_id) = match (
+            stream_result.result,
+            stream_result.failure_class,
+        ) {
+            (Ok(out), _) => (
+                Some(out),
+                Option::<crate::ssh::transport::TransportClass>::None,
+                stream_result.retried,
+                stream_result.reauth_id,
+            ),
+            (Err(e), Some(class)) => {
+                bad += 1;
+                all_same = false;
+                transport_failures += 1;
+                uniform_transport = match uniform_transport {
+                    None if transport_failures == 1 => Some(class),
+                    Some(prev) if prev == class => Some(prev),
+                    _ => None,
+                };
+                renderer.data_line(format!("{label}: FAILED ({class}): {e}", class = class.as_str()));
+                let mut entry = AuditEntry::new("exec", &label);
+                entry.args = if args.show_secrets {
+                    format!("{user_cmd} [secrets_exposed=true]")
+                } else if masker.was_active() {
+                    format!("{user_cmd} [secrets_masked=true]")
+                } else {
+                    user_cmd.clone()
+                };
+                entry.exit = -1;
+                entry.duration_ms = dur;
+                entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+                entry.diff_summary = format!("transport_error: {e}");
+                if !effective_overlay.is_empty() {
+                    entry.env_overlay = Some(effective_overlay.clone());
+                }
+                entry.rendered_cmd = Some(cmd.clone());
+                entry.failure_class = Some(class.as_str().to_string());
+                if stream_result.retried {
+                    entry.retry_of = Some(format!("transport_stale@{label}"));
+                }
+                if let Some(rid) = &stream_result.reauth_id {
+                    entry.reauth_id = Some(rid.clone());
+                }
+                let _ = store.append(&entry);
+                continue;
+            }
+            (Err(e), None) => return Err(e),
+        };
+        let out = out.unwrap();
+        let _ = dispatch_class;
 
         let mut e = AuditEntry::new(
             "exec",
@@ -231,6 +306,17 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             e.env_overlay = Some(effective_overlay.clone());
         }
         e.rendered_cmd = Some(cmd.clone());
+        // F13: stamp retry / reauth correlation fields and a
+        // `failure_class` of `ok` / `command_failed` so audit
+        // consumers can filter by outcome alongside transport-error
+        // entries.
+        if dispatch_retried {
+            e.retry_of = Some(format!("transport_stale@{label}"));
+        }
+        if let Some(rid) = &dispatch_reauth_id {
+            e.reauth_id = Some(rid.clone());
+        }
+        e.failure_class = Some(if out.ok() { "ok" } else { "command_failed" }.to_string());
         if args.revert_preview {
             eprintln!(
                 "[inspect] revert preview {label}: unsupported -- {}",
@@ -274,10 +360,25 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         }
     }
 
-    renderer
-        .summary(format!("exec: {ok} ok, {bad} failed"))
-        .next("inspect audit ls");
+    let trailer = if let Some(c) = uniform_transport {
+        format!(
+            "exec: {ok} ok, {bad} failed ({})",
+            c.summary_hint(&args.selector)
+        )
+    } else {
+        format!("exec: {ok} ok, {bad} failed")
+    };
+    renderer.summary(trailer).next("inspect audit ls");
     renderer.print();
+
+    // F13: uniform transport failures route to ExitKind::Transport so
+    // wrappers/scripts can branch on 12/13/14 and re-establish the
+    // session before retrying.
+    if let Some(c) = uniform_transport {
+        if bad > 0 {
+            return Ok(ExitKind::Transport(c));
+        }
+    }
 
     // P11: surface the remote command's exit code when the run was
     // single-target or every target returned the same code. Mixed

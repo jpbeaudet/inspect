@@ -49,6 +49,7 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
 
     let cfg = NamespaceConfig {
         env: None,
+        auto_reauth: None,
         host: Some(host),
         user: Some(user),
         port,

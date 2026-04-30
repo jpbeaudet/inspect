@@ -256,17 +256,31 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     // so a post-hoc audit can answer "what input did this command
     // consume?" by size. Without forwarded stdin, `inspect run`
     // remains un-audited (matches v0.1.2 read-verb behavior).
-    let audit_store = if stdin_payload.is_some() {
-        match crate::safety::audit::AuditStore::open() {
-            Ok(s) => Some(s),
-            Err(e) => {
+    let audit_store = match crate::safety::audit::AuditStore::open() {
+        // F13 (v0.1.3): always open the audit store on `run` so the
+        // `connect.reauth` audit entry can be written when the
+        // dispatch wrapper fires the reauth path. Stdin-forwarded
+        // runs additionally write per-step audit entries (F9
+        // contract preserved); plain runs write only when the
+        // wrapper actually triggers reauth.
+        Ok(s) => Some(s),
+        Err(e) => {
+            if stdin_payload.is_some() {
                 eprintln!("warning: audit log unavailable ({e}); proceeding");
-                None
             }
+            None
         }
-    } else {
-        None
     };
+    let stdin_audited = stdin_payload.is_some() && audit_store.is_some();
+    // F13 (v0.1.3): track transport-class outcomes across steps so the
+    // SUMMARY trailer / JSON `failure_class` field / exit code can
+    // reflect a uniform transport failure when every failed step
+    // shares the same class. `Some(c)` means every transport failure
+    // seen so far classified as `c`; `None` after a divergent class
+    // means we won't promote to `ExitKind::Transport`.
+    let mut uniform_transport: Option<crate::ssh::transport::TransportClass> = None;
+    let mut transport_failures = 0usize;
+    let mut command_failures = 0usize;
     // B8 (v0.1.2): when --no-truncate is set, lift the per-line byte cap
     // entirely. Otherwise keep the existing 4 KiB default that protects
     // terminals from runaway 100KB+ JSON blobs.
@@ -324,49 +338,103 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
         }
 
-        let opts = RunOpts::with_timeout(timeout_secs);
-        let opts = match &stdin_payload {
-            Some(bytes) => opts.with_stdin(bytes.clone()),
-            None => opts,
-        };
         let svc_name = s.service().unwrap_or("_").to_string();
         let ns_name = s.ns.namespace.clone();
         let step_started = std::time::Instant::now();
 
-        let exit = runner.run_streaming(&ns_name, &s.ns.target, &cmd, opts, &mut |line| {
-            let masked = masker.mask_line(line);
-            let masked: std::borrow::Cow<'_, str> = if args.clean_output {
-                match strip_ansi(&masked) {
-                    std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Owned(masked.into_owned()),
-                    std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
-                }
-            } else {
-                masked
+        let exit = {
+            let policy = crate::exec::dispatch::ReauthPolicy {
+                allow_reauth: !args.no_reauth && s.ns.auto_reauth,
             };
-            if json {
-                JsonOut::write(
-                    &Envelope::new(&ns_name, "run", "run")
-                        .with_service(&svc_name)
-                        .put(
-                            "line",
-                            crate::format::safe::safe_machine_line(&masked).as_ref(),
-                        ),
-                );
-            } else {
-                let safe = crate::format::safe::safe_terminal_line(&masked, line_budget);
-                if line_budget != usize::MAX && masked.len() > line_budget {
-                    truncated_lines += 1;
-                }
-                println!("{label} | {safe}");
-            }
-        });
+            let stdin_payload_ref = stdin_payload.as_ref();
+            let cmd_ref = &cmd;
+            let ns_name_ref = &ns_name;
+            let svc_name_ref = &svc_name;
+            let masker_ref = &masker;
+            let truncated_lines_ref = &mut truncated_lines;
+            let runner_ref = runner.as_ref();
+            let outcome = crate::exec::dispatch::dispatch_with_reauth(
+                ns_name_ref,
+                &s.ns.target,
+                runner_ref,
+                audit_store.as_ref(),
+                "run",
+                &label,
+                policy,
+                || {
+                    let mut opts_call = RunOpts::with_timeout(timeout_secs);
+                    if let Some(bytes) = stdin_payload_ref {
+                        opts_call = opts_call.with_stdin(bytes.clone());
+                    }
+                    runner_ref.run_streaming(
+                        ns_name_ref,
+                        &s.ns.target,
+                        cmd_ref,
+                        opts_call,
+                        &mut |line| {
+                            let masked = masker_ref.mask_line(line);
+                            let masked: std::borrow::Cow<'_, str> = if args.clean_output {
+                                match strip_ansi(&masked) {
+                                    std::borrow::Cow::Borrowed(_) => {
+                                        std::borrow::Cow::Owned(masked.into_owned())
+                                    }
+                                    std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
+                                }
+                            } else {
+                                masked
+                            };
+                            if json {
+                                JsonOut::write(
+                                    &Envelope::new(ns_name_ref, "run", "run")
+                                        .with_service(svc_name_ref)
+                                        .put(
+                                            "line",
+                                            crate::format::safe::safe_machine_line(&masked)
+                                                .as_ref(),
+                                        ),
+                                );
+                            } else {
+                                let safe = crate::format::safe::safe_terminal_line(
+                                    &masked,
+                                    line_budget,
+                                );
+                                if line_budget != usize::MAX && masked.len() > line_budget {
+                                    *truncated_lines_ref += 1;
+                                }
+                                println!("{label} | {safe}");
+                            }
+                        },
+                    )
+                },
+            );
+            outcome
+        };
 
-        match exit {
-            Ok(code) => {
+        // F13: stamp `retry_of` / `reauth_id` / `failure_class` onto
+        // every audit entry produced for this step so a downstream
+        // consumer can correlate the original failed attempt and its
+        // retry across the audit log.
+        let stamp_audit = |e: &mut crate::safety::audit::AuditEntry,
+                           class: Option<&str>| {
+            if exit.retried {
+                e.retry_of = Some(format!("transport_stale@{}", label));
+            }
+            if let Some(rid) = &exit.reauth_id {
+                e.reauth_id = Some(rid.clone());
+            }
+            if let Some(c) = class {
+                e.failure_class = Some(c.to_string());
+            }
+        };
+
+        match (&exit.result, exit.failure_class) {
+            (Ok(code), _) => {
+                let code = *code;
                 if code == 0 {
                     ok += 1;
                 } else {
                     bad += 1;
+                    command_failures += 1;
                     if !json {
                         eprintln!("{label}: exit {code}");
                     }
@@ -377,29 +445,45 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     }
                 }
                 last_inner = Some(code);
-                if let Some(store) = &audit_store {
-                    let mut e = crate::safety::audit::AuditEntry::new("run", &label);
-                    e.args = user_cmd.clone();
-                    e.exit = code;
-                    e.duration_ms = step_started.elapsed().as_millis() as u64;
-                    e.reason = reason.clone();
-                    e.stdin_bytes = stdin_bytes_len;
-                    e.stdin_sha256 = stdin_sha256.clone();
-                    if !effective_overlay.is_empty() {
-                        e.env_overlay = Some(effective_overlay.clone());
+                // F9 contract: per-step audit only when stdin is being
+                // forwarded. F13 widens this to also audit when the
+                // wrapper retried (so the retry stamps `retry_of` /
+                // `reauth_id` for correlation).
+                if stdin_audited || exit.retried {
+                    if let Some(store) = &audit_store {
+                        let mut e =
+                            crate::safety::audit::AuditEntry::new("run", &label);
+                        e.args = user_cmd.clone();
+                        e.exit = code;
+                        e.duration_ms = step_started.elapsed().as_millis() as u64;
+                        e.reason = reason.clone();
+                        e.stdin_bytes = stdin_bytes_len;
+                        e.stdin_sha256 = stdin_sha256.clone();
+                        if !effective_overlay.is_empty() {
+                            e.env_overlay = Some(effective_overlay.clone());
+                        }
+                        e.rendered_cmd = Some(cmd.clone());
+                        let class = if code == 0 { "ok" } else { "command_failed" };
+                        stamp_audit(&mut e, Some(class));
+                        let _ = store.append(&e);
                     }
-                    e.rendered_cmd = Some(cmd.clone());
-                    let _ = store.append(&e);
                 }
             }
-            Err(e) => {
+            (Err(e), Some(class)) => {
                 bad += 1;
                 all_same = false;
+                transport_failures += 1;
+                uniform_transport = match uniform_transport {
+                    None if transport_failures == 1 => Some(class),
+                    Some(prev) if prev == class => Some(prev),
+                    _ => None,
+                };
                 if !json {
                     eprintln!("{label}: {e}");
                 }
                 if let Some(store) = &audit_store {
-                    let mut entry = crate::safety::audit::AuditEntry::new("run", &label);
+                    let mut entry =
+                        crate::safety::audit::AuditEntry::new("run", &label);
                     entry.args = user_cmd.clone();
                     entry.exit = -1;
                     entry.duration_ms = step_started.elapsed().as_millis() as u64;
@@ -411,15 +495,70 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
                     entry.rendered_cmd = Some(cmd.clone());
+                    stamp_audit(&mut entry, Some(class.as_str()));
                     let _ = store.append(&entry);
+                }
+            }
+            (Err(e), None) => {
+                bad += 1;
+                all_same = false;
+                if !json {
+                    eprintln!("{label}: {e}");
+                }
+                if stdin_audited {
+                    if let Some(store) = &audit_store {
+                        let mut entry =
+                            crate::safety::audit::AuditEntry::new("run", &label);
+                        entry.args = user_cmd.clone();
+                        entry.exit = -1;
+                        entry.duration_ms = step_started.elapsed().as_millis() as u64;
+                        entry.reason = reason.clone();
+                        entry.stdin_bytes = stdin_bytes_len;
+                        entry.stdin_sha256 = stdin_sha256.clone();
+                        entry.diff_summary = format!("transport_error: {e}");
+                        if !effective_overlay.is_empty() {
+                            entry.env_overlay = Some(effective_overlay.clone());
+                        }
+                        entry.rendered_cmd = Some(cmd.clone());
+                        let _ = store.append(&entry);
+                    }
                 }
             }
         }
     }
 
+    // F13 (v0.1.3): determine the verb-level failure_class. Priority:
+    // 1. Uniform transport class across every failure → that class.
+    // 2. Any transport failure mixed with command failures → still
+    //    surface the transport class because it's the more actionable
+    //    signal (re-auth / SSH topology). We leave the exit-code path
+    //    in `ExitKind::Error` though, since the run wasn't uniformly
+    //    transport-failed.
+    // 3. Command failures only → "command_failed".
+    // 4. All ok → "ok".
+    let verb_failure_class: &'static str = if let Some(c) = uniform_transport {
+        c.as_str()
+    } else if transport_failures > 0 {
+        // Mixed: prefer the transport hint over command_failed for
+        // operator visibility.
+        "transport_mixed"
+    } else if command_failures > 0 {
+        "command_failed"
+    } else {
+        "ok"
+    };
+
     if !json {
         let mut r = Renderer::new();
-        r.summary(format!("run: {ok} ok, {bad} failed"));
+        let trailer = if let Some(c) = uniform_transport {
+            format!(
+                "run: {ok} ok, {bad} failed ({})",
+                c.summary_hint(&args.selector)
+            )
+        } else {
+            format!("run: {ok} ok, {bad} failed")
+        };
+        r.summary(trailer);
         r.print();
         // B8: surface a single, unmissable end-of-stream warning when any
         // line was truncated mid-content. Goes to stderr so it doesn't
@@ -431,6 +570,28 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 s = if truncated_lines == 1 { "" } else { "s" },
                 budget = line_budget,
             );
+        }
+    } else {
+        // F13: emit a final summary envelope so JSON consumers can
+        // read the verb-level outcome (ok/failed counts +
+        // failure_class) in one structured record. Streaming line
+        // envelopes earlier in the run remain unchanged.
+        JsonOut::write(
+            &Envelope::new(&args.selector, "run", "run")
+                .put("phase", "summary")
+                .put("ok", ok)
+                .put("failed", bad)
+                .put("failure_class", verb_failure_class),
+        );
+    }
+
+    // F13: when every failure shared the same transport class, exit
+    // with the dedicated transport exit code (12/13/14) and a chained
+    // hint. Mixed / command-only failures fall through to existing
+    // `ExitKind::Inner` / `ExitKind::Error` logic.
+    if let Some(c) = uniform_transport {
+        if bad > 0 {
+            return Ok(ExitKind::Transport(c));
         }
     }
 
