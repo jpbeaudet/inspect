@@ -208,6 +208,42 @@ pub struct AuditEntry {
     /// in the same audit log without parsing the args text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub streamed: bool,
+    /// F17 (v0.1.3): UUID-shaped identifier linking a parent
+    /// `run --steps` invocation to the per-step audit entries it
+    /// produced. Stamped on the parent entry and on every per-step
+    /// entry — same value on all of them — so a post-hoc query like
+    /// `inspect audit show <steps_run_id>` can fan out to the full
+    /// step table, and `inspect revert <parent-id>` can walk the
+    /// per-step inverses in reverse order via the parent's
+    /// `revert.kind = "composite"` payload. `None` on every
+    /// non-steps invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_run_id: Option<String>,
+    /// F17 (v0.1.3): name of the step within the manifest. Stamped
+    /// on per-step audit entries only (the parent entry leaves it
+    /// `None` and instead stamps `manifest_steps` with the full
+    /// ordered list). Lets `inspect audit show <step-id>` zoom into
+    /// one step's record without re-parsing the parent payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    /// F17 (v0.1.3): SHA-256 (hex) of the canonical JSON manifest
+    /// the parent `run --steps` invocation dispatched. Stamped on
+    /// the parent entry only. Lets a post-hoc audit reproduce the
+    /// exact step list that ran (the audit entry plus the manifest
+    /// hash uniquely identify the dispatched pipeline) without
+    /// requiring the operator's local manifest file to still exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    /// F17 (v0.1.3): ordered list of step names from the parent
+    /// `run --steps` manifest. Stamped on the parent entry only,
+    /// alongside `manifest_sha256`. Lets `inspect audit show
+    /// <parent-id>` render the step table in the correct order
+    /// (the per-step audit entries are appended in the order they
+    /// ran, but on `--revert-on-failure` they are interleaved with
+    /// the auto-revert entries, so the parent's ordered list is the
+    /// canonical source of truth for the manifest shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_steps: Option<Vec<String>>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -298,6 +334,20 @@ impl Revert {
             preview: preview.into(),
         }
     }
+    /// F17 (v0.1.3): composite inverse — `payload` is a
+    /// JSON-encoded ordered list of `{kind, payload, preview}`
+    /// records that should be executed in **reverse** order. Used
+    /// by the parent `run --steps` audit entry so
+    /// `inspect revert <parent-id>` walks the per-step inverses
+    /// without consulting each child entry individually.
+    pub fn composite(payload_json: impl Into<String>, preview: impl Into<String>) -> Self {
+        Self {
+            kind: RevertKind::Composite,
+            payload: payload_json.into(),
+            captured_at: Utc::now(),
+            preview: preview.into(),
+        }
+    }
 }
 
 impl AuditEntry {
@@ -347,6 +397,10 @@ impl AuditEntry {
             transfer_bytes: None,
             transfer_sha256: None,
             streamed: false,
+            steps_run_id: None,
+            step_name: None,
+            manifest_sha256: None,
+            manifest_steps: None,
         }
     }
 }

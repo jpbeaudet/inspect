@@ -5,7 +5,7 @@
 //! are scaffolded here so the surface is stable and future phases can fill
 //! them in without breaking flag layouts.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 const LONG_ABOUT: &str = "\
 inspect — operational debugging CLI for cross-server search and safe hot-fix \
@@ -410,6 +410,61 @@ STREAMING (F16, v0.1.3)
   See `inspect logs --follow` for the dedicated log-tailing verb;
   F16 is for non-logs streaming commands.
 
+MULTI-STEP (F17, v0.1.3)
+  `--steps <PATH>` reads a JSON manifest (file path, or `-` for
+  stdin) describing an ordered list of steps to dispatch
+  sequentially against a single resolved target. Promotes the
+  defensive `set +e; ... || echo MARKER` heredoc pattern to a
+  first-class verb mode with structured per-step output that an
+  LLM-driven wrapper can reason about.
+
+  Manifest shape:
+    {\"steps\": [
+      {\"name\": \"snap\",  \"cmd\": \"docker compose stop app\",
+       \"on_failure\": \"stop\", \"revert_cmd\": \"docker compose start app\"},
+      {\"name\": \"migrate\", \"cmd_file\": \"./migrate.sh\",
+       \"on_failure\": \"stop\", \"timeout_s\": 600},
+      {\"name\": \"verify\",  \"cmd\": \"curl -fsS http://localhost/health\",
+       \"on_failure\": \"continue\"}
+    ]}
+
+  Per-step fields: `name` (req, unique), `cmd` (req unless
+  `cmd_file`), `cmd_file` (path to a local script body shipped via
+  `bash -s`; F14 composition), `on_failure` (`\"stop\"` default
+  | `\"continue\"`), `timeout_s` (per-step wall-clock cap, default
+  8h), `revert_cmd` (declared inverse for F11 composite revert;
+  absent ⇒ `revert.kind = \"unsupported\"` for that step).
+
+  Output (human): one `STEP <name> ▶` / `STEP <name> ◀ exit=N
+  duration=Ms` block per step, then a `STEPS: N total, K ok,
+  M failed, S skipped` table with ✓/✗/· markers. Output (--json):
+  one structured object with `steps[]` (each with `name`, `cmd`,
+  `exit`, `duration_ms`, `stdout`, `stderr`, `status:
+  \"ok\"|\"failed\"|\"skipped\"|\"timeout\"`) plus `summary`
+  (counts + `stopped_at`) plus `manifest_sha256` and
+  `steps_run_id`.
+
+  Audit shape: every step writes its own `run.step` audit entry,
+  all linked via `steps_run_id` (a fresh UUID-shaped id for the
+  invocation). The parent invocation also writes a `run.steps`
+  entry with `revert.kind = \"composite\"`, `manifest_sha256`,
+  and `manifest_steps` (the ordered name list). Post-hoc:
+  `inspect audit show <steps_run_id>` for the parent record;
+  `inspect revert <steps_run_id>` walks the per-step inverses
+  in reverse manifest order.
+
+  `--revert-on-failure` (requires `--steps`): when a step fails
+  with `on_failure: \"stop\"`, walk the inverses of the prior
+  steps in reverse order and dispatch each as its own
+  audit-logged auto-revert entry (linked via `auto_revert_of`).
+  Steps with no declared `revert_cmd` are skipped with a
+  warning rather than aborting the unwind.
+
+  Mutex with `--file` / `--stdin-script` / `--stream` (clap
+  rejected). Single-target only — fanout selectors exit 2 with a
+  chained hint. YAML input (`--steps-yaml`) and per-step live
+  streaming under `--steps --stream` are deferred to v0.1.5.
+
 EXAMPLES
   $ inspect run arte/atlas -- env
   $ inspect run arte/atlas -- 'docker ps --format json'
@@ -417,7 +472,10 @@ EXAMPLES
   $ inspect run arte 'docker exec -i atlas-pg sh' < ./init.sql
   $ cat big.tar.gz | inspect run arte --stdin-max 100m -- 'tar -xz -C /opt'
   $ inspect run arte --stream -- 'docker logs -f atlas-vault'
-  $ inspect run arte --follow -- 'tail -f /var/log/syslog'";
+  $ inspect run arte --follow -- 'tail -f /var/log/syslog'
+  $ inspect run arte --steps migration.json
+  $ inspect run arte --steps migration.json --revert-on-failure
+  $ cat migration.json | inspect run arte --steps -";
 
 const LONG_WATCH: &str = "\
 Block until a predicate over the target becomes true (B10, v0.1.2). \
@@ -1862,6 +1920,10 @@ pub struct ExecArgs {
 #[command(
     long_about = LONG_RUN,
     after_help = SEE_ALSO_READ,
+    // F17 (v0.1.3): both --steps and --steps-yaml are valid
+    // manifest sources for the multi-step runner; --revert-on-failure
+    // requires either one.
+    group(ArgGroup::new("manifest_source").args(["steps", "steps_yaml"])),
 )]
 pub struct RunArgs {
     /// Selector.
@@ -2003,6 +2065,60 @@ pub struct RunArgs {
     /// (mode 0600) and the audit entry references it by hash.
     #[arg(long)]
     pub audit_script_body: bool,
+    /// F17 (v0.1.3): multi-step runner mode — read a JSON manifest
+    /// (file path, or `-` for stdin) describing an ordered list of
+    /// steps to dispatch sequentially against every target the
+    /// selector resolves to. Each step has `name`, `cmd` (or
+    /// `cmd_file` for an F14 script reference), `on_failure`
+    /// (`"stop"` default | `"continue"`), optional `timeout_s`
+    /// (per-step wall-clock cap, seconds), optional `revert_cmd`
+    /// (declared inverse for F11 composite revert; absent ⇒
+    /// `revert.kind = "unsupported"` for that step). Output is
+    /// per-step structured (STEP markers + table summary, or a
+    /// single JSON object under `--json`); every (step, target)
+    /// pair writes its own audit entry, all linked via
+    /// `steps_run_id`, and the parent invocation's audit entry has
+    /// `revert.kind = "composite"` so `inspect revert <parent-id>`
+    /// walks the inverses in reverse manifest order. Composes with
+    /// `--stream` (forces PTY on every per-step dispatch for
+    /// line-buffered live output), `--env` (per-step env overlay),
+    /// `--reason` (recorded on the parent audit entry), F13
+    /// auto-reauth (a stale socket mid-pipeline triggers transparent
+    /// reauth + retry on the failing step). Multi-target dispatch is
+    /// sequential within each step; on_failure="stop" applies
+    /// globally (any target's failure aborts the next manifest step
+    /// on all targets). Mutually exclusive with `--file`,
+    /// `--stdin-script`, and `--steps-yaml`.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["file", "stdin_script", "steps_yaml"],
+    )]
+    pub steps: Option<String>,
+    /// F17 (v0.1.3): YAML manifest variant of `--steps`. Same
+    /// schema, just parsed as YAML instead of JSON for operators
+    /// who maintain their migration manifests as YAML alongside
+    /// CI/CD pipelines. Mutually exclusive with `--steps`.
+    #[arg(
+        long = "steps-yaml",
+        value_name = "PATH",
+        conflicts_with_all = ["file", "stdin_script", "steps"],
+    )]
+    pub steps_yaml: Option<String>,
+    /// F17 (v0.1.3): when a step fails under `--steps` /
+    /// `--steps-yaml` with `on_failure = "stop"`, walk the inverses
+    /// of the steps that already ran (in reverse manifest order)
+    /// before exiting. Multi-target: each prior step's inverse fans
+    /// out across every original target before moving to the next
+    /// step's inverse. Each auto-revert dispatches as its own
+    /// audit-logged entry stamped with `auto_revert_of:
+    /// <original-step-id>` so the audit log reconstructs the full
+    /// unwind chain. Steps whose `revert.kind = "unsupported"` (no
+    /// declared `revert_cmd` for a free-form `bash -c` body) are
+    /// skipped with a one-line warning rather than aborting the
+    /// unwind.
+    #[arg(long, requires = "manifest_source")]
+    pub revert_on_failure: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

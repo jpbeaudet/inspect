@@ -366,6 +366,17 @@ fn store_script_body(body: &[u8], sha: &str) -> Result<()> {
 }
 
 pub fn run(args: RunArgs) -> Result<ExitKind> {
+    // F17 (v0.1.3): multi-step runner mode short-circuits the
+    // classic per-target dispatch loop. The steps module owns its
+    // own selector resolution, env-overlay merge, per-step audit
+    // entries, and parent composite-revert capture; the bare-`run`
+    // path below is bypassed entirely. Mutual exclusion with
+    // `--file` / `--stdin-script` / cross-mutex between `--steps`
+    // and `--steps-yaml` is clap-enforced (see RunArgs.steps and
+    // RunArgs.steps_yaml).
+    if args.steps.is_some() || args.steps_yaml.is_some() {
+        return crate::verbs::steps::run(&args);
+    }
     // F14 (v0.1.3): script mode (`--file` / `--stdin-script`) does not
     // require a command after `--`. Classic argv-cmd mode still does.
     let script_mode_requested = args.file.is_some() || args.stdin_script;

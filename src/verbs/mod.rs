@@ -32,6 +32,7 @@ pub mod quote;
 pub mod run;
 pub mod runtime;
 pub mod status;
+pub mod steps;
 pub mod transfer;
 pub mod volumes;
 pub mod watch;

@@ -909,6 +909,201 @@ key off `isatty(1)`; if a downstream pipe needs strictly
 LF-terminated bytes, capture under bare `inspect run` instead of
 `--stream` or post-process with `tr -d '\r'`.
 
+### 7.9 Multi-step runner: `inspect run --steps` (F17, v0.1.3)
+
+`inspect run --steps <manifest.json>` (or `--steps -` to read the
+manifest from stdin) dispatches an ordered list of steps against a
+single resolved target, returning structured per-step exit codes
+that an LLM-driven wrapper can reason about — fixing the long-time
+problem that a 5-line heredoc whose step 3 failed still reported
+`1 ok, 0 failed` because the outer `bash -c` exited 0.
+
+**Manifest shape.** A JSON object with a single `steps` array:
+
+```json
+{
+  "steps": [
+    {"name": "snapshot",  "cmd": "tar czf - /data > /tmp/snap.tgz",
+     "on_failure": "stop"},
+    {"name": "stop-app",  "cmd": "docker compose stop app",
+     "on_failure": "stop", "revert_cmd": "docker compose start app"},
+    {"name": "migrate",   "cmd_file": "./migrate.sh",
+     "on_failure": "stop", "timeout_s": 600},
+    {"name": "start-app", "cmd": "docker compose start app",
+     "on_failure": "stop", "revert_cmd": "docker compose stop app"},
+    {"name": "verify",    "cmd": "curl -fsS http://localhost/health",
+     "on_failure": "continue"}
+  ]
+}
+```
+
+Per-step fields:
+
+- **`name`** (required, must be unique within the manifest) —
+  used in output blocks, the STEPS table, and the per-step audit
+  entry's `step_name` field.
+- **`cmd`** (required unless `cmd_file` is set) — a `bash -c`-shaped
+  command body, dispatched against the target with the F12 env
+  overlay applied.
+- **`cmd_file`** (alternative to `cmd`) — path to a local script
+  file. F14 composition: the file is read and shipped via
+  `bash -s`, with `script_sha256` + `script_bytes` + `script_path`
+  recorded on the per-step audit entry exactly as `inspect run
+  --file` would.
+- **`on_failure`** (optional, default `"stop"`) — `"stop"` aborts
+  the pipeline on first non-zero exit; `"continue"` records the
+  failure and proceeds.
+- **`timeout_s`** (optional, default 8 hours) — per-step wall-clock
+  cap in seconds. Reuses the executor's existing timeout
+  mechanism (the SSH child is killed + drained on overrun).
+- **`revert_cmd`** (optional) — declared inverse for the F11
+  composite revert. When set, the per-step audit entry records
+  `revert.kind = "command_pair"` with this string as the payload.
+  When absent, the per-step `revert.kind = "unsupported"` (the
+  step's `cmd` is a free-form bash body with no general inverse)
+  and `--revert-on-failure` skips it with a warning.
+
+**Per-step output (human format).** Each step emits a
+`STEP <name> ▶` opening marker, then its captured output
+line-by-line with the `<ns> | …` prefix, then a `STEP <name> ◀
+exit=N duration=Ms` closing marker. After every step has run (or
+a stop-on-failure step has aborted), a STEPS summary table prints:
+
+```
+SUMMARY: STEPS: 5 total, 4 ok, 1 failed, 0 skipped
+DATA:
+  ✓ snapshot     exit=0   duration=12300ms
+  ✓ stop-app     exit=0   duration=1100ms
+  ✗ migrate      exit=1   duration=8700ms (stopped pipeline)
+  · start-app    exit=0   duration=0ms
+  · verify       exit=0   duration=0ms
+  skipped: start-app, verify
+NEXT:
+  step 'migrate' aborted the pipeline; inspect audit show <id> for the full table
+  inspect revert <id> to walk the composite inverse
+```
+
+**Per-step output (`--json`).** A single structured JSON object:
+
+```json
+{
+  "v": 1,
+  "ns": "arte/atlas",
+  "verb": "run.steps",
+  "steps_run_id": "1714571234567-a3f2",
+  "manifest_sha256": "<64 hex chars>",
+  "target_labels": ["arte/atlas"],
+  "steps": [
+    {
+      "name": "snapshot",
+      "cmd": "...",
+      "status": "ok",
+      "targets": [
+        {"label": "arte/atlas", "exit": 0, "duration_ms": 12300,
+         "stdout": "...", "status": "ok", "audit_id": "..."}
+      ]
+    }
+  ],
+  "summary": {"total": 5, "ok": 4, "failed": 1, "skipped": 0,
+              "stopped_at": "migrate", "auto_revert_count": 0,
+              "target_count": 1}
+}
+```
+
+This is the contract LLM-driven wrappers can reason about — no
+prose parsing, no defensive markers. (Per-line `phase: "begin"` /
+`line` / `phase: "end"` envelopes also stream during dispatch for
+live progress; the final summary record is the canonical post-run
+shape.)
+
+**Audit-log shape.** Every `--steps` invocation produces:
+
+- One **parent** audit entry (`verb: "run.steps"`) with
+  `revert.kind = "composite"`, `manifest_sha256`, `manifest_steps`
+  (the ordered name list), and `steps_run_id` set to the parent's
+  own id.
+- One **per-step** audit entry per dispatched step (`verb:
+  "run.step"`), each with the same `steps_run_id`, the step's
+  `step_name`, its captured `rendered_cmd`, exit code, duration,
+  and per-step `revert.kind` (`"command_pair"` if the manifest
+  declared a `revert_cmd`, else `"unsupported"`).
+- One **auto-revert** audit entry per inverse executed under
+  `--revert-on-failure` (`verb: "run.step.revert"`), with
+  `is_revert: true`, `auto_revert_of: <original-step-id>`, and
+  `reverts: <original-step-id>`.
+
+Post-hoc: `inspect audit show <steps_run_id>` displays the parent
+record (the per-step entries can be joined by filtering audit on
+the matching `steps_run_id`); `inspect revert <steps_run_id>`
+walks the parent's composite payload in reverse manifest order
+and dispatches each per-step inverse — same dry-run gate as every
+other write verb.
+
+**`--revert-on-failure`.** Requires `--steps`. When a step fails
+with `on_failure: "stop"`, the runner walks the inverses of the
+steps that already ran (Ok or Failed status) in reverse manifest
+order **in the same invocation** and dispatches each as its own
+audit-logged auto-revert. Steps with no declared `revert_cmd` are
+skipped with a one-line warning rather than aborting the unwind.
+This is the migration-operator's missing primitive: a 5-step
+manifest where step 3 fails with `--revert-on-failure` correctly
+unwinds steps 1 and 2 without a separate `inspect revert`
+invocation.
+
+**Composes with the rest of v0.1.3.** F11 (revert contract:
+composite payload + per-step capture); F12 (env overlay applied
+per (step, target)); F13 (auto-reauth wraps each per-(step,
+target) dispatch — a stale-socket failure mid-pipeline triggers
+transparent reauth + retry on the failing pair without aborting
+the rest of the pipeline); F14 (`cmd_file` rides the same
+`bash -s` + script-store path as `inspect run --file`); F16
+(`--steps --stream` forces PTY allocation on every per-step
+dispatch — live line-buffered output, end-to-end Ctrl-C
+propagation through the active step's PTY, per-step + parent
+audit entries record `streamed: true`).
+
+**YAML input (`--steps-yaml <PATH>`).** Same manifest schema as
+`--steps`, just YAML-encoded. Convenient for operators who keep
+their migration manifests alongside CI/CD pipelines. Mutex with
+`--steps`. Both flags belong to a clap `manifest_source` ArgGroup
+so `--revert-on-failure` accepts either.
+
+**`--reason` plumb-through.** `--reason "<text>"` echoes to
+stderr at start (matching bare `inspect run` semantics) AND
+stamps onto the parent `run.steps` audit entry's `reason` field.
+After a 4-hour migration, the operator's intent is recoverable
+from the audit log alone — no terminal scrollback required.
+
+**Per-step output cap: 10 MiB per (step, target).** Live printing
+is unaffected; only the captured copy that feeds the audit + JSON
+output stops growing past the cap and stamps `output_truncated:
+true` on the per-target result. Protects the local process from
+OOM on a step that emits many GB. Cap matches the F9
+`--stdin-max` default for consistency.
+
+**Multi-target dispatch (v0.1.3).** When the selector resolves to
+N>1 targets, each manifest step fans out across all N targets
+**sequentially within the step**. The step's aggregate `status`
+is `ok` only if every target succeeded; `failed` if any target's
+exit was non-zero; `timeout` if any target overran `timeout_s`.
+`on_failure: "stop"` applies globally — any target's failure
+aborts the next manifest step on every target. Each (step,
+target) pair writes its own `run.step` audit entry with the
+target's label as the entry's `selector`; `--revert-on-failure`
+fans the inverse out across every target the step ran on. The
+JSON output's per-step record has a `targets[]` array (with
+`label`, `exit`, `duration_ms`, `stdout`, `stderr`,
+`output_truncated`, `status`, `audit_id`, `retried`); the
+summary's `target_count` exposes N. Multi-target is sequential
+within each step in v0.1.3; parallel fan-out within a step is
+intentionally out of scope (output interleaving + audit-link-
+ordering races would need a separate design pass).
+
+**Mutex with `--file` / `--stdin-script` / `--steps-yaml` ↔
+`--steps`** — clap rejected. Mixing `--steps` with `--file` would
+be ambiguous (which script body wins?); `--steps` and
+`--steps-yaml` are two spellings of the same flag.
+
 ---
 
 ## 8. Audit and revert

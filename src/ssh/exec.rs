@@ -256,6 +256,63 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// F16-followup (v0.1.3): outcome of one cancellation-poll iteration in
+/// the streaming SSH executor.
+#[derive(Debug, PartialEq, Eq)]
+enum CancelAction {
+    /// No new signal since the last poll; continue reading.
+    None,
+    /// First Ctrl-C since dispatch (or > 1s since the previous one):
+    /// forward `\x03` through the SSH stdin pipe so the remote PTY's
+    /// terminal driver delivers SIGINT to the remote process group.
+    /// Then the streaming loop resets the global cancellation flag and
+    /// continues reading — the remote is expected to exit on its own;
+    /// we surface its real exit code instead of the conventional 130.
+    ForwardIntr,
+    /// Either the second Ctrl-C arrived within 1 second of the first
+    /// (the operator wants to be sure the remote dies), or the dispatch
+    /// has no PTY at all (no way to deliver SIGINT through the stdin
+    /// pipe). Kill the local SSH child — the channel close triggers
+    /// SIGHUP on the remote process group via the sshd-side PTY
+    /// teardown — and return exit 130.
+    Escalate,
+}
+
+/// F16-followup (v0.1.3): returns the right cancel action given:
+/// - the current `cancel::signal_count()`
+/// - the count we last handled (call site's `last_handled` cell)
+/// - the `Instant` of the most recently forwarded `\x03` (call site's
+///   `last_intr_at` cell)
+/// - whether a PTY was allocated AND the stdin pipe is still alive
+///
+/// Updates `last_handled` and `last_intr_at` in place when it returns
+/// `ForwardIntr`. Returns `Escalate` for the no-PTY / second-within-1s
+/// cases. Returns `None` when no new signal has arrived.
+fn classify_cancel(
+    last_handled: &mut u32,
+    last_intr_at: &mut Option<std::time::Instant>,
+    have_pty: bool,
+) -> CancelAction {
+    let cur = crate::exec::cancel::signal_count();
+    if cur <= *last_handled {
+        return CancelAction::None;
+    }
+    let now = std::time::Instant::now();
+    let recent = matches!(
+        *last_intr_at,
+        Some(t) if now.duration_since(t) < Duration::from_secs(1)
+    );
+    if !have_pty || recent {
+        // Bump the handled marker so a third signal doesn't re-trigger.
+        *last_handled = cur;
+        CancelAction::Escalate
+    } else {
+        *last_intr_at = Some(now);
+        *last_handled = cur;
+        CancelAction::ForwardIntr
+    }
+}
+
 /// Streaming variant of [`run_remote`] (P1, v0.1.1). Spawns ssh just
 /// like the buffered runner, but pumps stdout line-by-line into
 /// `on_line` so callers can render output as it arrives instead of
@@ -301,10 +358,19 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
     let stdin_bytes = opts.stdin.take();
+    // F16-followup (v0.1.3): when PTY is allocated, keep stdin as a
+    // pipe (instead of /dev/null) even when the caller has no payload
+    // to forward. The streaming loop holds the write end so that on
+    // the first SIGINT we can write `\x03` (ASCII ETX, the default
+    // INTR character) into the remote PTY's terminal driver — which
+    // delivers SIGINT to the remote process group. Without the pipe,
+    // a single Ctrl-C just kills the local ssh, which channel-closes
+    // the remote (sending SIGHUP) — coarser than necessary.
+    let want_intr_pipe = opts.tty && stdin_bytes.is_none();
     ssh.arg(&target.host)
         .arg("--")
         .arg(cmd)
-        .stdin(if stdin_bytes.is_some() {
+        .stdin(if stdin_bytes.is_some() || want_intr_pipe {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -316,6 +382,11 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     let mut child = ssh
         .spawn()
         .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+    let mut intr_pipe: Option<std::process::ChildStdin> = if want_intr_pipe {
+        child.stdin.take()
+    } else {
+        None
+    };
     spawn_stdin_writer(&mut child, stdin_bytes);
 
     // Drain stderr in a background thread so a chatty remote can't
@@ -345,12 +416,42 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     let mut reader = BufReader::new(stdout);
     let start = std::time::Instant::now();
     let mut line_bytes: Vec<u8> = Vec::with_capacity(4096);
+    // F16-followup (v0.1.3): track signal-count progress so a NEW
+    // Ctrl-C is detected even after we cleared the cancel flag from
+    // a previous forwarded SIGINT.
+    let mut last_handled_signal: u32 = crate::exec::cancel::signal_count();
+    let mut last_intr_at: Option<std::time::Instant> = None;
+    let have_pty = intr_pipe.is_some();
 
     let exit_code: i32 = loop {
-        if crate::exec::cancel::is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 130;
+        match classify_cancel(&mut last_handled_signal, &mut last_intr_at, have_pty) {
+            CancelAction::None => {}
+            CancelAction::ForwardIntr => {
+                // First SIGINT: write \x03 into the remote PTY's
+                // terminal driver. The remote terminal driver
+                // recognises ETX as INTR and delivers SIGINT to the
+                // remote process group. Reset our cancel flag so the
+                // verb can surface the remote's real exit code rather
+                // than 130 (matches the spec: "exit code is the
+                // docker-logs exit code").
+                if let Some(ref mut sh) = intr_pipe {
+                    use std::io::Write;
+                    let _ = sh.write_all(b"\x03");
+                    let _ = sh.flush();
+                }
+                crate::exec::cancel::reset_cancel_flag();
+            }
+            CancelAction::Escalate => {
+                // Either no PTY OR second-Ctrl-C-within-1s: drop the
+                // intr pipe (closes stdin → remote sees EOF), then
+                // kill the local ssh which channel-closes the remote
+                // → sshd sends SIGHUP to the remote process group via
+                // the PTY teardown.
+                drop(intr_pipe.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                break 130;
+            }
         }
         line_bytes.clear();
         match reader.read_until(b'\n', &mut line_bytes) {
@@ -370,7 +471,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                 // Signal arrived during the syscall (SIGINT without
-                // SA_RESTART). Loop back to re-check cancellation.
+                // SA_RESTART). Loop back so classify_cancel notices.
                 continue;
             }
             Err(e) => {
@@ -454,10 +555,11 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
     let stdin_bytes = opts.stdin.take();
+    let want_intr_pipe = opts.tty && stdin_bytes.is_none();
     ssh.arg(&target.host)
         .arg("--")
         .arg(cmd)
-        .stdin(if stdin_bytes.is_some() {
+        .stdin(if stdin_bytes.is_some() || want_intr_pipe {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -469,6 +571,11 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     let mut child = ssh
         .spawn()
         .with_context(|| format!("spawning '{SSH_BIN}'"))?;
+    let mut intr_pipe: Option<std::process::ChildStdin> = if want_intr_pipe {
+        child.stdin.take()
+    } else {
+        None
+    };
     spawn_stdin_writer(&mut child, stdin_bytes);
 
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -493,12 +600,27 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     let start = std::time::Instant::now();
     let mut line_bytes: Vec<u8> = Vec::with_capacity(4096);
     let mut captured_stdout = String::new();
+    let mut last_handled_signal: u32 = crate::exec::cancel::signal_count();
+    let mut last_intr_at: Option<std::time::Instant> = None;
+    let have_pty = intr_pipe.is_some();
 
     let exit_code: i32 = loop {
-        if crate::exec::cancel::is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 130;
+        match classify_cancel(&mut last_handled_signal, &mut last_intr_at, have_pty) {
+            CancelAction::None => {}
+            CancelAction::ForwardIntr => {
+                if let Some(ref mut sh) = intr_pipe {
+                    use std::io::Write;
+                    let _ = sh.write_all(b"\x03");
+                    let _ = sh.flush();
+                }
+                crate::exec::cancel::reset_cancel_flag();
+            }
+            CancelAction::Escalate => {
+                drop(intr_pipe.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                break 130;
+            }
         }
         line_bytes.clear();
         match reader.read_until(b'\n', &mut line_bytes) {

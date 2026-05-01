@@ -98,16 +98,185 @@ fn revert_one(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -> Resu
     match kind {
         RevertKind::StateSnapshot => revert_state_snapshot(args, entry, store),
         RevertKind::CommandPair => revert_command_pair(args, entry, store),
-        RevertKind::Composite => {
-            crate::error::emit(format!(
-                "audit '{}' has revert.kind=composite; composite reverts are not yet \
-                 implemented (v0.1.3). Replay the bundle's per-step entries individually.",
-                entry.id
-            ));
-            Ok(ExitKind::Error)
-        }
+        RevertKind::Composite => revert_composite(args, entry, store),
         RevertKind::Unsupported => revert_unsupported(entry),
     }
+}
+
+/// F17 (v0.1.3): walk the parent `run --steps` entry's composite
+/// payload in reverse order, dispatching each per-step inverse as its
+/// own audit-logged entry. Used by `inspect revert <steps_run_id>`.
+///
+/// Payload shape (set by `verbs::steps::run`): a JSON array of
+/// `{step_name, kind, payload}` records, in **manifest order** (the
+/// dispatch order). We walk that list in reverse so the most-recent
+/// step is undone first.
+///
+/// Per-item dispatch:
+/// - `kind: "command_pair"` with non-empty `payload` ⇒ run the
+///   payload as a remote command, write a new audit entry with
+///   `is_revert = true`, `reverts = <parent-id>`, `steps_run_id =
+///   <parent's steps_run_id>`, `step_name = <item.step_name>`.
+/// - `kind: "unsupported"` (or empty payload) ⇒ skip with a warning;
+///   the parent revert continues with the remaining items rather
+///   than aborting (matches the `--revert-on-failure` semantics so
+///   post-hoc and verb-time reverts behave the same).
+///
+/// Single-target only (matches the `--steps` single-target
+/// requirement on dispatch).
+fn revert_composite(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -> Result<ExitKind> {
+    let revert = entry.revert.as_ref().expect("kind=composite implies Some");
+    let items: Vec<serde_json::Value> = match serde_json::from_str(&revert.payload) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::error::emit(format!(
+                "audit '{}' has revert.kind=composite but payload is not JSON: {e}",
+                entry.id
+            ));
+            return Ok(ExitKind::Error);
+        }
+    };
+    if items.is_empty() {
+        crate::error::emit(format!(
+            "audit '{}' has revert.kind=composite but the payload list is empty; \
+             nothing to revert",
+            entry.id
+        ));
+        return Ok(ExitKind::Error);
+    }
+    let (runner, nses, targets) = plan(&entry.selector)?;
+    let resolved: Vec<_> = crate::verbs::dispatch::iter_steps(&nses, &targets).collect();
+    let Some(target_step) = resolved.first() else {
+        crate::error::emit(format!(
+            "selector '{}' from audit '{}' no longer matches any target",
+            entry.selector, entry.id
+        ));
+        return Ok(ExitKind::Error);
+    };
+    let label = format!(
+        "{}{}",
+        target_step.ns.namespace,
+        target_step
+            .service()
+            .map(|s| format!("/{s}"))
+            .unwrap_or_default()
+    );
+
+    // Plan the reversed list so the dry-run preview matches the
+    // execution order line-for-line.
+    let plan_items: Vec<(String, String)> = items
+        .iter()
+        .rev()
+        .filter_map(|item| {
+            let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let payload = item.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+            let name = item
+                .get("step_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            if kind == "command_pair" && !payload.trim().is_empty() {
+                Some((name, payload.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let total_items = items.len();
+    let skipped = total_items - plan_items.len();
+
+    let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    if !gate.should_apply() {
+        let mut r = Renderer::new();
+        r.summary(format!(
+            "DRY RUN. Would revert composite audit {} ({} step(s); {} skipped)",
+            entry.id,
+            plan_items.len(),
+            skipped
+        ));
+        r.data_line(format!("REVERT: {}", revert.preview));
+        for (name, cmd) in &plan_items {
+            r.data_line(format!("  + {name}: {cmd}"));
+        }
+        if skipped > 0 {
+            r.data_line(format!(
+                "  · {skipped} step(s) skipped (no declared revert_cmd)"
+            ));
+        }
+        r.next("Re-run with --apply to execute");
+        r.print();
+        return Ok(ExitKind::Success);
+    }
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::Always, 1, "Revert?") {
+        eprintln!("aborted: {why}");
+        return Ok(ExitKind::Error);
+    }
+
+    let parent_steps_run_id = entry
+        .steps_run_id
+        .clone()
+        .unwrap_or_else(|| entry.id.clone());
+    let mut applied_count = 0usize;
+    let mut failed_count = 0usize;
+    for (step_name, cmd) in &plan_items {
+        let wrapped = match target_step.container() {
+            Some(container) => {
+                format!("docker exec {} sh -c {}", shquote(container), shquote(cmd))
+            }
+            None => cmd.clone(),
+        };
+        let started = Instant::now();
+        let out = runner.run(
+            &target_step.ns.namespace,
+            &target_step.ns.target,
+            &wrapped,
+            RunOpts::with_timeout(120),
+        );
+        let dur = started.elapsed().as_millis() as u64;
+        let (revert_exit, revert_ok, revert_stderr) = match &out {
+            Ok(o) => (o.exit_code, o.ok(), o.stderr.clone()),
+            Err(e) => (-1, false, e.to_string()),
+        };
+        let mut rev_entry = AuditEntry::new("run.step.revert", &label);
+        rev_entry.is_revert = true;
+        rev_entry.reverts = Some(entry.id.clone());
+        rev_entry.steps_run_id = Some(parent_steps_run_id.clone());
+        rev_entry.step_name = Some(step_name.clone());
+        rev_entry.args = cmd.clone();
+        rev_entry.exit = revert_exit;
+        rev_entry.duration_ms = dur;
+        rev_entry.applied = Some(revert_ok);
+        rev_entry.rendered_cmd = Some(wrapped);
+        store.append(&rev_entry)?;
+        if revert_ok {
+            applied_count += 1;
+        } else {
+            failed_count += 1;
+            eprintln!(
+                "  ✗ revert FAILED for step '{step_name}' (exit={revert_exit}): {}",
+                revert_stderr.trim()
+            );
+        }
+    }
+
+    let mut r = Renderer::new();
+    if failed_count == 0 {
+        r.summary(format!(
+            "reverted composite audit {} → {label} ({applied_count} step(s); {skipped} skipped)",
+            entry.id
+        ));
+    } else {
+        r.summary(format!(
+            "composite revert PARTIAL: {applied_count} ok, {failed_count} failed, {skipped} skipped"
+        ));
+    }
+    r.next("inspect audit show <id>");
+    r.print();
+    Ok(if failed_count == 0 {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 fn revert_unsupported(entry: &AuditEntry) -> Result<ExitKind> {

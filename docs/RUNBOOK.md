@@ -712,42 +712,188 @@ invocation regardless of which trigger fired (so an audit entry
 written because of F9 stdin forwarding still records `streamed:
 false` correctly via the `skip_serializing_if` shape).
 
-**SIGINT propagation policy.** F16 leans on `ssh -tt`'s PTY-layer
-SIGINT propagation, which is the standard OpenSSH idiom and
-works for every remote process that respects SIGINT. The local
-`inspect` process registers SIGINT handlers via
-`exec::cancel::install_handlers` (see `main.rs`), and the
-streaming read loop in `run_remote_streaming` polls
-`exec::cancel::is_cancelled()` on every iteration so a
-cancellation from inside the local process tree (e.g. via
-`kill -INT <pid>`) tears down the SSH child cleanly. The
-end-to-end Ctrl-C path is: terminal sends SIGINT to the local
-shell → shell forwards to local `inspect` → local `inspect`'s
-SIGINT handler trips `cancel::is_cancelled()` AND the local SSH
-client (which received the same SIGINT from the controlling
-terminal) sends a SIGINT down the PTY to the remote process
-group. Both paths are tolerated; whichever wins first kills the
-SSH child and the read loop exits.
+**SIGINT propagation policy (post-F16-followup, v0.1.3).** Two
+levels:
+
+1. **First Ctrl-C → SIGINT-via-PTY.** The local `inspect`
+   process registers SIGINT handlers via
+   `exec::cancel::install_handlers` (see `main.rs`). The
+   streaming read loop in `run_remote_streaming` /
+   `run_remote_streaming_capturing` polls
+   `exec::cancel::signal_count()` on every iteration. On the
+   first new signal, the executor writes the ASCII INTR byte
+   (`\x03`) into the SSH stdin pipe — the remote PTY's terminal
+   driver sees ETX and delivers SIGINT to the remote process
+   group. The local cancel flag is then cleared via
+   `exec::cancel::reset_cancel_flag()` so the verb surfaces the
+   remote's real exit code (matching the field-validation gate's
+   "Ctrl-C terminates `docker logs -f`, exit code is the
+   docker-logs exit code"). To make this work, the SSH child's
+   stdin is now `Stdio::piped()` (instead of `Stdio::null()`)
+   when `opts.tty` is set so the executor has a write handle for
+   the `\x03` byte.
+
+2. **Second Ctrl-C within 1 second → channel-close-SIGHUP.**
+   `classify_cancel()` checks `last_intr_at` against the current
+   `Instant`. If a new signal arrived within 1 second of the
+   previous forward, the executor escalates: drop the intr pipe,
+   `child.kill()` the local SSH process. The channel close
+   triggers the remote sshd to deliver SIGHUP to the remote
+   process group via PTY teardown — covering the corner case of
+   a remote process that ignores SIGINT but exits on SIGHUP.
+   Returns exit 130. Same escalation path fires immediately when
+   no PTY was allocated (no way to deliver SIGINT through the
+   stdin pipe).
+
+The signal counter (`exec::cancel::SIGNAL_COUNT`) is a separate
+`AtomicU32` from the cancel flag (`CANCELLED: AtomicBool`)
+because the streaming loop needs to detect "a NEW signal arrived
+since the previous poll" — the flag alone is a one-way trip.
+The counter is incremented from the signal handler
+(async-signal-safe relaxed atomic add) and never reset in
+production.
 
 **Mutex with `--stdin-script`.** Streaming a script body over
 local stdin while also streaming output back is a half-duplex
-protocol headache (the SSH stdin channel is closed once the
-script body is delivered, so any post-deliver SIGINT becomes
-ambiguous; resolving it cleanly needs explicit signal-channel
-support that is not in v0.1.3). Enforced at the clap level via
-`conflicts_with_all = ["no_stdin", "stream"]` on `stdin_script`,
-not at runtime, so the operator gets the rejection before any
-dispatch happens. `--stream --file <script>` is fine because the
-script body is delivered in one shot at dispatch time, not
-streamed.
+protocol headache (the SSH stdin channel is now used for
+forwarding `\x03` on first Ctrl-C, so a script body taking the
+same channel would conflict with SIGINT forwarding). Enforced at
+the clap level via `conflicts_with_all = ["no_stdin", "stream"]`
+on `stdin_script`. `--stream --file <script>` is fine because
+the script body is delivered in one shot at dispatch time, not
+streamed (and `--file` doesn't conflict with the F16-followup
+intr-pipe hold because `--file` writes the body via
+`spawn_stdin_writer` and then drops the handle, whereas
+`--stream` without `--file` keeps the pipe open).
 
-**Deferred to v0.1.5.** Explicit OpenSSH `signal` request
-forwarding (instead of relying on PTY-layer SIGINT) +
-double-Ctrl-C escalation via channel close (for processes that
-ignore SIGINT but exit on SIGTERM/SIGHUP). Today's `-tt`
-mechanism covers the field-feedback case (`docker logs -f`,
-`tail -f`, `journalctl -f`); the v0.1.5 escalation is for the
-rarer daemonised-process case.
+---
+
+## 14. Multi-step runner internals (v0.1.3, F17)
+
+`inspect run --steps <manifest.json>` is implemented in
+`src/verbs/steps.rs` and short-circuits the bare-`run` per-target
+fanout in favor of an explicit per-(step, target) sequential
+dispatch loop. Six contracts are load-bearing:
+
+**Multi-target dispatch (sequential within each step).** The
+selector resolves to N>=1 targets. Each manifest step fans out
+across all N targets sequentially within the step (target 1's
+output completes before target 2's begins). Aggregate per-step
+status is `ok` only if every target succeeded; `failed` if any
+target had a non-zero exit; `timeout` if any target overran
+`timeout_s`. `on_failure: "stop"` applies globally (any target's
+failure aborts the next manifest step on every target). Parallel
+fan-out within a step is intentionally not supported in v0.1.3
+(output interleaving + audit-link-ordering races would need a
+separate design pass — sequential keeps the audit log
+deterministic).
+
+**`steps_run_id` linkage.** A single fresh id is generated at
+dispatch time via `AuditEntry::new("steps", &label).id` (matches the
+`<ms>-<4hex>` shape every other audit id uses) and stamped onto:
+- the parent entry (`verb: "run.steps"`, `id == steps_run_id`,
+  `selector: <operator-typed selector>`, `manifest_steps:
+  <ordered name list>`, `manifest_sha256: <sha of manifest body>`),
+- every per-(step, target) entry (`verb: "run.step"`, `step_name:
+  <name>`, `selector: <target's label>`, `steps_run_id: <parent_id>`),
+- every auto-revert entry under `--revert-on-failure` (`verb:
+  "run.step.revert"`, `auto_revert_of: <original-step-id>`,
+  `steps_run_id: <parent_id>`),
+- every entry produced by `inspect revert <steps_run_id>` after the
+  fact (`verb: "run.step.revert"`, `reverts: <parent_id>`,
+  `steps_run_id: <parent_id>`).
+
+The id is never recomputed; an audit query for `steps_run_id =
+<id>` returns the full ordered chain regardless of how many
+revert passes ran against it.
+
+**Composite payload shape.** F11 declared `RevertKind::Composite`
+but had no constructor; F17 nails down the payload as a JSON-encoded
+ordered list of `{step_name, kind, payload}` records, in **manifest
+order**. `inspect revert <parent-id>` walks the list in reverse so
+the most-recent step is undone first. Items with `kind:
+"unsupported"` (steps with no declared `revert_cmd`) are skipped at
+walk time without aborting the unwind. The list is preserved
+verbatim in the parent's `revert.payload` field as a JSON string so
+the audit log is the single source of truth for the inverse
+dispatch order. The payload is target-agnostic: at revert time, the
+parent's `selector` is re-resolved and each inverse fans out
+across the resolved targets (matching the original dispatch shape).
+
+**Per-step capture model + 10 MiB cap.** Each (step, target)
+dispatches via `runner.run_streaming_capturing` so live progress
+prints to local stdout AND the per-(step, target) audit entry
+stores a faithful copy of the captured stdout. The captured copy
+is capped at **10 MiB per (step, target)**; live printing
+continues unaffected past the cap. When the cap is reached, the
+captured copy stops growing and stamps `output_truncated: true`
+on the per-target result so JSON consumers know the captured
+blob is partial. Cap matches the F9 `--stdin-max` default for
+consistency. Under `--steps --stream`, each per-(step, target)
+dispatch flips `tty: true` on its `RunOpts` so the remote process
+line-buffers (live output instead of 4 KB bursts) and the F16
+PTY/SIGINT propagation contract applies per step.
+
+**Per-step audit + parent audit ordering.** Audit entries are
+appended in dispatch order: each per-step entry lands immediately
+after that step's dispatch returns; the parent entry lands AFTER
+the entire pipeline (and after any `--revert-on-failure`
+auto-revert entries) so its `duration_ms` reflects the full
+wall-clock span. Auto-revert entries from `--revert-on-failure`
+land between the last per-step entry and the parent entry, in
+reverse-manifest order, so reading the audit log top-to-bottom
+mirrors the on-screen order the operator saw.
+
+**`cmd_file` F14 composition.** A step with `cmd_file: "./x.sh"`
+reads the local file body, ships it via `bash -s` over SSH stdin,
+and stamps `script_sha256` + `script_bytes` + `script_path` onto
+the per-step audit entry — the same fields F14 stamps for
+`inspect run --file`. **The body is read twice** during dispatch
+(once to compute the sha + size for the audit entry, once to
+provide the bytes for the dispatch closure); this is a
+~negligible-cost simplification that keeps the closure's
+lifetime trivial. Heavy callers can pre-compress or use a `cmd`
+that references a remote-side script if the double-read is a
+concern.
+
+**Default per-step timeout: 8 hours.** Mirrors the F16 `--stream`
+default. Migration steps can run for many minutes (atlas vault
+data migrations in the field have hit ~12 minutes on cold caches);
+the default cap should not be the thing that aborts a real
+migration. Operators override per step with `timeout_s` in the
+manifest.
+
+**Failure-class taxonomy on per-step entries.** Each per-step
+entry carries `failure_class`: `"ok"` (exit 0), `"command_failed"`
+(non-zero exit, command actually ran on remote), `"transport_error"`
+(SSH layer failed), `"timeout"` (per-step wall-clock overrun, exit
+recorded as `-2`). The parent's `failure_class` is `"ok"`,
+`"stopped_on_failure"` (one or more steps failed AND
+`on_failure: "stop"` aborted the pipeline), or `"command_failed"`
+(steps failed but `on_failure: "continue"` ran the rest).
+
+**F13 + F17 dispatch wrapping.** Each (step, target) dispatch is
+wrapped in `dispatch_with_reauth` so a stale-socket failure on
+target N of M during step K triggers F13's transparent reauth +
+retry path on that exact (step, target) pair, without aborting
+the rest of the pipeline. The retried entry stamps `retry_of`
++ `reauth_id` for cross-correlation with the inserted
+`connect.reauth` entry. The per-target result's `retried: true`
+flag surfaces in the JSON output so wrappers can spot transparent
+recoveries.
+
+**`--reason` + `--steps` audit.** When `--reason "<text>"` is
+passed alongside `--steps`, the text is echoed to stderr at start
+(matching bare `inspect run` semantics) AND stamped onto the
+parent `run.steps` audit entry's `reason` field so a 4-hour
+migration's operator intent is recoverable from the audit log
+alone — no terminal scrollback required.
+
+**Out of scope for v0.1.3.** Parallel multi-target fan-out within
+a single step. Sequential fan-out within each step is shipped;
+parallel is genuinely a separate design pass — output
+interleaving + audit-link-ordering races would require a render
++ capture refactor.
 
 ---
 
@@ -755,5 +901,6 @@ rarer daemonised-process case.
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
-mode); §12 in F15 (file transfer); §13 in F16 (streaming executor).
-Any deviation between this runbook and the bible is a runbook bug.*
+mode); §12 in F15 (file transfer); §13 in F16 (streaming executor);
+§14 in F17 (multi-step runner). Any deviation between this runbook
+and the bible is a runbook bug.*

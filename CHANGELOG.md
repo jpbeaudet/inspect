@@ -14,6 +14,200 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F17 — `inspect run --steps <file.json>` multi-step runner with
+  per-step exit codes, structured per-step output, F11 composite
+  revert, and `--revert-on-failure` auto-unwind (migration-operator
+  field feedback: *"When I run a 5-step heredoc, all 5 steps are
+  one 'run' with one exit code. If step 3 fails I see it in the
+  output but the SUMMARY still says `1 ok` because the **outer
+  ssh** succeeded. That made me build defensive `set +e; … || echo
+  MARKER` patterns. A `--steps` mode that took an array of commands
+  and returned per-step exit codes would be amazing for migration
+  scripts."*).** Promotes the defensive `set +e; … || echo MARKER`
+  pattern from a widespread workaround to a first-class verb mode
+  with **structured per-step output that an LLM-driven wrapper can
+  reason about step-by-step**. Without F17, agentic callers cannot
+  reliably build "run these N steps, stop on first failure, give
+  me the per-step result table" workflows on top of `inspect run`
+  — the outer `bash -c`'s exit code masks per-step failures, and
+  the SUMMARY trailer says `1 ok` even when step 3 of 5 failed.
+  - **`--steps <PATH>` flag on `inspect run`.** PATH is a JSON
+    manifest file (or `-` for stdin). Each manifest step has
+    `name` (required, unique), `cmd` (required unless `cmd_file`
+    is set), `cmd_file` (alternative — local script path shipped
+    via `bash -s`; F14 composition), `on_failure` (`"stop"`
+    default | `"continue"`), optional `timeout_s` (per-step
+    wall-clock cap, default 8 hours), optional `revert_cmd`
+    (declared inverse for the F11 composite revert; absent ⇒
+    `revert.kind = "unsupported"` for that step).
+  - **Per-step structured output.** Human format: one
+    `STEP <name> ▶` / `STEP <name> ◀ exit=N duration=Ms` block
+    per step, with the existing `<ns> | …` line-prefixing inside
+    each block, then a STEPS summary table with ✓/✗/⏱/· markers
+    and a count line `STEPS: N total, K ok, M failed, S skipped`.
+    JSON format (`--json`): one structured object containing
+    `steps: [{name, cmd, exit, duration_ms, stdout, stderr,
+    status: "ok"|"failed"|"skipped"|"timeout", audit_id}]` plus
+    `summary: {total, ok, failed, skipped, stopped_at,
+    auto_revert_count}` plus `manifest_sha256` + `steps_run_id`
+    + `verb: "run.steps"`. **This is the contract LLM-driven
+    wrappers can reason about** — no prose parsing, no defensive
+    markers.
+  - **`AuditEntry` gains four F17 fields.** `steps_run_id:
+    Option<String>` links every per-step entry plus the parent
+    composite entry (same UUID-shaped id, in `<ms>-<4hex>`
+    format matching the rest of the audit log); `step_name:
+    Option<String>` is stamped on per-step entries only;
+    `manifest_sha256: Option<String>` is the canonical
+    sha256 of the JSON manifest body, stamped on the parent only;
+    `manifest_steps: Option<Vec<String>>` is the ordered name
+    list, stamped on the parent only. All `Option<T>` with
+    `skip_serializing_if` so pre-F17 entries deserialize
+    unchanged. Plus a new `Revert::composite(payload_json,
+    preview)` constructor since F11's composite variant was
+    declared but had no constructor; `RevertKind::Composite`
+    payload shape is now nailed down: a JSON-encoded ordered
+    list of `{step_name, kind, payload}` records executed in
+    reverse order.
+  - **F11 composite revert (`inspect revert <steps_run_id>`).**
+    `src/commands/revert.rs` gains `revert_composite()` (replaces
+    the v0.1.3-as-of-F11 "not yet implemented" stub) — walks the
+    parent's composite payload list in reverse manifest order,
+    dispatching each `command_pair` inverse against the same
+    selector as the original `--steps` invocation and writing one
+    `run.step.revert` audit entry per inverse, all linked back to
+    the parent via `reverts: <parent-id>`. Items with `kind:
+    "unsupported"` (steps with no declared `revert_cmd`) are
+    skipped without aborting the unwind. Dry-run by default;
+    `--apply` executes; the dry-run preview lists the inverses in
+    reverse-manifest order so the operator sees exactly what
+    `--apply` will run.
+  - **`--revert-on-failure` flag (requires `--steps`).** When a
+    step fails with `on_failure: "stop"`, the runner walks the
+    inverses of the steps that already ran in reverse manifest
+    order **in the same invocation** and dispatches each as its
+    own audit-logged auto-revert entry stamped with
+    `auto_revert_of: <original-step-id>`. Exactly the
+    migration-operator's missing primitive: a 5-step manifest
+    where step 3 fails with `--revert-on-failure` correctly
+    unwinds steps 1 and 2 without a separate `inspect revert`
+    invocation.
+  - **F14 composition via `cmd_file`.** A step can declare
+    `"cmd_file": "./step3.sh"` instead of `"cmd": "..."`; the
+    runner reads the local file, ships its body via `bash -s`,
+    and stamps `script_sha256` + `script_bytes` + `script_path`
+    on the per-step audit entry — the same fields F14 stamps for
+    `inspect run --file`. Lets multi-step migrations whose
+    individual steps are non-trivial scripts compose F14 + F17
+    cleanly without the operator hand-rolling a wrapper.
+  - **F12 / F13 composition.** Each step inherits the namespace
+    env overlay (F12) automatically — overlays validated once
+    before the per-step loop so a typo short-circuits the whole
+    run. Stale-socket failures during a step trigger F13's
+    auto-reauth path identically to bare `inspect run` (the
+    composite payload is only walked after every step completes,
+    so a transparent reauth mid-pipeline is invisible at the F17
+    layer).
+  - **Single-target requirement (v0.1.3 scope).** The selector
+    must resolve to exactly one target; fanout selectors exit 2
+    with a chained hint pointing at single-host narrowing.
+    Multi-host fanout is deferred to v0.1.5 since the per-step
+    audit-link semantics get murky once N hosts each produce
+    their own per-step entries.
+  - **YAML input (`--steps-yaml <PATH>`).** Same manifest schema
+    as `--steps`, just YAML-encoded — convenient for operators
+    who maintain migration manifests alongside CI/CD pipelines.
+    Mutex with `--steps`. Both flags participate in a clap
+    `manifest_source` ArgGroup so `--revert-on-failure` accepts
+    either spelling.
+  - **`--steps --stream` per-step PTY allocation.** Forwards
+    `args.stream` into each per-(step, target) `RunOpts` via the
+    F16 `with_tty(true)` builder. The remote process for each
+    step line-buffers (real-time output instead of 4 KB bursts)
+    and Ctrl-C propagates through the PTY layer to the active
+    step's remote process group. Per-step audit entries record
+    `streamed: true`; the parent `run.steps` entry records
+    `streamed: true` once for the whole pipeline so post-hoc
+    audit can tell streaming-mode pipelines apart from buffered
+    ones.
+  - **Multi-target fanout.** When the selector resolves to N>1
+    targets, each manifest step fans out across all N targets
+    sequentially within the step. Per-step aggregate `status` is
+    `ok` only when every target succeeded; `failed` when any
+    target's exit was non-zero; `timeout` when any target overran
+    `timeout_s`. `on_failure: "stop"` applies globally — any
+    target's failure aborts the next manifest step on every
+    target. Each (step, target) pair writes its own `run.step`
+    audit entry with the target's label as the entry's
+    `selector`; `--revert-on-failure` fans the inverse out
+    across every target the step ran on. The JSON output's per-
+    step record carries a `targets[]` array of per-target results
+    (`label`, `exit`, `duration_ms`, `stdout`, `stderr`,
+    `output_truncated`, `status`, `audit_id`, `retried`); the
+    summary's new `target_count` field exposes N. Multi-target is
+    sequential within each step (parallel fan-out is intentionally
+    out of scope for v0.1.3 — output interleaving + audit-link-
+    ordering races would need a separate design pass).
+  - **F13 stale-session auto-reauth per (step, target).** Each
+    per-target dispatch is wrapped in `dispatch_with_reauth`, so
+    a stale-socket failure mid-pipeline triggers the F13
+    transparent reauth + retry path on that exact (step, target)
+    pair without aborting the rest of the pipeline. Retried
+    entries stamp `retry_of` + `reauth_id` for cross-correlation
+    with the inserted `connect.reauth` entry; the per-target
+    result's `retried: true` flag surfaces in the JSON output.
+  - **Per-step output cap (10 MiB per (step, target)).** Live
+    printing is unaffected (the operator always sees every line);
+    the captured copy that feeds the audit + JSON output stops
+    growing past 10 MiB and stamps `output_truncated: true` on
+    the per-target result. Protects the local process from OOM
+    on a step that emits many GB. Cap matches the F9 `--stdin-max`
+    default for consistency.
+  - **`--reason` plumb-through.** `inspect run --steps --reason
+    "JIRA-1234 atlas vault migration"` echoes the reason to
+    stderr (matches bare `inspect run` semantics) **and** stamps
+    it onto the parent `run.steps` audit entry's `reason` field
+    so a 4-hour migration's operator intent is recoverable from
+    the audit log alone, no terminal scrollback required.
+  - **Out of scope for v0.1.3.** Parallel multi-target fan-out
+    within a single step (sequential is shipped; parallel is
+    deferred because output interleaving + audit-link-ordering
+    races need a separate design pass).
+  - **Test coverage.** 23 acceptance tests in
+    `tests/phase_f_v013.rs` (`f17_*`) covering: 3-step
+    stop-on-failure produces the correct STEPS table + audit
+    shape with `steps_run_id` linkage; `on_failure=continue` runs
+    every step; `--json` output matches the documented schema
+    (per-step records with `targets[]` array + summary +
+    `manifest_sha256` + `target_count`); `--revert-on-failure`
+    walks inverses in reverse manifest order with `auto_revert_of`
+    linkage; unsupported steps are skipped during auto-revert
+    rather than aborting; `--steps` + `--file` clap mutex,
+    `--steps` + `--steps-yaml` mutex; `--revert-on-failure`
+    requires either manifest source via the `manifest_source`
+    ArgGroup (accepts `--steps-yaml` too); `inspect revert
+    <parent-id>` walks the composite payload in reverse (dry-run
+    preview ordering verified); `cmd_file` F14 composition stamps
+    `script_sha256` on the per-step entry; YAML manifests parse
+    and dispatch identically; `--steps --stream` records
+    `streamed: true` on every per-step + parent entry;
+    `--reason` is echoed to stderr AND stamped on the parent
+    audit; per-step output cap leaves small payloads
+    untruncated; per-step `timeout_s` is accepted and reflected
+    in audit; F13 mid-pipeline reauth fires on a stale-socket
+    failure between steps and the pipeline continues; multi-
+    target fanout writes one entry per (step, target) all sharing
+    `steps_run_id`; multi-target step status aggregates to
+    `failed` when any target fails; multi-target
+    `--revert-on-failure` unwinds per-target; help-text gate
+    enforces that `--steps`, `--steps-yaml`, and
+    `--revert-on-failure` appear in `inspect run --help`;
+    invalid manifest exits 2 with a JSON-mentioning error.
+    Plus 8 unit tests in `src/verbs/steps.rs::tests` for the
+    manifest parser + validator (JSON + YAML round-trip, empty
+    manifest, duplicate names, neither cmd nor cmd_file, both
+    cmd and cmd_file, revert_cmd round-trip, timeout round-trip).
+
 - **F16 — `inspect run --stream` / `--follow` line-streaming for
   long-running remote commands (migration-operator field feedback:
   *"`docker compose up -d --force-recreate aware aware-embedder
@@ -92,15 +286,44 @@ is in progress; this section grows as items land.
     streaming for a non-logs command. The `inspect logs`
     discoverability hint added in F10.6 remains the canonical
     pointer for log tailing.
-  - **Out of scope for v0.1.3 (deferred to v0.1.5).** Explicit
-    SSH-protocol `signal` request forwarding (F16 leans on
-    `ssh -tt`'s PTY-layer SIGINT propagation, which is the
-    standard OpenSSH idiom and works for every remote process
-    that respects SIGINT — but does not handle the corner case of
-    a remote process that ignores SIGINT but exits on
-    SIGTERM/SIGHUP, where double-Ctrl-C escalation via channel
-    close would be the next step). Documented in the v0.1.5
-    streaming-polish section.
+  - **First-Ctrl-C → SIGINT-via-PTY, second-Ctrl-C-within-1s →
+    channel-close-SIGHUP escalation (added late in v0.1.3).**
+    The streaming SSH executor now writes the ASCII INTR byte
+    (`\x03`) into the SSH stdin pipe on the first Ctrl-C — the
+    remote PTY's terminal driver sees ETX and delivers SIGINT to
+    the remote process group, which is the OpenSSH-idiomatic way
+    to forward SIGINT through a PTY (no reliance on the unreliable
+    SSH `signal` channel-request protocol message). The local
+    cancel flag is then cleared so the verb surfaces the remote's
+    real exit code (matches the field-validation gate's
+    "Ctrl-C terminates `docker logs -f`, exit code is the
+    docker-logs exit code"). On the second Ctrl-C within 1
+    second, the executor escalates to channel close (`child.kill()`
+    on the local SSH process), which triggers the remote sshd to
+    deliver SIGHUP to the remote process group via PTY teardown
+    — covering the corner case of a remote process that ignores
+    SIGINT but exits on SIGHUP. Counter-based detection in
+    `src/exec/cancel.rs` (new `signal_count()` + `reset_cancel_flag()`
+    APIs) so a third signal cannot be lost between polls.
+
+- **F16 follow-up — SIGHUP escalation in the streaming SSH
+  executor.** First-Ctrl-C → SIGINT-via-PTY (write `\x03` into
+  the remote PTY's terminal driver, which delivers SIGINT to the
+  remote process group); second-Ctrl-C-within-1s → channel close
+  (kill the local SSH child, which triggers sshd to deliver
+  SIGHUP to the remote process group via PTY teardown). New
+  signal-count API in `src/exec/cancel.rs` (`signal_count()`,
+  `reset_cancel_flag()`) so the streaming executor can detect a
+  *new* signal between polls without losing the trip. The local
+  SSH child's stdin is now `Stdio::piped()` (instead of
+  `Stdio::null()`) when `opts.tty` is set so we have a write
+  handle for the `\x03`. Test coverage: 2 new unit tests in
+  `src/exec/cancel.rs::tests` (`signal_count_increments_per_cancel`,
+  `reset_cancel_flag_clears_only_the_flag`); the real-SSH SIGHUP
+  escalation behaviour is exercised by the field-validation gate
+  (a remote command that ignores SIGINT but exits on SIGHUP
+  receives SIGHUP via channel close on the second Ctrl-C within
+  1 second).
   - **Test coverage.** 6 acceptance tests in
     `tests/phase_f_v013.rs` (`f16_*`) covering: `--stream`
     records `streamed: true` on success, `--follow` alias is
