@@ -24,7 +24,7 @@ DIAGNOSTIC + READ VERBS
   $ inspect ps / health / cat / grep / find / ls / ports / volumes / network / images
 
 WRITE + LIFECYCLE VERBS
-  $ inspect restart / stop / start / reload / cp / edit / rm / chmod / chown
+  $ inspect restart / stop / start / reload / put / get / cp / edit / rm / chmod / chown
 
 For the full list run `inspect --help` (each verb), or `inspect help <topic>` for editorial guides.
 ";
@@ -370,8 +370,9 @@ STDIN HANDLING (F9, v0.1.3)
   forwarded payload (off by default for perf).
 
   Default size cap is 10 MiB; raise with `--stdin-max <SIZE>` (k/m/g
-  suffixes), set `--stdin-max 0` to disable, or use `inspect cp` for
-  bulk transfer (faster, resumable, audit-tracked separately).
+  suffixes), set `--stdin-max 0` to disable, or use `inspect put`
+  (canonical) / `inspect cp` for bulk transfer (uncapped,
+  audit-tracked, F11-revertible).
 
   Pass `--no-stdin` to refuse to forward; if you pass `--no-stdin`
   while local stdin has data waiting, `inspect run` exits 2 BEFORE
@@ -444,12 +445,64 @@ EXAMPLES
 const LONG_CP: &str = "\
 Copy a file between local and remote (push or pull, depending on which \
 side carries `<sel>:<path>`). Dry-run by default; `--diff` shows a \
-unified diff before `--apply`.
+unified diff before `--apply`. Bidirectional convenience over the \
+canonical F15 verbs `inspect put` (upload) and `inspect get` \
+(download); arg shape decides the direction. See `inspect help write`.
 
 EXAMPLES
   $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --diff
   $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --apply
   $ inspect cp arte/atlas:/var/log/atlas.log ./atlas.log";
+
+const LONG_PUT: &str = "\
+Upload a local file to a remote path on a namespace target (F15, \
+v0.1.3). The remote endpoint can be a host-level path \
+(`<ns>/_:/path` or the `<ns>:/path` shorthand from F7.2) or a \
+container-level path (`<ns>/<svc>:/path`, dispatched via \
+`docker exec -i <ctr> sh -c 'cat > /path'`). The transfer rides on \
+the same persistent ControlPath master used by every other \
+namespace verb, so it inherits F12 env overlay, F13 stale-session \
+auto-reauth, F11 revert capture, and the standard audit trail.
+
+Dry-run by default; `--apply` executes. Captures the prior remote \
+file content as `revert.kind = state_snapshot` (or a delete-the-file \
+inverse when the target did not exist), so `inspect revert <id>` \
+restores either way.
+
+EXAMPLES
+  $ inspect put ./fix.conf arte:/etc/atlas/fix.conf --apply
+  $ inspect put ./atlas.yml arte/_:/etc/compose/atlas.yml --apply
+  $ inspect put ./vault.hcl arte/atlas-vault:/etc/vault/config.hcl --apply
+  $ inspect put ./helper arte:/usr/local/bin/helper --mode 0755 --apply
+  $ inspect put ./cfg arte:/etc/svc/cfg --mkdir-p --apply
+
+NOTE
+  `inspect cp` is a bidirectional convenience that dispatches to
+  `put` (local → remote) or `get` (remote → local) based on arg
+  shape. The canonical names are `put` and `get`.";
+
+const LONG_GET: &str = "\
+Download a remote file from a namespace target to a local path \
+(F15, v0.1.3). The remote endpoint can be a host-level path \
+(`<ns>/_:/path` or the `<ns>:/path` shorthand from F7.2) or a \
+container-level path (`<ns>/<svc>:/path`). Like every other \
+namespace-bound verb, the transfer rides the persistent ControlPath \
+master and inherits F12 env overlay + F13 auto-reauth.
+
+`inspect get` is read-only on the remote, so `revert.kind` is \
+`unsupported` (revert by deleting the local file). The audit \
+entry still records `bytes` + `sha256` so a later `inspect put` \
+of the same content is verifiable byte-for-byte.
+
+EXAMPLES
+  $ inspect get arte:/etc/compose/atlas.yml ./atlas.yml
+  $ inspect get arte/_:/var/log/syslog ./syslog
+  $ inspect get arte/atlas-vault:/etc/vault/config.hcl ./vault.hcl
+  $ inspect get arte:/etc/issue -                            # `-` writes to stdout
+
+NOTE
+  `inspect cp` dispatches here when the source carries the
+  selector. Canonical name is `get`.";
 
 const LONG_EDIT: &str = "\
 In-place sed-style content edit (atomic). Dry-run by default — shows a \
@@ -673,6 +726,12 @@ pub enum Command {
     /// Copy files between local and remote.
     #[command(long_about = LONG_CP)]
     Cp(CpArgs),
+    /// Upload a local file to a namespace target (F15, v0.1.3).
+    #[command(long_about = LONG_PUT)]
+    Put(PutArgs),
+    /// Download a remote file from a namespace target (F15, v0.1.3).
+    #[command(long_about = LONG_GET)]
+    Get(GetArgs),
     /// Sed-style content edit.
     #[command(long_about = LONG_EDIT)]
     Edit(EditArgs),
@@ -2177,6 +2236,91 @@ pub struct CpArgs {
     /// F11 (v0.1.3): print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
+    /// F15 (v0.1.3): on a push, set the remote file's mode (octal,
+    /// e.g. `0755` or `755`) after the transfer. Applied via
+    /// `chmod` on the remote; overrides the mode-mirror that the
+    /// atomic-write helper would otherwise inherit from the prior
+    /// file at the same path.
+    #[arg(long, value_name = "OCTAL")]
+    pub mode: Option<String>,
+    /// F15 (v0.1.3): on a push, set the remote file's owner
+    /// (`user` or `user:group`) after the transfer. Requires the
+    /// SSH user have permission to chown — typically root via
+    /// the namespace's existing privilege model.
+    #[arg(long, value_name = "USER[:GROUP]")]
+    pub owner: Option<String>,
+    /// F15 (v0.1.3): on a push, create missing parent directories
+    /// on the remote (`mkdir -p`) before writing. Without this,
+    /// a missing parent dir surfaces as `error: remote parent
+    /// directory does not exist` and the transfer is aborted.
+    #[arg(long)]
+    pub mkdir_p: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(long_about = LONG_PUT, after_help = SEE_ALSO_WRITE)]
+pub struct PutArgs {
+    /// Local source path.
+    pub local: String,
+    /// Remote destination as `<selector>:<path>` (e.g.
+    /// `arte:/etc/foo`, `arte/_:/etc/foo`,
+    /// `arte/atlas:/etc/vault/config.hcl`). Selector must carry a
+    /// `:<path>` — F7.2 shorthand `<ns>:/path` resolves to the
+    /// host-level `_` service.
+    pub remote: String,
+    /// Apply the transfer. Without this, prints a dry-run preview.
+    #[arg(long)]
+    pub apply: bool,
+    /// Show a unified diff in dry-run mode.
+    #[arg(long)]
+    pub diff: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// F11 (v0.1.3): print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
+    /// F15 (v0.1.3): set the remote file's mode (octal, e.g. `0755`
+    /// or `755`) after the transfer. Applied via `chmod` on the
+    /// remote; overrides the mode-mirror inherited from any prior
+    /// file at the same path.
+    #[arg(long, value_name = "OCTAL")]
+    pub mode: Option<String>,
+    /// F15 (v0.1.3): set the remote file's owner (`user` or
+    /// `user:group`) after the transfer. Requires the SSH user
+    /// have permission to chown.
+    #[arg(long, value_name = "USER[:GROUP]")]
+    pub owner: Option<String>,
+    /// F15 (v0.1.3): create missing parent directories on the
+    /// remote (`mkdir -p`) before writing. Without this, a missing
+    /// parent surfaces as `error: remote parent directory does not
+    /// exist` and the transfer aborts.
+    #[arg(long)]
+    pub mkdir_p: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(long_about = LONG_GET, after_help = SEE_ALSO_WRITE)]
+pub struct GetArgs {
+    /// Remote source as `<selector>:<path>` (e.g.
+    /// `arte:/etc/foo`, `arte/_:/etc/foo`,
+    /// `arte/atlas:/etc/vault/config.hcl`). Selector must carry a
+    /// `:<path>` — F7.2 shorthand `<ns>:/path` resolves to the
+    /// host-level `_` service.
+    pub remote: String,
+    /// Local destination path, or `-` to write to stdout.
+    pub local: String,
+    /// Free-form note recorded in the audit entry. Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

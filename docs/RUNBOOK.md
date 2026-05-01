@@ -577,8 +577,8 @@ Script mode dispatches through the same SSH executor as bare
   `failure_class` exactly as for argv-cmd-mode runs.
 - F9 size cap (`--stdin-max`) protects against pathological script
   sizes (default 10 MiB; raise with `--stdin-max 100m`, set to
-  `0` to disable, or use `inspect cp` for bulk transfer +
-  remote-side execution).
+  `0` to disable, or use `inspect put` (F15) for bulk file
+  transfer (uncapped, audit-tracked, F11-revertible)).
 - F10.7 `--clean-output` and the F7.4 `--quiet` summary
   suppression compose unchanged.
 
@@ -588,11 +588,63 @@ v0.1.3 — that's a v0.1.5 follow-up that will require the
 `# inspect-revert: <inverse-script-path>` directive contract for
 revertability.
 
+## 12. File transfer internals (v0.1.3, F15)
+
+`inspect put` / `inspect get` / `inspect cp` are implemented in
+`src/verbs/transfer.rs` and dispatch through the same SSH executor
+as every other namespace verb. Three contracts are load-bearing:
+
+**ControlPath reuse.** Transfers spawn no separate `scp` process.
+Push uses `RunOpts::with_stdin(<bytes>)` to stream the local body
+into a remote `sh -c 'set -e; cat > <tmp>; ... ; mv <tmp> <path>'`
+pipeline; pull uses `base64 -- <path>` over the same pipe and
+decodes locally. Both paths reuse the namespace's existing
+`~/.inspect/sockets/<ns>.sock` master, so they inherit auth,
+F12 env overlay, and F13 auto-reauth behaviour automatically.
+
+**Atomic rename + permission preservation.** The atomic-write
+shell snippet (`transfer::build_stream_atomic_script`) reads
+stdin into `<path>.inspect.<sha8>.tmp`, then conditionally
+mirrors mode/ownership from `<path>` (when it exists) via
+`chmod --reference` / `chown --reference`. Operator-supplied
+`--mode` / `--owner` overrides apply *after* the mirror so they
+always win. Atomic `mv` preserves the inode for the prior file's
+hardlinks and ensures readers see the file at a consistent state.
+
+**F11 revert capture.** `put` invokes `read_remote` (a `cat --
+<path>` round-trip) **before** dispatching the write so the prior
+content can be put into the snapshot store and the audit entry's
+`revert.kind = state_snapshot` field can point at it. When the
+read fails (file does not exist or permission denied), the audit
+entry instead records `revert.kind = command_pair` with an
+inverse `rm -f -- <path>` so revert deletes the brand-new file.
+`get` is read-only on the remote — its `revert.kind` is always
+`unsupported` (the operator deletes the local file to undo); the
+audit entry still records bytes + sha256 for byte-for-byte
+verifiability.
+
+**Container vs host dispatch.** The selector form decides:
+`<ns>/_:/path` or `<ns>:/path` runs the helper directly via
+`sh -c '...'`; `<ns>/<svc>:/path` wraps it in
+`docker exec -i <ctr> sh -c '...'`. Both use the same atomic
+helper script.
+
+**No size cap (post-F15).** The pre-F15 `cp` had a 4 MiB hard
+cap because the body was base64-encoded into the command argv.
+F15 streams via stdin, so the only practical limits are the SSH
+master's multiplex starvation behaviour (warning > 1 MiB,
+silenceable with `INSPECT_CP_WARN_BYTES=0`) and the remote disk.
+
+**Deferred to v0.1.5:** `--since <duration>` / `--max-bytes
+<size>` on `get` (log-retrieval ergonomics, redundant with
+`inspect logs --since`), `--resume` for partial transfers
+(chunked-protocol design pass).
+
 ---
 
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
-mode). Any deviation between this runbook and the bible is a
-runbook bug.*
+mode); §12 in F15 (file transfer). Any deviation between this
+runbook and the bible is a runbook bug.*

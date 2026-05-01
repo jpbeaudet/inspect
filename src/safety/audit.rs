@@ -169,6 +169,36 @@ pub struct AuditEntry {
     /// `skip_serializing_if`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets_masked_kinds: Option<Vec<String>>,
+    /// F15 (v0.1.3): direction of a file-transfer verb (`inspect put`
+    /// / `inspect get` / `inspect cp`). `Some("up")` for uploads
+    /// (local → remote), `Some("down")` for downloads (remote →
+    /// local). `None` for every non-transfer verb. Pre-F15 cp
+    /// entries elide the field via `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_direction: Option<String>,
+    /// F15 (v0.1.3): absolute local path of a file-transfer verb's
+    /// local-side endpoint. The same field carries the source path
+    /// (uploads) or the destination path (downloads); the
+    /// `transfer_direction` discriminator disambiguates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_local: Option<String>,
+    /// F15 (v0.1.3): remote-side path of a file-transfer verb. May
+    /// be a host-filesystem path or, for container-fs transfers, a
+    /// path inside the target container; the `selector` field still
+    /// names which container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_remote: Option<String>,
+    /// F15 (v0.1.3): byte length of the transferred payload. Always
+    /// present for completed transfers (matches the count fed into
+    /// the SHA-256 tee).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_bytes: Option<u64>,
+    /// F15 (v0.1.3): SHA-256 (hex) of the transferred payload,
+    /// computed during the transfer via a streaming tee on both
+    /// sides so a `put` followed by a `get` of the same file can be
+    /// verified byte-for-byte from the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_sha256: Option<String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -302,6 +332,11 @@ impl AuditEntry {
             script_body: None,
             script_interp: None,
             secrets_masked_kinds: None,
+            transfer_direction: None,
+            transfer_local: None,
+            transfer_remote: None,
+            transfer_bytes: None,
+            transfer_sha256: None,
         }
     }
 }

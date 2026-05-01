@@ -14,6 +14,92 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F15 — `inspect put` / `inspect get` / `inspect cp` native file
+  transfer over the persistent ControlPath master (migration-operator
+  field feedback: *"I had to context-switch between
+  `inspect run arte -- 'cat > /tmp/x.sh'` (works for tiny payloads,
+  breaks on quoting) vs `scp /tmp/x ...:arte:...` (works but bypasses
+  the inspect connection). For a tool whose job is 'be the way I
+  touch this server,' not having `inspect put`/`inspect get` is a
+  notable hole. Especially during compose-file rewrites."*).**
+  Replaces the v0.1.2 base64-in-argv `cp` implementation (4 MiB
+  cap, audit-thin) with a streaming-stdin pipeline that has no
+  fixed size cap, captures pre-existing remote content as
+  `revert.kind = state_snapshot` (or a delete inverse for
+  brand-new files), and records direction / bytes / sha256 in the
+  audit log on every transfer. Rides the same multiplexed SSH
+  master used by every other namespace verb, so it inherits F11
+  revert capture, F12 env overlay, F13 stale-session auto-reauth.
+  - **`inspect put <local> <selector>:<path>`** — uploads via
+    `cat > <tmp>; chmod/chown --reference; mv <tmp> <path>` with
+    the local body streamed through SSH stdin (F9). Container
+    targets dispatch via `docker exec -i <ctr> sh -c '...'`.
+    Captures the prior remote file content as `revert.kind =
+    state_snapshot` so `inspect revert <id>` restores byte-for-byte;
+    when the target did not exist, captures a `command_pair` rm
+    inverse so revert deletes the freshly-created file.
+  - **`inspect get <selector>:<path> <local>`** — downloads via
+    `base64 -- <path>` (binary-safe over the SSH text pipe) and
+    decodes locally. `<local>` of `-` writes to stdout for piping.
+    `inspect get` is read-only on the remote, so `revert.kind` is
+    `unsupported` (the operator deletes the local file to undo);
+    the audit entry still records `transfer_bytes` +
+    `transfer_sha256` so a later `put` of the same content is
+    verifiable byte-for-byte from the audit log.
+  - **`inspect cp <source> <dest>`** — bidirectional convenience.
+    Inspects arg shape and routes to `put` (push) or `get` (pull)
+    based on which side carries the `<selector>:<path>`. Operator
+    types `cp`, audit records the canonical verb (`put` or `get`).
+    The pre-F15 base64-in-argv backend is removed; the 4 MiB hard
+    cap is gone with it.
+  - **Selector forms.** Both verbs accept the existing selector
+    grammar: `<ns>/_:/path` (host filesystem; F7.2 shorthand
+    `<ns>:/path` resolves to host), and `<ns>/<svc>:/path`
+    (container filesystem, dispatched via `docker exec -i`).
+    Host vs container is decided unambiguously by the selector,
+    never by a flag.
+  - **Flags on `put` / `cp`.** `--mode <octal>` chmod the remote
+    after upload; `--owner <user[:group]>` chown the remote after
+    upload (requires the SSH user have permission); `--mkdir-p`
+    create missing parent dirs on the remote before writing
+    (without this, a missing parent surfaces as `error: remote
+    parent directory does not exist` and the transfer aborts).
+    Operator overrides land *after* the mode/owner mirror from
+    the prior file, so the override always wins.
+  - **Audit shape.** `AuditEntry` gains five F15 fields
+    (`transfer_direction: "up"|"down"`, `transfer_local`,
+    `transfer_remote`, `transfer_bytes`, `transfer_sha256`), all
+    `Option<T>` with `skip_serializing_if` so pre-F15 entries
+    deserialize unchanged. The existing `previous_hash` /
+    `new_hash` / `snapshot` / `diff_summary` fields continue to
+    record what they did for v0.1.2 cp, so audit-driven revert
+    keeps working for every entry.
+  - **Hint surface.** `inspect run`'s F9 stdin-cap hint and
+    F14's `--file` size-cap hint now point at `inspect put`
+    (the canonical name) for bulk transfer instead of the
+    pre-F15 `inspect cp`. `inspect exec --apply` still references
+    `cp` in its "structured-write-verb" hint, now interpreted as
+    the bidirectional alias to `put` / `get`.
+  - **Out of scope for v0.1.3 (deferred to v0.1.5).**
+    `--since <duration>` / `--max-bytes <size>` on `get`
+    (log-retrieval ergonomics; the dedicated `inspect logs`
+    verb already covers that domain), `--resume` for partial
+    transfers (chunked-protocol design pass).
+  - **Test coverage.** 12 acceptance tests in
+    `tests/phase_f_v013.rs` (`f15_*`) covering: host-fs upload
+    via stdin with audit fields recorded, container-fs upload
+    via `docker exec -i`, state_snapshot revert when target
+    exists, command_pair (rm) revert when target does not
+    exist, dry-run no-dispatch, `--mode` override path,
+    `--mkdir-p` parent creation path, host-fs download via
+    `base64 --` decode, `-` local writes to stdout, `get`
+    audit records `transfer_direction = down` +
+    `revert.kind = unsupported`, `cp` regression dispatching to
+    `put` / `get` by arg shape (audit verb canonicalised).
+    Plus 8 unit tests in `src/verbs/transfer.rs::tests` for the
+    atomic-write script builder and the `looks_remote`
+    selector-vs-local-path detector.
+
 - **L7 — Header / PEM / URL credential redaction in stdout
   (v0.1.2 retrospective: agent workflows pipe remote stdout into
   LLM context windows; the existing P4 line-oriented `KEY=VALUE`

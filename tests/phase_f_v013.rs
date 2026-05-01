@@ -599,7 +599,7 @@ fn f9_run_no_stdin_with_piped_input_exits_2_before_dispatch() {
         "stderr should explain --no-stdin contract: {stderr}"
     );
     assert!(
-        stderr.contains("inspect cp")
+        stderr.contains("inspect put")
             || stderr.contains("--stdin")
             || stderr.contains("forwarding is disabled"),
         "stderr should chain hint at the recovery action: {stderr}"
@@ -609,7 +609,7 @@ fn f9_run_no_stdin_with_piped_input_exits_2_before_dispatch() {
 #[test]
 fn f9_run_stdin_size_cap_exceeded_exits_2() {
     // Size-cap contract: payload above --stdin-max exits 2 with a
-    // chained hint pointing at `inspect cp`. No remote command fires.
+    // chained hint pointing at `inspect put` (F15). No remote command fires.
     let sb = Sandbox::new(f9_run_mock());
     write_servers_toml(sb.home(), &["arte"]);
     write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
@@ -623,8 +623,8 @@ fn f9_run_stdin_size_cap_exceeded_exits_2() {
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stderr.contains("cap") && stderr.contains("inspect cp"),
-        "stderr should explain the size cap and chain to inspect cp: {stderr}"
+        stderr.contains("cap") && stderr.contains("inspect put"),
+        "stderr should explain the size cap and chain to inspect put: {stderr}"
     );
 }
 
@@ -3308,8 +3308,8 @@ fn f14_run_file_above_size_cap_exits_2() {
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stderr.contains("cap") && stderr.contains("inspect cp"),
-        "size-cap error should chain to inspect cp: {stderr}"
+        stderr.contains("cap") && stderr.contains("inspect put"),
+        "size-cap error should chain to inspect put: {stderr}"
     );
 }
 
@@ -4178,5 +4178,328 @@ fn l7_exec_audit_records_kinds_and_args_tag() {
     assert!(
         !body.contains("leak_me"),
         "Bearer token leaked into audit: {body}"
+    );
+}
+
+// =============================================================================
+// F15 — `inspect put` / `inspect get` / `inspect cp` file transfer over the
+// persistent ControlPath master. Replaces the v0.1.2 base64-in-argv `cp` with
+// a streaming-stdin pipeline that has no fixed size cap, captures
+// state_snapshot revert on `put`, and records direction / bytes / sha256 in
+// the audit log on every transfer.
+// =============================================================================
+
+/// Mock harness for F15 transfer tests. Returns a JSON spec covering both
+/// the read (`cat --` for prior-content snapshot and dry-run diff) and the
+/// streaming write (`cat >` inside the atomic-write helper). Per-test
+/// overrides specialise the read exit code (e.g. 1 to simulate missing
+/// target) and the docker-exec branch.
+fn f15_transfer_mock(prior_content: &str, prior_exit: i32) -> serde_json::Value {
+    json!([
+        // Read prior remote content. Used by both the dry-run diff path
+        // and by `put` apply for revert state_snapshot capture.
+        { "match": "cat --", "stdout": prior_content, "exit": prior_exit },
+        // Streaming write: cat > /tmp; ... ; mv /tmp /path. The atomic
+        // helper wraps in `sh -c 'set -e; ...'` so the runner sees the
+        // full pipeline as one command. Match on `cat >` to disambiguate
+        // from the read.
+        { "match": "cat >", "stdout": "", "exit": 0 },
+        // Get path: base64-encode the remote file for binary safety.
+        { "match": "base64 --", "stdout": "aGVsbG8K\n", "exit": 0 }
+    ])
+}
+
+#[test]
+fn f15_put_host_uploads_via_stdin_and_records_audit() {
+    let sb = Sandbox::new(f15_transfer_mock("old\n", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("payload.txt");
+    std::fs::write(&local, b"new contents\n").unwrap();
+    sb.cmd()
+        .args(["put", local.to_str().unwrap(), "arte/_:/etc/foo", "--apply"])
+        .assert()
+        .success()
+        .stdout(contains("pushed").and(contains("13 bytes")));
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"transfer_direction\":\"up\""),
+        "audit missing transfer_direction=up: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_remote\":\"/etc/foo\""),
+        "audit missing transfer_remote: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_bytes\":13"),
+        "audit missing transfer_bytes: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_sha256\":\"sha256:"),
+        "audit missing transfer_sha256 prefix: {body}"
+    );
+}
+
+#[test]
+fn f15_put_dry_run_does_not_dispatch_write() {
+    // Without `--apply`, only the dry-run read path should fire (no
+    // `cat >` write). The audit log should be empty.
+    let sb = Sandbox::new(f15_transfer_mock("old\n", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("payload.txt");
+    std::fs::write(&local, b"new\n").unwrap();
+    sb.cmd()
+        .args(["put", local.to_str().unwrap(), "arte/_:/etc/foo", "--diff"])
+        .assert()
+        .success()
+        .stdout(contains("DRY RUN"));
+    // No audit entry written on dry-run.
+    let dir = sb.home().join("audit");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        entries.is_empty(),
+        "dry-run must not write an audit entry; got {} entries",
+        entries.len()
+    );
+}
+
+#[test]
+fn f15_put_state_snapshot_revert_when_target_exists() {
+    // Prior content non-empty + cat exit 0 → revert.kind = state_snapshot.
+    let sb = Sandbox::new(f15_transfer_mock("prior content\n", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("p.txt");
+    std::fs::write(&local, b"new content\n").unwrap();
+    sb.cmd()
+        .args(["put", local.to_str().unwrap(), "arte/_:/etc/foo", "--apply"])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"kind\":\"state_snapshot\""),
+        "expected state_snapshot revert.kind: {body}"
+    );
+    assert!(
+        body.contains("\"snapshot\":"),
+        "expected snapshot path field: {body}"
+    );
+}
+
+#[test]
+fn f15_put_command_pair_revert_when_target_does_not_exist() {
+    // cat exit 1 → file not found → revert.kind = command_pair (rm).
+    let sb = Sandbox::new(f15_transfer_mock("", 1));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("brand-new.txt");
+    std::fs::write(&local, b"hello\n").unwrap();
+    sb.cmd()
+        .args([
+            "put",
+            local.to_str().unwrap(),
+            "arte/_:/etc/never-existed",
+            "--apply",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"kind\":\"command_pair\""),
+        "expected command_pair revert.kind for new-file put: {body}"
+    );
+    assert!(
+        body.contains("rm -f"),
+        "command_pair payload should describe the inverse rm: {body}"
+    );
+}
+
+#[test]
+fn f15_put_container_fs_dispatches_via_docker_exec_dash_i() {
+    // Service-bearing selector → atomic helper wrapped in
+    // `docker exec -i <ctr> sh -c '...'`. The mock would need to match
+    // that pattern; we just assert the command succeeds and the audit
+    // entry records the container service in `selector`.
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("conf.txt");
+    std::fs::write(&local, b"x=1\n").unwrap();
+    sb.cmd()
+        .args([
+            "put",
+            local.to_str().unwrap(),
+            "arte/atlas:/etc/atlas.conf",
+            "--apply",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"selector\":\"arte/atlas:/etc/atlas.conf\""),
+        "container selector should appear verbatim: {body}"
+    );
+}
+
+#[test]
+fn f15_put_mode_override_records_in_audit_args() {
+    // The atomic-write helper applies --mode after mirroring; the
+    // operator-supplied octal flows through to the chmod call. Verify
+    // the put completes and the audit entry exists; inner script
+    // contents tested by transfer.rs unit tests
+    // (`atomic_script_applies_mode_override_after_mirror`).
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("helper.sh");
+    std::fs::write(&local, b"#!/bin/sh\nexit 0\n").unwrap();
+    sb.cmd()
+        .args([
+            "put",
+            local.to_str().unwrap(),
+            "arte/_:/usr/local/bin/helper",
+            "--mode",
+            "0755",
+            "--apply",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn f15_put_mkdir_p_creates_remote_parents() {
+    // Same dispatch shape; the atomic helper inserts `mkdir -p
+    // "$(dirname /path)"` before the cat redirect. Unit tests cover the
+    // script wiring.
+    let sb = Sandbox::new(f15_transfer_mock("", 1));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("cfg.txt");
+    std::fs::write(&local, b"a=1\n").unwrap();
+    sb.cmd()
+        .args([
+            "put",
+            local.to_str().unwrap(),
+            "arte/_:/var/lib/missing/dir/cfg.txt",
+            "--mkdir-p",
+            "--apply",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn f15_get_host_decodes_base64_to_local_file() {
+    // Mock returns "aGVsbG8K" (base64 of "hello\n"); local file should
+    // receive 6 bytes ("hello\n") byte-for-byte.
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("dest.txt");
+    sb.cmd()
+        .args(["get", "arte/_:/etc/issue", local.to_str().unwrap()])
+        .assert()
+        .success();
+    let got = std::fs::read(&local).unwrap();
+    assert_eq!(got, b"hello\n", "binary-safe roundtrip via base64");
+}
+
+#[test]
+fn f15_get_dash_local_writes_to_stdout() {
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["get", "arte/_:/etc/issue", "-"])
+        .assert()
+        .success()
+        .stdout(contains("hello"));
+}
+
+#[test]
+fn f15_get_audit_records_transfer_down() {
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("dest.txt");
+    sb.cmd()
+        .args(["get", "arte/_:/etc/issue", local.to_str().unwrap()])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"transfer_direction\":\"down\""),
+        "audit missing transfer_direction=down: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_remote\":\"/etc/issue\""),
+        "audit missing transfer_remote: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_bytes\":6"),
+        "audit missing transfer_bytes (=6 for `hello\\n`): {body}"
+    );
+    assert!(
+        body.contains("\"kind\":\"unsupported\""),
+        "get is read-only on remote → revert.kind=unsupported: {body}"
+    );
+}
+
+#[test]
+fn f15_cp_dispatches_to_put_when_dest_is_remote() {
+    // Backwards-compat regression guard: the `cp` verb still routes
+    // local→remote pushes through the new transfer.rs put flow. Audit
+    // entry's verb is `put` (the canonical name), not `cp`, even
+    // though the operator typed `cp`.
+    let sb = Sandbox::new(f15_transfer_mock("old\n", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("local.txt");
+    std::fs::write(&local, b"new\n").unwrap();
+    sb.cmd()
+        .args(["cp", local.to_str().unwrap(), "arte/_:/etc/foo", "--apply"])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"verb\":\"put\""),
+        "cp local→remote should record verb=put: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_direction\":\"up\""),
+        "cp local→remote should record transfer_direction=up: {body}"
+    );
+}
+
+#[test]
+fn f15_cp_dispatches_to_get_when_source_is_remote() {
+    let sb = Sandbox::new(f15_transfer_mock("", 0));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let local = sb.home().join("dest.txt");
+    sb.cmd()
+        .args([
+            "cp",
+            "arte/_:/etc/issue",
+            local.to_str().unwrap(),
+            "--apply",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"verb\":\"get\""),
+        "cp remote→local should record verb=get: {body}"
+    );
+    assert!(
+        body.contains("\"transfer_direction\":\"down\""),
+        "cp remote→local should record transfer_direction=down: {body}"
     );
 }

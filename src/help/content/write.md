@@ -5,12 +5,14 @@ EXAMPLES
   $ inspect restart arte/pulse --apply                    # execute
   $ inspect edit arte/atlas:/etc/foo 's/old/new/'         # show diff (dry-run)
   $ inspect edit arte/atlas:/etc/foo 's/old/new/' --apply
-  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf
-  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --apply
+  $ inspect put ./fix.conf arte:/etc/pulse.conf --apply   # F15 upload
+  $ inspect get arte:/etc/pulse.conf ./pulse.conf         # F15 download
 
 WRITE VERBS
   restart / stop / start / reload    container lifecycle
-  cp <local> <sel>:<path>            push file (or pull: cp <sel>:<path> <local>)
+  put <local> <sel>:<path>           upload file (F15, atomic, F11-revertible)
+  get <sel>:<path> <local>           download file (F15; `-` writes to stdout)
+  cp <src> <dst>                     bidirectional alias for put / get
   edit <sel>:<path> '<sed-expr>'     in-place content edit (atomic)
   rm / mkdir / touch                 file operations
   chmod / chown                      permission changes

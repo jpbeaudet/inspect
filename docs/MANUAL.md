@@ -732,14 +732,100 @@ With `--audit-script-body`, the body is also inlined under
   chained `--file`-pointing recovery hint.
 
 **Size cap.** Script-mode shares F9's `--stdin-max` budget
-(default 10 MiB). Above the cap, exit 2 with the standard
-`inspect cp` chained hint.
+(default 10 MiB). Above the cap, exit 2 with the chained hint
+pointing at `inspect put` (F15).
 
 **Composes with the rest of v0.1.3.** Script mode dispatches
 through the same SSH executor as bare `inspect run`, so the
 namespace env overlay (F12), stale-session auto-reauth (F13), and
 all output-shape contracts (F7.4 `--quiet`, F10.7 `--clean-output`,
 F8 cache, F9 stdin audit) compose unchanged.
+
+### 7.7 File transfer: `inspect put` / `inspect get` / `inspect cp` (F15, v0.1.3)
+
+`inspect put <local> <ns>:/path` uploads a local file to a remote
+path; `inspect get <ns>:/path <local>` downloads. Both ride the
+persistent ControlPath master used by every other namespace verb,
+so they inherit the namespace's auth, audit log, F11 revert
+capture, F12 env overlay, and F13 stale-session auto-reauth.
+`inspect cp` is the bidirectional convenience (operator types `cp`,
+arg shape decides direction; the audit records the canonical
+`put` / `get` verb).
+
+```sh
+# Upload a compose file edit to the host.
+inspect put ./atlas.yml arte:/etc/compose/atlas.yml --apply
+
+# Pull a config off the host for editing.
+inspect get arte:/etc/compose/atlas.yml ./atlas.yml
+
+# Container filesystem (selector names a service).
+inspect put ./vault.hcl arte/atlas-vault:/etc/vault/config.hcl --apply
+
+# Stream a small file straight to stdout.
+inspect get arte:/etc/issue -
+
+# bidirectional convenience — direction inferred from arg shape.
+inspect cp ./fix.conf arte:/etc/svc.conf --apply       # → dispatches put
+inspect cp arte:/var/log/syslog ./syslog --apply       # → dispatches get
+```
+
+**Selector forms.**
+- `arte/_:/path` — host filesystem.
+- `arte:/path` — F7.2 shorthand for `arte/_:/path`.
+- `arte/<svc>:/path` — container filesystem; dispatched via
+  `docker exec -i <ctr> sh -c '...'`.
+
+Host vs container is decided unambiguously by the selector — never
+by a flag.
+
+**Atomic-write contract.** `put` writes through a `<path>.tmp`
+sibling and atomically renames into place. The temp file inherits
+mode + ownership from the prior file at `<path>` (via
+`chmod --reference` / `chown --reference`) before the rename, so
+edits never silently widen permissions on a `0600 root:root` config.
+On a brand-new file (no prior to mirror from), the temp is created
+with the SSH user's umask and owner.
+
+**Flags on `put` / `cp`.**
+- `--mode <octal>` — chmod the remote after upload (overrides the
+  inherited mirror; e.g. `--mode 0755` to make a script executable).
+- `--owner <user[:group]>` — chown the remote after upload.
+  Requires the SSH user have permission to chown.
+- `--mkdir-p` — create missing parent directories on the remote
+  (`mkdir -p`) before writing. Without this, a missing parent dir
+  surfaces as `error: remote parent directory does not exist` and
+  the transfer aborts.
+
+**Revert.** `put` captures a `revert.kind = state_snapshot` audit
+entry when the target file exists, so `inspect revert <id>`
+restores the prior content byte-for-byte from the snapshot store.
+On a brand-new file (no prior content), the inverse is a
+`command_pair` `rm -f -- <path>` so revert deletes the
+freshly-created file. `get` is read-only on the remote, so its
+`revert.kind` is `unsupported` (the operator deletes the local
+file to undo); the audit entry still records the bytes + sha256
+so a later `put` of the same content is verifiable byte-for-byte.
+
+**Audit fields.** Every transfer writes an audit entry with
+`verb` ∈ `{put, get}` (canonical, even if the operator typed `cp`),
+`transfer_direction` ∈ `{up, down}`, `transfer_local`,
+`transfer_remote`, `transfer_bytes`, `transfer_sha256`. The bytes
++ sha are computed during the transfer so the audit log carries a
+complete fingerprint of the content that crossed the boundary,
+without storing the bytes themselves.
+
+**Size cap.** None. The pre-F15 `cp` had a 4 MiB hard cap because
+the body was base64-encoded into the command argv; F15 streams
+through SSH stdin, so the only practical limits are the operator's
+patience and the remote disk. Above 1 MiB, a one-line warning fires
+to stderr (silence with `INSPECT_CP_WARN_BYTES=0`) because the
+streaming transfer briefly monopolises the multiplexed channel.
+
+**Out of scope for v0.1.3.** `--since <duration>` / `--max-bytes
+<size>` on `get` (deferred to v0.1.5; the dedicated `inspect logs
+--since` already covers log-retrieval), `--resume` for partial
+transfers (deferred to v0.1.5; chunked-protocol design pass).
 
 ---
 

@@ -56,7 +56,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         crate::error::emit(
             "`inspect exec --apply` requires `--no-revert` because the inverse cannot be \
              synthesised from a free-form shell command. If the change is structured (file, \
-             permission, lifecycle), use the matching write verb (`inspect cp`, `inspect chmod`, \
+             permission, lifecycle), use the matching write verb (`inspect put`, `inspect chmod`, \
              `inspect restart`) which captures a real inverse.",
         );
         return Ok(ExitKind::Error);
@@ -348,7 +348,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             let stderr_msg = if looks_like_no_shell(&out.stderr) {
                 "container has no `sh` (distroless/scratch image): \
                  `inspect exec` requires a shell on the target. \
-                 Use `inspect cp` for file transfer, or rebuild the image with a busybox/alpine layer."
+                 Use `inspect put` (F15) for file transfer, or rebuild the image with a busybox/alpine layer."
                     .to_string()
             } else {
                 out.stderr.trim().to_string()

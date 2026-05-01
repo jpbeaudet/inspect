@@ -79,8 +79,8 @@ fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// F9 (v0.1.3): default cap on forwarded stdin per `inspect run` invocation.
-/// Above this the verb refuses, with a chained hint pointing at `inspect cp`
-/// for bulk transfer (faster, resumable, audit-tracked separately).
+/// Above this the verb refuses, with a chained hint pointing at `inspect put`
+/// (F15) for bulk file transfer (uncapped, audit-tracked, F11-revertible).
 pub const DEFAULT_STDIN_MAX: u64 = 10 * 1024 * 1024;
 
 /// F9 (v0.1.3): parse a size string like `10m`, `512k`, `1g`, or a raw
@@ -142,8 +142,8 @@ fn read_stdin_capped(cap_bytes: u64) -> Result<Vec<u8>> {
     if buf.len() as u64 > cap_bytes {
         return Err(anyhow::anyhow!(
             "stdin exceeds {}-byte cap — pass --stdin-max <SIZE> to override, \
-             or use 'inspect cp' for large payloads (faster, resumable, \
-             audit-tracked separately)",
+             or use 'inspect put <local> <ns>:<path>' (F15) for bulk file \
+             transfer (uncapped, audit-tracked, F11-revertible)",
             cap_bytes
         ));
     }
@@ -279,7 +279,8 @@ pub(crate) fn resolve_script_source(
             return Err(anyhow::anyhow!(
                 "--file '{}' is {} bytes, above the {}-byte cap — pass \
                  --stdin-max <SIZE> to raise (or `0` to disable), or use \
-                 'inspect cp' for bulk transfer + remote-side execution",
+                 'inspect put' (F15) to ship the script first, then \
+                 `inspect run -- bash /remote/path`",
                 path,
                 meta.len(),
                 cap_bytes
@@ -449,7 +450,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             crate::error::emit(format!(
                 "stdin has {} byte(s) but forwarding is disabled (--no-stdin). \
                  → drop the redirect, or omit --no-stdin to forward, or use \
-                 'inspect cp' + remote-side redirect (see 'inspect help run')",
+                 'inspect put <local> <ns>:<path>' (F15) to ship the file \
+                 separately and reference it from the remote command",
                 buf.len()
             ));
             return Ok(ExitKind::Error);
