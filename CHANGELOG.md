@@ -14,6 +14,95 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L7 — Header / PEM / URL credential redaction in stdout
+  (v0.1.2 retrospective: agent workflows pipe remote stdout into
+  LLM context windows; the existing P4 line-oriented `KEY=VALUE`
+  masker missed the three common shapes — `Authorization: Bearer
+  …` headers in `curl -v`, PEM private-key blocks in
+  `cat /etc/ssl/private/*.pem`, and credentials embedded in URLs
+  like `postgres://user:pass@host/db` — so a single `inspect run`
+  could leak a live token into a prompt).** The single-file
+  `src/redact.rs` is replaced with a four-masker pipeline under
+  `src/redact/` that runs on every line emitted by `inspect run`,
+  `inspect exec`, `inspect logs`, `inspect cat`, `inspect grep`,
+  `inspect search`, `inspect why`, `inspect find`, and the merged
+  follow stream.
+  - **PEM masker (`src/redact/pem.rs`).** Multi-line state
+    machine. Recognized BEGIN forms: `PRIVATE KEY` (PKCS#8),
+    `ENCRYPTED PRIVATE KEY` (PKCS#8 enc), `RSA PRIVATE KEY`
+    (PKCS#1), `EC PRIVATE KEY` (SEC1), `DSA PRIVATE KEY`,
+    `OPENSSH PRIVATE KEY`, and `PGP PRIVATE KEY BLOCK`. The
+    BEGIN line emits a single `[REDACTED PEM KEY]` marker;
+    every interior line plus the matching END line is suppressed
+    by the composer. Public certificates
+    (`-----BEGIN CERTIFICATE-----`) and public keys
+    (`-----BEGIN PUBLIC KEY-----`) pass through unchanged.
+  - **Header masker (`src/redact/header.rs`).** Case-insensitive
+    word-bounded match on `Authorization`, `X-API-Key`, `Cookie`,
+    `Set-Cookie` followed by `:`. Replaces the entire value
+    portion with `<redacted>` so a `Cookie:` value containing
+    its own URL credential is also covered. Word boundary on the
+    name prevents false positives on prose like `MyAuthorization`.
+  - **URL credential masker (`src/redact/url.rs`).** Masks the
+    password portion of `scheme://user:pass@host` patterns to
+    `user:****@host`, preserving scheme, username, and host so
+    the diagnostic is still readable. Covers `postgres`, `mysql`,
+    `redis`, `mongodb`, `mongodb+srv`, `amqp`, `http`, `https`,
+    and any other scheme matching the userinfo grammar. Lines
+    without the pattern are zero-allocation pass-through.
+  - **Env masker (`src/redact/env.rs`).** The pre-existing P4
+    line-oriented `KEY=VALUE` masker, preserved verbatim — same
+    `head4****tail2` partial-mask shape, same suffix list, same
+    `SECRETS_REDACT_ALL` opt-in, same audit-args `[secrets_masked]`
+    text tag. Existing tests pass unchanged.
+  - **Composer ordering.** Maskers run PEM → Header → URL → Env
+    on every line. Inside a PEM block, the gate suppresses the
+    other three so an interior line that happens to look like a
+    header or URL credential is replaced by the single marker
+    rather than partially leaked. Header and URL compose on a
+    single line (a `Cookie:` value containing a URL credential is
+    masked once by the header masker; the URL masker has nothing
+    to do).
+  - **`--show-secrets` bypass.** A single boolean on every read
+    verb already wired in v0.1.2 now bypasses **all four** maskers
+    in one place (`OutputRedactor::mask_line` short-circuits at
+    the top), so the existing operator opt-in shape is unchanged
+    for end users.
+  - **Audit linkage.** `AuditEntry` gains
+    `secrets_masked_kinds: Option<Vec<String>>` recording the
+    deterministic ordered list of masker kinds that fired for a
+    given step (`["pem", "header", "url", "env"]` — subset, in
+    canonical order). The text tag `[secrets_masked=true]` on
+    `inspect run` / `inspect exec` audit-args is preserved; the
+    new field lets post-hoc reviewers tell two redacted runs
+    apart by *which* pattern almost leaked. Pre-L7 entries omit
+    the field via `skip_serializing_if`.
+  - **API.** New `OutputRedactor::new(show_secrets, redact_all)`
+    constructor; `mask_line(&str) -> Option<Cow<str>>` (returns
+    `None` for suppressed PEM-interior lines); `was_active()`
+    and `active_kinds()` for audit stamping. Public constants
+    `REDACTED = "<redacted>"` and `PEM_REDACTED_MARKER`. One
+    redactor is constructed per remote step so PEM gate state
+    cannot leak across SSH dispatches.
+  - **Performance.** All regexes compiled once via
+    `once_cell::sync::Lazy`. Lines that match no masker return
+    `Cow::Borrowed` with no allocation (verified by the
+    `l7_redactor_unit_no_alloc_for_clean_lines` test).
+  - **Test coverage.** 20 acceptance tests in
+    `tests/phase_f_v013.rs` (`l7_*`) covering: PEM block
+    collapse-to-marker on `cat` / `logs`, PGP private-key block,
+    PKCS#8 unencrypted block, certificate pass-through,
+    `Authorization` header on `curl -v` output via `grep` and
+    `run`, `Set-Cookie` and `X-API-Key` case-insensitivity, URL
+    credentials in path / `DB_URL` env var (double-masked by URL
+    + env), URL-credentials-inside-prose on `find`,
+    `--show-secrets` bypass on `cat`, `logs`, and `run` for all
+    four patterns, audit-args `kinds=…` recording the canonical
+    ordered subset, `secrets_masked_kinds` field absent when no
+    masker fires, env-masker behavior unchanged from P4, the
+    PEM-gate-suppresses-other-maskers contract, and the
+    no-allocation pass-through invariant.
+
 - **F14 — `inspect run --file <script>` / `--stdin-script` script
   mode (field feedback: *"the biggest individual time-sink was
   nested quoting. Every layer (your shell → ssh → bash →

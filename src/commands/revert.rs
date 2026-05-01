@@ -46,9 +46,7 @@ pub fn run(args: RevertArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     };
     let Some(entry) = store.find(audit_id)? else {
-        crate::error::emit(format!(
-            "no audit entry matches id prefix '{audit_id}'"
-        ));
+        crate::error::emit(format!("no audit entry matches id prefix '{audit_id}'"));
         return Ok(ExitKind::Error);
     };
     revert_one(&args, &entry, &store)
@@ -141,8 +139,15 @@ fn revert_unsupported(entry: &AuditEntry) -> Result<ExitKind> {
     Ok(ExitKind::Error)
 }
 
-fn revert_command_pair(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -> Result<ExitKind> {
-    let revert = entry.revert.as_ref().expect("kind=command_pair implies Some");
+fn revert_command_pair(
+    args: &RevertArgs,
+    entry: &AuditEntry,
+    store: &AuditStore,
+) -> Result<ExitKind> {
+    let revert = entry
+        .revert
+        .as_ref()
+        .expect("kind=command_pair implies Some");
     let cmd = revert.payload.clone();
     if cmd.is_empty() {
         crate::error::emit(format!(
@@ -166,11 +171,7 @@ fn revert_command_pair(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore
         step.service().map(|x| format!("/{x}")).unwrap_or_default()
     );
     let wrapped = match step.container() {
-        Some(container) => format!(
-            "docker exec {} sh -c {}",
-            shquote(container),
-            shquote(&cmd)
-        ),
+        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&cmd)),
         None => cmd.clone(),
     };
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);

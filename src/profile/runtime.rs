@@ -124,7 +124,9 @@ impl RuntimeSnapshot {
 
     /// Look up a service's runtime state by its real container name.
     pub fn lookup(&self, container_name: &str) -> Option<&ServiceRuntime> {
-        self.services.iter().find(|s| s.container_name == container_name)
+        self.services
+            .iter()
+            .find(|s| s.container_name == container_name)
     }
 
     /// Wall-clock age of this snapshot. `None` if the system clock
@@ -324,9 +326,7 @@ pub fn save_runtime(snap: &RuntimeSnapshot) -> Result<PathBuf> {
     use std::io::Write;
     tmp.write_all(&body).context("writing runtime bytes")?;
     tmp.flush().context("flushing runtime")?;
-    tmp.as_file()
-        .sync_all()
-        .context("fsync runtime tempfile")?;
+    tmp.as_file().sync_all().context("fsync runtime tempfile")?;
     let tmp_path = tmp.into_temp_path();
     tmp_path
         .persist(&path)
@@ -498,7 +498,9 @@ pub fn is_runtime_stale(snap: &RuntimeSnapshot) -> bool {
 /// Age of the cached profile (inventory tier) for a namespace. `None`
 /// when no profile is on disk or its `discovered_at` is unparseable.
 pub fn inventory_age(namespace: &str) -> Option<Duration> {
-    let p = crate::profile::cache::load_profile(namespace).ok().flatten()?;
+    let p = crate::profile::cache::load_profile(namespace)
+        .ok()
+        .flatten()?;
     let then = chrono::DateTime::parse_from_rfc3339(&p.discovered_at).ok()?;
     let then_sys: SystemTime = then.into();
     SystemTime::now().duration_since(then_sys).ok()

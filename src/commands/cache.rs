@@ -114,7 +114,11 @@ fn clear(args: CacheClearArgs) -> Result<ExitKind> {
         for ns in &cleared {
             let mut entry = crate::safety::AuditEntry::new("cache-clear", ns);
             entry.exit = 0;
-            entry.args = if args.all { "--all".to_string() } else { String::new() };
+            entry.args = if args.all {
+                "--all".to_string()
+            } else {
+                String::new()
+            };
             let _ = store.append(&entry);
         }
     }

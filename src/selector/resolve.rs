@@ -100,10 +100,7 @@ pub enum SelectorError {
          services available: (none — '{namespace}' has no service definitions yet)\n  \
          hint: run 'inspect setup {namespace}' to discover services on this namespace"
     )]
-    EmptyProfile {
-        selector: String,
-        namespace: String,
-    },
+    EmptyProfile { selector: String, namespace: String },
 }
 
 /// Resolve a textual selector all the way down to concrete targets.
@@ -208,8 +205,7 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
         // `arte/*` → `ServiceSpec::All`) and host-level targets
         // intentionally fall through so the verb layer can render
         // its own empty-state output (F7.5).
-        let sel_targets_specific_service =
-            matches!(sel.service, Some(ServiceSpec::Atoms(_)));
+        let sel_targets_specific_service = matches!(sel.service, Some(ServiceSpec::Atoms(_)));
         if sel_targets_specific_service
             && chosen_namespaces.len() == 1
             && all_services.is_empty()
@@ -486,10 +482,7 @@ fn resolve_services_for_ns(
                         //    name). Resolve to the canonical name and
                         //    record a one-line breadcrumb for the
                         //    operator so they learn the canonical form.
-                        if let Some((canon, _)) = aliased
-                            .iter()
-                            .find(|(n, c)| c == p && n != c)
-                        {
+                        if let Some((canon, _)) = aliased.iter().find(|(n, c)| c == p && n != c) {
                             included.insert(canon.clone());
                             push_canonical_hint(ns, p, canon);
                             continue;

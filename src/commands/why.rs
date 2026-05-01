@@ -40,7 +40,9 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     // namespace.
     let (runner, nses, targets) = match plan(&args.selector) {
         Ok(p) => p,
-        Err(StepError::Selector(e @ (SelectorError::NoMatches { .. } | SelectorError::EmptyProfile { .. }))) => {
+        Err(StepError::Selector(
+            e @ (SelectorError::NoMatches { .. } | SelectorError::EmptyProfile { .. }),
+        )) => {
             if let Some(hint) = build_container_hint(&args.selector) {
                 println!("{hint}");
                 return Ok(ExitKind::Success);
@@ -150,9 +152,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             .get(&svc_name)
             .copied()
             .unwrap_or(NodeStatus::Unknown);
-        if !args.no_bundle
-            && matches!(target_status, NodeStatus::Unhealthy | NodeStatus::Down)
-        {
+        if !args.no_bundle && matches!(target_status, NodeStatus::Unhealthy | NodeStatus::Down) {
             if let Some(svc) = profile.services.iter().find(|s| s.name == svc_name) {
                 let bundle = collect_diagnostic_bundle(
                     runner.as_ref(),
@@ -176,19 +176,15 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
                         .as_ref()
                         .map(|ec| serde_json::to_value(ec).unwrap_or(serde_json::Value::Null))
                         .unwrap_or(serde_json::Value::Null);
-                    last["port_reality"] =
-                        serde_json::to_value(&bundle.port_reality).unwrap_or_else(|_| {
-                            serde_json::Value::Array(Vec::new())
-                        });
+                    last["port_reality"] = serde_json::to_value(&bundle.port_reality)
+                        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
                 }
                 for line in bundle.render_text() {
                     data_lines.push(line);
                 }
                 if bundle.has_double_bind() {
                     bundle_next_steps.push(crate::verbs::output::NextStep::new(
-                        format!(
-                            "inspect run {ns}/{svc_name} -- 'cat /docker-entrypoint.sh'"
-                        ),
+                        format!("inspect run {ns}/{svc_name} -- 'cat /docker-entrypoint.sh'"),
                         "inspect entrypoint for flag-injection (port bound twice)",
                     ));
                 }
@@ -279,7 +275,11 @@ fn collect_runtime(
     runner: &dyn RemoteRunner,
     nses: &[NsCtx],
     refresh: bool,
-) -> (HashMap<String, RuntimeSnapshot>, Vec<SourceInfo>, Vec<String>) {
+) -> (
+    HashMap<String, RuntimeSnapshot>,
+    Vec<SourceInfo>,
+    Vec<String>,
+) {
     use crate::profile::runtime::{inventory_age, SourceMode};
     let opts = GetOpts {
         force_refresh: refresh,
@@ -307,7 +307,10 @@ fn collect_runtime(
                     runtime_age_s: None,
                     inventory_age_s: inventory_age(&ns.namespace).map(|d| d.as_secs()),
                     stale: true,
-                    reason: Some(format!("{}: runtime refresh failed (no cache)", ns.namespace)),
+                    reason: Some(format!(
+                        "{}: runtime refresh failed (no cache)",
+                        ns.namespace
+                    )),
                 });
                 warnings.push(format!(
                     "{}: runtime refresh failed and no cache present",
@@ -566,17 +569,24 @@ fn collect_diagnostic_bundle(
     let mut bundle = DiagnosticBundle::default();
 
     // ── 1/4: recent logs ────────────────────────────────────────────────
-    let cmd = format!(
-        "docker logs --tail {log_tail} {container_name} 2>&1 || true"
-    );
+    let cmd = format!("docker logs --tail {log_tail} {container_name} 2>&1 || true");
     if let Ok(out) = runner.run(ns, target, &cmd, opts.clone()) {
         let body = if !out.stdout.is_empty() {
             &out.stdout
         } else {
             &out.stderr
         };
+        // L7 (v0.1.3): redact the F4 log-tail bundle the same way the
+        // standalone `inspect logs` does. `inspect why` is read-only
+        // and not audited, so there's no `--show-secrets` flag to
+        // honor here yet — operators who genuinely need the verbatim
+        // tail can still run `inspect logs --tail N --show-secrets`.
+        // The redactor is per-bundle (one container's tail).
+        let redactor = crate::redact::OutputRedactor::new(false, false);
         for line in body.lines() {
-            bundle.recent_logs.push(line.to_string());
+            if let Some(masked) = redactor.mask_line(line) {
+                bundle.recent_logs.push(masked.into_owned());
+            }
         }
     }
 
@@ -592,10 +602,8 @@ fn collect_diagnostic_bundle(
             let trimmed = out.stdout.trim();
             let parts: Vec<&str> = trimmed.split('|').collect();
             if parts.len() >= 4 {
-                let cmd_v: Vec<String> =
-                    serde_json::from_str(parts[0]).unwrap_or_default();
-                let ep_v: Vec<String> =
-                    serde_json::from_str(parts[1]).unwrap_or_default();
+                let cmd_v: Vec<String> = serde_json::from_str(parts[0]).unwrap_or_default();
+                let ep_v: Vec<String> = serde_json::from_str(parts[1]).unwrap_or_default();
                 if let Ok(pb) = serde_json::from_str::<serde_json::Value>(parts[2]) {
                     if let Some(map) = pb.as_object() {
                         for (k, v) in map {
@@ -611,8 +619,7 @@ fn collect_diagnostic_bundle(
                                             .get("HostPort")
                                             .and_then(|x| x.as_str())
                                             .unwrap_or("");
-                                        host_bindings
-                                            .insert(p, format!("{host_ip}:{host_port}"));
+                                        host_bindings.insert(p, format!("{host_ip}:{host_port}"));
                                     }
                                 }
                             }
@@ -769,9 +776,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
     }
     let token = match sel.service.as_ref()? {
         ServiceSpec::Atoms(atoms) if atoms.len() == 1 => match &atoms[0] {
-            ServiceAtom::Pattern(p)
-                if !p.contains('*') && !p.contains('?') && !p.contains('[') =>
-            {
+            ServiceAtom::Pattern(p) if !p.contains('*') && !p.contains('?') && !p.contains('[') => {
                 p.clone()
             }
             _ => return None,
@@ -811,11 +816,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
         let Ok((snapshot, _)) = get_runtime(runner.as_ref(), &ctx, GetOpts::default()) else {
             continue;
         };
-        if snapshot
-            .services
-            .iter()
-            .any(|s| s.container_name == token)
-        {
+        if snapshot.services.iter().any(|s| s.container_name == token) {
             let pretty = format!("{ns}/{token}");
             return Some(format!(
                 "note: '{pretty}' is a running container but not a registered service definition.\n  \

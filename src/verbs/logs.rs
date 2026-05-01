@@ -120,31 +120,43 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             60
         };
         let total = if args.follow {
-            crate::verbs::merged::follow_merged(runner.as_ref(), &sources, timeout, |m| {
-                if json {
-                    crate::verbs::merged::print_json(
-                        // The MergeSource borrows namespace as &str; we
-                        // re-derive it from svc_idx into the source list.
-                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
-                        &m.svc,
-                        &m.line,
-                    );
-                } else {
-                    crate::verbs::merged::print_human(&m.svc, &m.line);
-                }
-            })?
+            crate::verbs::merged::follow_merged(
+                runner.as_ref(),
+                &sources,
+                timeout,
+                args.show_secrets,
+                |m| {
+                    if json {
+                        crate::verbs::merged::print_json(
+                            // The MergeSource borrows namespace as &str; we
+                            // re-derive it from svc_idx into the source list.
+                            sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
+                            &m.svc,
+                            &m.line,
+                        );
+                    } else {
+                        crate::verbs::merged::print_human(&m.svc, &m.line);
+                    }
+                },
+            )?
         } else {
-            crate::verbs::merged::batch_merged(runner.as_ref(), &sources, timeout, |m| {
-                if json {
-                    crate::verbs::merged::print_json(
-                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
-                        &m.svc,
-                        &m.line,
-                    );
-                } else {
-                    crate::verbs::merged::print_human(&m.svc, &m.line);
-                }
-            })?
+            crate::verbs::merged::batch_merged(
+                runner.as_ref(),
+                &sources,
+                timeout,
+                args.show_secrets,
+                |m| {
+                    if json {
+                        crate::verbs::merged::print_json(
+                            sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
+                            &m.svc,
+                            &m.line,
+                        );
+                    } else {
+                        crate::verbs::merged::print_human(&m.svc, &m.line);
+                    }
+                },
+            )?
         };
         return Ok(if total > 0 {
             ExitKind::Success
@@ -163,6 +175,11 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
+        // L7 (v0.1.3): per-step redactor. Used for the non-follow
+        // batch path below; `stream_follow` constructs its own per
+        // reconnect attempt so a transport drop mid-PEM-block does
+        // not poison the post-reconnect state.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
 
         // P10: --since-last expands into --since <unix-ts> from the
         // saved cursor (or INSPECT_SINCE_LAST_DEFAULT on cold start).
@@ -236,6 +253,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 &svc_name,
                 args.follow_timeout_secs.unwrap_or(60 * 60 * 8),
                 args.format.is_json(),
+                args.show_secrets,
                 &mut any_lines,
             );
             continue;
@@ -272,6 +290,14 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             continue;
         }
         for line in out.stdout.lines() {
+            // L7 (v0.1.3): redactor is stateful for PEM blocks; lines
+            // inside a block return None and are swallowed so the
+            // BEGIN-line marker is the only output for the whole
+            // block.
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => continue,
+            };
             any_lines = true;
             if args.format.is_json() {
                 JsonOut::write(
@@ -279,12 +305,12 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                         .with_service(&svc_name)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
                 println!("{}/{} | {safe}", step.ns.namespace, svc_name);
@@ -489,6 +515,18 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
 /// each line from the SSH child to stdout (or JSON), and on transient
 /// SSH failure retries up to 3 times with 1s/2s/4s backoff. Aborts
 /// cleanly on Ctrl-C (cancellation flag set by [`crate::exec::cancel`]).
+///
+/// L7 (v0.1.3): a fresh redactor is constructed inside each retry
+/// iteration. A transport drop mid-PEM-block invalidates the prior
+/// in-block state because the post-reconnect stream is a new server
+/// process; carrying the flag across would over-redact (suppressing
+/// good lines until an END marker that may never come). The downside
+/// is a vanishingly small window where a key whose BEGIN was on the
+/// pre-drop stream and whose END is on the post-drop one would have
+/// its post-drop body bytes leak through; the per-line maskers
+/// (header/URL/env) still apply, and the realistic failure mode is
+/// that `docker logs -f` after reconnect resumes from "now", not
+/// mid-block.
 #[allow(clippy::too_many_arguments)]
 fn stream_follow(
     runner: &dyn crate::verbs::runtime::RemoteRunner,
@@ -498,6 +536,7 @@ fn stream_follow(
     svc_name: &str,
     timeout_secs: u64,
     json: bool,
+    show_secrets: bool,
     any_lines: &mut bool,
 ) {
     const MAX_RECONNECTS: u32 = 3;
@@ -510,7 +549,12 @@ fn stream_follow(
         // Borrow-checker: `any_lines` is mutated inside the closure.
         // Use a local flag and merge after the call.
         let mut got_any = false;
+        let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
         let result = runner.run_streaming(namespace, target, cmd, opts, &mut |line| {
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => return,
+            };
             got_any = true;
             if json {
                 JsonOut::write(
@@ -518,12 +562,12 @@ fn stream_follow(
                         .with_service(svc_name)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
                 println!("{namespace}/{svc_name} | {safe}");
@@ -588,6 +632,7 @@ mod tests {
             merged: false,
             match_re: Vec::new(),
             exclude_re: Vec::new(),
+            show_secrets: false,
             format: FormatArgs::default(),
             follow_timeout_secs: None,
         }

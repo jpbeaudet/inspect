@@ -39,9 +39,7 @@ impl PortFilter {
                 .parse()
                 .map_err(|_| anyhow!("--port-range HI must be a u16, got '{hi_s}'"))?;
             if hi < lo {
-                return Err(anyhow!(
-                    "--port-range LO ({lo}) must be <= HI ({hi})"
-                ));
+                return Err(anyhow!("--port-range LO ({lo}) must be <= HI ({hi})"));
             }
             return Ok(PortFilter::Range(lo, hi));
         }

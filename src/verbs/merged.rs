@@ -122,6 +122,7 @@ pub fn batch_merged(
     runner: &(dyn RemoteRunner + Send + Sync),
     sources: &[MergeSource<'_>],
     timeout_secs: u64,
+    show_secrets: bool,
     mut emit: impl FnMut(&MergeLine),
 ) -> Result<usize> {
     // Collect per-source results in the same order as `sources` so the
@@ -135,14 +136,22 @@ pub fn batch_merged(
                     let opts = RunOpts::with_timeout(timeout_secs);
                     let out = runner.run(src.namespace, src.target, &src.cmd, opts)?;
                     let mut buf = Vec::new();
+                    // L7 (v0.1.3): each source has its own redactor so
+                    // a PEM block from source A doesn't poison source
+                    // B's state — the merge happens after redaction.
+                    let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
                     for (seq, raw) in (0_u64..).zip(out.stdout.lines()) {
                         let (ts, body) = split_timestamp(raw);
+                        let masked = match redactor.mask_line(body) {
+                            Some(m) => m.into_owned(),
+                            None => continue,
+                        };
                         buf.push(MergeLine {
                             ts,
                             svc_idx: idx,
                             seq,
                             svc: src.svc.clone(),
-                            line: body.to_string(),
+                            line: masked,
                         });
                     }
                     Ok(buf)
@@ -174,6 +183,7 @@ pub fn follow_merged(
     runner: &(dyn RemoteRunner + Send + Sync),
     sources: &[MergeSource<'_>],
     timeout_secs: u64,
+    show_secrets: bool,
     mut emit: impl FnMut(&MergeLine),
 ) -> Result<usize> {
     let (tx, rx) = mpsc::channel::<MergeLine>();
@@ -185,18 +195,25 @@ pub fn follow_merged(
                 let opts = RunOpts::with_timeout(timeout_secs);
                 let mut seq: u64 = 0;
                 let svc = src.svc.clone();
+                // L7 (v0.1.3): per-source redactor — same rationale as
+                // `batch_merged` (PEM state must not cross sources).
+                let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
                 let _ =
                     runner.run_streaming(src.namespace, src.target, &src.cmd, opts, &mut |line| {
                         if crate::exec::cancel::is_cancelled() {
                             return;
                         }
                         let (ts, body) = split_timestamp(line);
+                        let masked = match redactor.mask_line(body) {
+                            Some(m) => m.into_owned(),
+                            None => return,
+                        };
                         let m = MergeLine {
                             ts,
                             svc_idx: idx,
                             seq,
                             svc: svc.clone(),
-                            line: body.to_string(),
+                            line: masked,
                         };
                         seq += 1;
                         // Receiver gone == main thread aborted; drop.

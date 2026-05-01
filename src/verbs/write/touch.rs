@@ -66,7 +66,12 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
             None => probe_inner,
         };
         let pre_existed = runner
-            .run(&s.ns.namespace, &s.ns.target, &probe_cmd, RunOpts::with_timeout(15))
+            .run(
+                &s.ns.namespace,
+                &s.ns.target,
+                &probe_cmd,
+                RunOpts::with_timeout(15),
+            )
             .ok()
             .map(|o| o.stdout.trim() == "y")
             .unwrap_or(true);
@@ -80,10 +85,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
                 "{path} already existed; touch only updates mtime, no inverse captured"
             ))
         } else {
-            Revert::command_pair(
-                format!("rm -f -- {}", shquote(path)),
-                format!("rm {path}"),
-            )
+            Revert::command_pair(format!("rm -f -- {}", shquote(path)), format!("rm {path}"))
         };
         if args.revert_preview {
             eprintln!(

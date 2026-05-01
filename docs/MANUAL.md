@@ -546,31 +546,74 @@ Both verbs propagate the remote command's **inner exit code** to
 your shell: `inspect run arte/pulse -- 'exit 7'` returns 7. Mixed
 exits across multiple targets fall back to exit 2.
 
-### 7.4 Secret masking on `run` / `exec` (v0.1.1)
+### 7.4 Output redaction (v0.1.1 + v0.1.3 expansion)
 
-By default, `run` and `exec` scan stdout for `KEY=VALUE` lines and
-mask the value when the key looks like a secret. The mask form is
-`head4****tail2` (values shorter than 8 chars become `****`). The
-`export ` prefix and matching quote pairs are preserved.
+Every line streamed from a remote command runs through a
+four-masker pipeline before reaching local stdout (or a JSON
+envelope's `line` field). Applies to `run`, `exec`, `logs`, `cat`,
+`grep`, `find`, `search`, `why`, and the merged follow stream.
 
-Recognized key shapes:
+The four maskers run in fixed order on every line:
 
-- Suffixes: `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, `_PASS`,
-  `_CREDENTIAL[S]`, `_APIKEY`, `_AUTH`, `_PRIVATE`, `_ACCESS_KEY`,
-  `_DSN`, `_CONNECTION_STRING`.
-- Exact: `DATABASE_URL`, `REDIS_URL`, `MONGO_URL`, `POSTGRES_URL`,
-  `POSTGRESQL_URL`.
+1. **PEM private-key blocks (v0.1.3).** Recognized BEGIN forms:
+   `-----BEGIN PRIVATE KEY-----` (PKCS#8),
+   `-----BEGIN ENCRYPTED PRIVATE KEY-----`,
+   `-----BEGIN RSA PRIVATE KEY-----` (PKCS#1),
+   `-----BEGIN EC PRIVATE KEY-----`,
+   `-----BEGIN DSA PRIVATE KEY-----`,
+   `-----BEGIN OPENSSH PRIVATE KEY-----`, and
+   `-----BEGIN PGP PRIVATE KEY BLOCK-----`. The BEGIN line emits
+   one `[REDACTED PEM KEY]` marker; every interior line plus the
+   matching END line is suppressed entirely. Public certificates
+   (`-----BEGIN CERTIFICATE-----`) and public keys
+   (`-----BEGIN PUBLIC KEY-----`) pass through unchanged.
 
-Opt-out flags:
+2. **HTTP / cookie headers (v0.1.3).** Case-insensitive
+   word-bounded match on `Authorization`, `X-API-Key`, `Cookie`,
+   `Set-Cookie` followed by `:` — replaces the entire value
+   portion with `<redacted>`. Catches `curl -v` traces and
+   reverse-proxy logs. Word boundary on the name avoids false
+   positives on prose like `MyAuthorization`.
+
+3. **URL credentials (v0.1.3).** Masks the password portion of
+   `scheme://user:pass@host` to `user:****@host`, preserving
+   scheme, username, and host. Covers `postgres`, `mysql`,
+   `redis`, `mongodb`, `mongodb+srv`, `amqp`, `http`, `https`,
+   and any other scheme matching the userinfo grammar.
+
+4. **`KEY=VALUE` env-var lines (v0.1.1).** Scans every line for
+   `KEY=VALUE` and masks the value when the key looks like a
+   secret. The mask form is `head4****tail2` (values shorter
+   than 8 chars become `****`). The `export ` prefix and matching
+   quote pairs are preserved.
+
+   Recognized key shapes:
+
+   - Suffixes: `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, `_PASS`,
+     `_CREDENTIAL[S]`, `_APIKEY`, `_AUTH`, `_PRIVATE`,
+     `_ACCESS_KEY`, `_DSN`, `_CONNECTION_STRING`.
+   - Exact: `DATABASE_URL`, `REDIS_URL`, `MONGO_URL`,
+     `POSTGRES_URL`, `POSTGRESQL_URL`.
+
+Inside an active PEM block, the other three maskers do not fire
+on the suppressed lines — the entire block body is replaced with
+the single marker. The header and URL maskers compose on a single
+line (a `Cookie:` value containing a URL credential is masked
+once by the header masker; the URL masker has nothing to do).
+
+Opt-out flags (apply to **all four** maskers in one go):
 
 - `--show-secrets` — verbatim output. On `exec`, this stamps
   `[secrets_exposed=true]` into the audit args so reviewers can
   tell apart verbatim from masked runs.
-- `--redact-all` — mask **every** `KEY=VALUE` pair, not just
-  recognized keys.
+- `--redact-all` — mask **every** `KEY=VALUE` pair (env masker
+  only; the other three already redact unconditionally on match).
 
-When masking actually fired during an `exec`, the audit args
-captures `[secrets_masked=true]`.
+When any of the four maskers fired during an `exec`, the audit
+args captures `[secrets_masked=true]` and the JSONL audit entry's
+`secrets_masked_kinds` field records the canonical ordered subset
+(e.g. `["pem", "header"]` or `["url", "env"]`) so reviewers can
+tell two redacted runs apart by *which* pattern almost leaked.
 
 For the deep dive: `inspect help write`.
 

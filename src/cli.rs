@@ -136,7 +136,18 @@ connectivity from one selector. The built-in `why` recipe.
 
 EXAMPLES
   $ inspect why arte/atlas
-  $ inspect why 'prod-*/storage' --json";
+  $ inspect why 'prod-*/storage' --json
+
+REDACTION (L7, v0.1.3)
+  The F4 deep-bundle log tail attached on unhealthy targets runs
+  through the same four-masker pipeline as `inspect logs` (PEM
+  blocks → marker, `Authorization` / `Cookie` headers → `<redacted>`,
+  URL credentials → `user:****@host`, secret-shaped `KEY=VALUE` →
+  `head4****tail2`). `inspect why` does not currently expose
+  `--show-secrets` because the deep-bundle is a diagnostic
+  affordance, not a privileged read; for a verbatim tail run
+  `inspect logs <ns>/<svc> --tail N --show-secrets` directly. See
+  `inspect help safety` for the redaction model.";
 
 const LONG_CONNECTIVITY: &str = "\
 Print the connectivity matrix for the selected services. With `--probe`, \
@@ -1040,6 +1051,13 @@ pub struct SearchArgs {
     /// Stream new records as they arrive (log queries only).
     #[arg(long, short = 'f')]
     pub follow: bool,
+    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// `inspect search` runs every emitted log line through the
+    /// redaction pipeline (`pem` / `header` / `url` / `env` maskers).
+    /// Use this only when the captured output is provably safe (test
+    /// fixture, public dataset).
+    #[arg(long)]
+    pub show_secrets: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1440,6 +1458,11 @@ pub struct LogsArgs {
     /// Repeat to OR multiple patterns. Applied after `--match`.
     #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
     pub exclude_re: Vec<String>,
+    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// `inspect logs` runs every line through the redaction pipeline
+    /// (`pem` / `header` / `url` / `env` maskers).
+    #[arg(long)]
+    pub show_secrets: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
     /// Hidden: ssh-side timeout for follow mode (seconds).
@@ -1520,6 +1543,12 @@ pub struct GrepArgs {
     #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
     pub exclude_re: Vec<String>,
 
+    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// `inspect grep` runs every emitted line through the redaction
+    /// pipeline (`pem` / `header` / `url` / `env` maskers).
+    #[arg(long)]
+    pub show_secrets: bool,
+
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1556,6 +1585,14 @@ pub struct CatArgs {
     /// `--start`. Mutually exclusive with `--lines`.
     #[arg(long = "end", value_name = "N")]
     pub end: Option<usize>,
+    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// `inspect cat` runs the file content through the redaction
+    /// pipeline (`pem` / `header` / `url` / `env` maskers) — most
+    /// notably collapsing PEM private-key blocks to a single
+    /// `[REDACTED PEM KEY]` marker. Use this only for files you've
+    /// already vetted as non-sensitive.
+    #[arg(long)]
+    pub show_secrets: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1597,6 +1634,11 @@ pub struct FindArgs {
     pub target: String,
     /// Optional name pattern (find -name).
     pub pattern: Option<String>,
+    /// L7 (v0.1.3): print emitted paths verbatim. `find` emits file
+    /// paths only — secret patterns rarely fire — but the flag is
+    /// exposed for symmetry with the other read verbs.
+    #[arg(long)]
+    pub show_secrets: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1663,8 +1705,17 @@ pub struct ExecArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// Print KEY=VALUE secret values verbatim instead of masking them.
-    /// Off by default so log captures and screenshots are safe.
+    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// default so log captures and screenshots are safe — every
+    /// emitted line otherwise runs through the four-masker pipeline
+    /// (`pem` / `header` / `url` / `env` maskers): PEM private-key
+    /// blocks collapse to `[REDACTED PEM KEY]`, `Authorization` /
+    /// `Cookie` / `X-API-Key` / `Set-Cookie` header values become
+    /// `<redacted>`, password portions of `scheme://user:pass@host`
+    /// URLs are masked to `user:****@host`, and `KEY=VALUE` env
+    /// pairs with secret-shaped keys (P4 suffix list) become
+    /// `head4****tail2`. On `exec`, `--show-secrets` stamps
+    /// `[secrets_exposed=true]` into the audit args.
     #[arg(long)]
     pub show_secrets: bool,
     /// Mask every line that looks like KEY=VALUE, regardless of key name.
@@ -1728,8 +1779,17 @@ pub struct RunArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// Print KEY=VALUE secret values verbatim instead of masking them.
-    /// Off by default so log captures and screenshots are safe.
+    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// default so log captures and screenshots are safe — every
+    /// emitted line otherwise runs through the four-masker pipeline
+    /// (`pem` / `header` / `url` / `env` maskers): PEM private-key
+    /// blocks collapse to `[REDACTED PEM KEY]`, `Authorization` /
+    /// `Cookie` / `X-API-Key` / `Set-Cookie` header values become
+    /// `<redacted>`, password portions of `scheme://user:pass@host`
+    /// URLs are masked to `user:****@host`, and `KEY=VALUE` env
+    /// pairs with secret-shaped keys (P4 suffix list) become
+    /// `head4****tail2`. On `exec`, `--show-secrets` stamps
+    /// `[secrets_exposed=true]` into the audit args.
     #[arg(long)]
     pub show_secrets: bool,
     /// Mask every line that looks like KEY=VALUE, regardless of the

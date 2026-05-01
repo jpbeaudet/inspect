@@ -238,7 +238,11 @@ fn render_script_invocation(interp: &str, args: &[String]) -> String {
     // unquoted keeps the audit `rendered_cmd` field readable and
     // matches the standard `bash -s` / `python3 -` shape operators
     // expect to see in dispatch logs.
-    let stdin_marker = if interp_uses_dash_s(interp) { "-s" } else { "-" };
+    let stdin_marker = if interp_uses_dash_s(interp) {
+        "-s"
+    } else {
+        "-"
+    };
     if args.is_empty() {
         return format!("{interp} {stdin_marker}");
     }
@@ -281,8 +285,8 @@ pub(crate) fn resolve_script_source(
                 cap_bytes
             ));
         }
-        let body = std::fs::read(p)
-            .map_err(|e| anyhow::anyhow!("--file '{}': read failed: {e}", path))?;
+        let body =
+            std::fs::read(p).map_err(|e| anyhow::anyhow!("--file '{}': read failed: {e}", path))?;
         if body.is_empty() {
             return Err(anyhow::anyhow!("--file '{}' is empty", path));
         }
@@ -488,7 +492,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let mut bad = 0usize;
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
-    let masker = crate::redact::EnvSecretMasker::new(args.show_secrets, args.redact_all);
+    // L7 (v0.1.3): one redactor per step (declared inside the loop).
+    // PEM block state must not leak across steps because a step
+    // truncated mid-block would otherwise poison the next step's
+    // detection. The composer is cheap to construct; regex are
+    // compiled once globally via Lazy.
     // F9 (v0.1.3): when stdin is being forwarded, every step's run is
     // audited (verb=`run`, with stdin_bytes / optional stdin_sha256)
     // so a post-hoc audit can answer "what input did this command
@@ -549,6 +557,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
         let svc_label = s.service().map(|x| format!("/{x}")).unwrap_or_default();
         let label = format!("{}{}", s.ns.namespace, svc_label);
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
 
         // Wrap in `docker exec` when the selector points at a container.
         // Apply server-side line filter (--filter-line-pattern) by piping
@@ -595,11 +604,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // with `--env` overrides). Overlay is empty when neither the
         // namespace config nor `--env` provides anything, in which
         // case `apply_to_cmd` returns the cmd borrowed unchanged.
-        let effective_overlay = crate::exec::env_overlay::merge(
-            Some(&s.ns.env_overlay),
-            &user_env,
-            args.env_clear,
-        );
+        let effective_overlay =
+            crate::exec::env_overlay::merge(Some(&s.ns.env_overlay), &user_env, args.env_clear);
         let cmd = crate::exec::env_overlay::apply_to_cmd(&cmd, &effective_overlay).into_owned();
         if args.debug {
             eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
@@ -617,7 +623,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             let cmd_ref = &cmd;
             let ns_name_ref = &ns_name;
             let svc_name_ref = &svc_name;
-            let masker_ref = &masker;
+            let redactor_ref = &redactor;
             let truncated_lines_ref = &mut truncated_lines;
             let runner_ref = runner.as_ref();
             let outcome = crate::exec::dispatch::dispatch_with_reauth(
@@ -639,7 +645,15 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         cmd_ref,
                         opts_call,
                         &mut |line| {
-                            let masked = masker_ref.mask_line(line);
+                            // L7 (v0.1.3): the redactor returns None
+                            // for lines inside (or ending) an active
+                            // PEM private-key block. We skip emission
+                            // entirely so the BEGIN-line marker is the
+                            // only output for the whole block.
+                            let masked = match redactor_ref.mask_line(line) {
+                                Some(m) => m,
+                                None => return,
+                            };
                             let masked: std::borrow::Cow<'_, str> = if args.clean_output {
                                 match strip_ansi(&masked) {
                                     std::borrow::Cow::Borrowed(_) => {
@@ -661,10 +675,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                                         ),
                                 );
                             } else {
-                                let safe = crate::format::safe::safe_terminal_line(
-                                    &masked,
-                                    line_budget,
-                                );
+                                let safe =
+                                    crate::format::safe::safe_terminal_line(&masked, line_budget);
                                 if line_budget != usize::MAX && masked.len() > line_budget {
                                     *truncated_lines_ref += 1;
                                 }
@@ -685,8 +697,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // / interp / optional inline body) so the audit JSONL is the
         // single source of truth for "what script ran here?".
         let script_ref = script.as_ref();
-        let stamp_audit = |e: &mut crate::safety::audit::AuditEntry,
-                           class: Option<&str>| {
+        let stamp_audit = |e: &mut crate::safety::audit::AuditEntry, class: Option<&str>| {
             if exit.retried {
                 e.retry_of = Some(format!("transport_stale@{}", label));
             }
@@ -734,9 +745,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 // `reauth_id` for correlation).
                 if stdin_audited || exit.retried {
                     if let Some(store) = &audit_store {
-                        let mut e =
-                            crate::safety::audit::AuditEntry::new("run", &label);
-                        e.args = user_cmd.clone();
+                        let mut e = crate::safety::audit::AuditEntry::new("run", &label);
+                        e.args = stamp_args(&user_cmd, args.show_secrets, &redactor);
                         e.exit = code;
                         e.duration_ms = step_started.elapsed().as_millis() as u64;
                         e.reason = reason.clone();
@@ -746,6 +756,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                             e.env_overlay = Some(effective_overlay.clone());
                         }
                         e.rendered_cmd = Some(cmd.clone());
+                        e.secrets_masked_kinds = collect_kinds(&redactor);
                         let class = if code == 0 { "ok" } else { "command_failed" };
                         stamp_audit(&mut e, Some(class));
                         let _ = store.append(&e);
@@ -765,9 +776,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     eprintln!("{label}: {e}");
                 }
                 if let Some(store) = &audit_store {
-                    let mut entry =
-                        crate::safety::audit::AuditEntry::new("run", &label);
-                    entry.args = user_cmd.clone();
+                    let mut entry = crate::safety::audit::AuditEntry::new("run", &label);
+                    entry.args = stamp_args(&user_cmd, args.show_secrets, &redactor);
                     entry.exit = -1;
                     entry.duration_ms = step_started.elapsed().as_millis() as u64;
                     entry.reason = reason.clone();
@@ -778,6 +788,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
                     entry.rendered_cmd = Some(cmd.clone());
+                    entry.secrets_masked_kinds = collect_kinds(&redactor);
                     stamp_audit(&mut entry, Some(class.as_str()));
                     let _ = store.append(&entry);
                 }
@@ -790,9 +801,8 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 }
                 if stdin_audited {
                     if let Some(store) = &audit_store {
-                        let mut entry =
-                            crate::safety::audit::AuditEntry::new("run", &label);
-                        entry.args = user_cmd.clone();
+                        let mut entry = crate::safety::audit::AuditEntry::new("run", &label);
+                        entry.args = stamp_args(&user_cmd, args.show_secrets, &redactor);
                         entry.exit = -1;
                         entry.duration_ms = step_started.elapsed().as_millis() as u64;
                         entry.reason = reason.clone();
@@ -803,6 +813,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                             entry.env_overlay = Some(effective_overlay.clone());
                         }
                         entry.rendered_cmd = Some(cmd.clone());
+                        entry.secrets_masked_kinds = collect_kinds(&redactor);
                         let _ = store.append(&entry);
                     }
                 }
@@ -892,4 +903,35 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     } else {
         ExitKind::Error
     })
+}
+
+/// L7 (v0.1.3): tag the audit `args` text with the redaction outcome,
+/// matching the `inspect exec` convention so audit reviewers can tell
+/// `[secrets_exposed=true]` (operator opted out via `--show-secrets`)
+/// from `[secrets_masked=true]` (the redactor fired during this step)
+/// from a clean run (neither tag).
+fn stamp_args(
+    user_cmd: &str,
+    show_secrets: bool,
+    redactor: &crate::redact::OutputRedactor,
+) -> String {
+    if show_secrets {
+        format!("{user_cmd} [secrets_exposed=true]")
+    } else if redactor.was_active() {
+        format!("{user_cmd} [secrets_masked=true]")
+    } else {
+        user_cmd.to_string()
+    }
+}
+
+/// L7 (v0.1.3): collect the redactor's per-kind activity for
+/// `AuditEntry::secrets_masked_kinds`. Returns `None` (so
+/// `skip_serializing_if` elides the field) when no masker fired.
+fn collect_kinds(redactor: &crate::redact::OutputRedactor) -> Option<Vec<String>> {
+    let kinds = redactor.active_kinds();
+    if kinds.is_empty() {
+        None
+    } else {
+        Some(kinds.into_iter().map(|s| s.to_string()).collect())
+    }
 }

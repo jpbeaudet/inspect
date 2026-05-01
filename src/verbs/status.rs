@@ -86,7 +86,10 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
                     inventory_age_s: crate::profile::runtime::inventory_age(&ns.namespace)
                         .map(|d| d.as_secs()),
                     stale: true,
-                    reason: Some(format!("{}: runtime refresh failed (no cache)", ns.namespace)),
+                    reason: Some(format!(
+                        "{}: runtime refresh failed (no cache)",
+                        ns.namespace
+                    )),
                 });
                 refresh_warnings.push(format!(
                     "{}: runtime refresh failed and no cache present",
@@ -171,10 +174,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     // "0 service(s): 0 healthy, 0 unhealthy, 0 unknown" — alarming
     // when the actual condition is "no service definitions configured
     // for this namespace."
-    let inventory_count: usize = runtime_by_ns
-        .values()
-        .map(|s| s.services.len())
-        .sum();
+    let inventory_count: usize = runtime_by_ns.values().map(|s| s.services.len()).sum();
     let state = if total > 0 {
         "ok"
     } else if inventory_count > 0 {

@@ -254,7 +254,9 @@ impl RemoteRunner for MockRunner {
         // exactly once per verb invocation.
         *self.reauth_count.lock().unwrap() += 1;
         match std::env::var("INSPECT_MOCK_REAUTH").as_deref() {
-            Ok("fail") => Err(anyhow::anyhow!("mock reauth failed (INSPECT_MOCK_REAUTH=fail)")),
+            Ok("fail") => Err(anyhow::anyhow!(
+                "mock reauth failed (INSPECT_MOCK_REAUTH=fail)"
+            )),
             _ => Ok(()),
         }
     }

@@ -136,12 +136,22 @@ fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
         truncate(&args.query, 80)
     );
     println!("DATA:");
+    // L7 (v0.1.3): redact lines before printing. PEM tracking is
+    // per-search-invocation; records are k-way merged across servers
+    // by the upstream pipeline, so a multi-line PEM body that crosses
+    // server boundaries is rare — but if a single server's records
+    // contain one, the BEGIN/body/END lines arrive contiguously
+    // because they came from the same source verb (logs / file).
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
     for r in records {
         let server = r.label("server").unwrap_or("?");
         let service = r.label("service").unwrap_or("_");
         let source = r.label("source").unwrap_or("?");
         match &r.line {
-            Some(l) => println!("  {server}/{service} [{source}] {l}"),
+            Some(l) => match redactor.mask_line(l) {
+                Some(masked) => println!("  {server}/{service} [{source}] {masked}"),
+                None => continue,
+            },
             None => println!("  {server}/{service} [{source}]"),
         }
     }
@@ -175,19 +185,33 @@ fn default_record_limit() -> usize {
 }
 
 fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
+    // L7 (v0.1.3): redact lines on the JSON path too, so consumers
+    // (LLM agents, jq pipelines, log shippers) never see verbatim
+    // secrets. PEM-block lines are dropped from the record stream
+    // entirely (the BEGIN-line marker stays).
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
     let data: Vec<Value> = records
         .iter()
-        .map(|r| {
+        .filter_map(|r| {
+            // `None` outer Option means "drop record" (PEM-interior
+            // line — emitting an empty `line: ""` would silently
+            // discard the L7 contract). `Some(None)` means the
+            // record had no line to begin with — emit it as-is.
+            let masked_line: Option<Option<String>> = match &r.line {
+                None => Some(None),
+                Some(l) => redactor.mask_line(l).map(|m| Some(m.into_owned())),
+            };
+            let masked_line = masked_line?;
             let source = r.label("source").unwrap_or("");
             let medium = source.split(':').next().unwrap_or("");
-            json!({
+            Some(json!({
                 "_source": source,
                 "_medium": medium,
                 "labels": r.labels,
                 "fields": r.fields,
-                "line": r.line,
+                "line": masked_line,
                 "ts_ms": r.ts_ms,
-            })
+            }))
         })
         .collect();
     // Phase 10 — correlation: dominant-service hint.

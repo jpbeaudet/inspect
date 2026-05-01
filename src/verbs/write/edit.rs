@@ -135,7 +135,11 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         // F11 (v0.1.3): pre-stage the inverse before dispatching.
         let revert = Revert::state_snapshot(
             format!("sha256:{prev_hash}"),
-            format!("restore {} from snapshot sha256:{}", w.label, &prev_hash[..12]),
+            format!(
+                "restore {} from snapshot sha256:{}",
+                w.label,
+                &prev_hash[..12]
+            ),
         );
         if args.revert_preview {
             eprintln!(

@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{audit_dir, ensure_home, set_dir_mode_0700, set_file_mode_0600};#[cfg(unix)]
+use crate::paths::{audit_dir, ensure_home, set_dir_mode_0700, set_file_mode_0600};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +161,14 @@ pub struct AuditEntry {
     /// invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_interp: Option<String>,
+    /// L7 (v0.1.3): which redaction maskers fired during this verb's
+    /// streamed output. Canonical order:
+    /// `["pem", "header", "url", "env"]` (subset). `None` (or absent)
+    /// when no masker fired or when the verb does not stream remote
+    /// stdout. Pre-L7 entries elide the field via
+    /// `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_masked_kinds: Option<Vec<String>>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -292,6 +301,7 @@ impl AuditEntry {
             script_bytes: None,
             script_body: None,
             script_interp: None,
+            secrets_masked_kinds: None,
         }
     }
 }

@@ -236,8 +236,8 @@ fn build_revert(act: Action, svc: &str, container: &str, kind: ServiceKind) -> R
         (_, Action::Restart) => Revert::unsupported(format!(
             "restart has no inverse; re-run `inspect restart {svc}` to repeat"
         )),
-        (_, Action::Reload) => Revert::unsupported(format!(
-            "reload (SIGHUP) has no inverse for {svc}"
-        )),
+        (_, Action::Reload) => {
+            Revert::unsupported(format!("reload (SIGHUP) has no inverse for {svc}"))
+        }
     }
 }

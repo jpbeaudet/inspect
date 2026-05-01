@@ -46,6 +46,11 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let svc_for_cursor = step.service().unwrap_or("_").to_string();
+        // L7 (v0.1.3): one redactor per step. Grep emits matched lines
+        // verbatim from the remote pipeline — anything that would
+        // otherwise be a bare token in the operator's terminal goes
+        // through the four-masker chain first.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
         if args.since_last {
             let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_for_cursor)?;
             let since = match &prev {
@@ -109,6 +114,13 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         }
 
         for line in out.stdout.lines() {
+            // L7 (v0.1.3): redact before counting — a line that is
+            // entirely consumed by the PEM masker (interior block
+            // line) is not a real match for the operator either.
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => continue,
+            };
             matches += 1;
             if args.format.is_json() {
                 JsonOut::write(
@@ -116,12 +128,12 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                         .with_service(&svc)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
                 );
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
                 println!("{}/{} | {safe}", step.ns.namespace, svc);

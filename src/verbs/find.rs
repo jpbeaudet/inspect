@@ -14,6 +14,12 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
 
     let mut total_hits = 0usize;
     for step in iter_steps(&nses, &targets) {
+        // L7 (v0.1.3): per-step redactor for symmetry with the other
+        // read verbs. `find` emits file paths only — secret patterns
+        // rarely fire — but a path like
+        // `/srv/dump/postgres://u:p@db/secret.sql` would otherwise
+        // leak the embedded URL credential. Cheap; runs unconditionally.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
         let path = step.path.as_deref().unwrap_or(".");
         // Field pitfall §7.4: defensive caps against symlink loops and
         // pathological deep trees. `-P` (the default for GNU find but
@@ -56,16 +62,20 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
             continue;
         }
         for line in out.stdout.lines().filter(|l| !l.is_empty()) {
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => continue,
+            };
             total_hits += 1;
             if args.format.is_json() {
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))
                         .with_service(step.service().unwrap_or("_"))
-                        .put("path", line),
+                        .put("path", masked.as_ref()),
                 );
             } else {
                 println!(
-                    "{}{}: {line}",
+                    "{}{}: {masked}",
                     step.ns.namespace,
                     step.service().map(|s| format!("/{s}")).unwrap_or_default()
                 );

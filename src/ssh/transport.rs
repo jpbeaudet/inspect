@@ -211,20 +211,15 @@ mod tests {
 
     #[test]
     fn openssh_dns_failure_is_unreachable() {
-        let stderr = "ssh: Could not resolve hostname bogus.example.invalid: Name or service not known";
-        assert_eq!(
-            classify(stderr),
-            Some(TransportClass::TransportUnreachable)
-        );
+        let stderr =
+            "ssh: Could not resolve hostname bogus.example.invalid: Name or service not known";
+        assert_eq!(classify(stderr), Some(TransportClass::TransportUnreachable));
     }
 
     #[test]
     fn openssh_connection_refused_is_unreachable() {
         let stderr = "ssh: connect to host 1.2.3.4 port 22: Connection refused";
-        assert_eq!(
-            classify(stderr),
-            Some(TransportClass::TransportUnreachable)
-        );
+        assert_eq!(classify(stderr), Some(TransportClass::TransportUnreachable));
     }
 
     #[test]

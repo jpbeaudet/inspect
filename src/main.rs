@@ -213,8 +213,8 @@ fn is_known_top_level_verb(name: &str) -> bool {
 /// to scope the kubectl-muscle-memory hint to verbs where the
 /// suggested `<ns>/<service>` rewrite makes sense.
 const F10_SELECTOR_VERBS: &[&str] = &[
-    "why", "logs", "run", "health", "status", "ports", "cat", "grep", "ps", "ls",
-    "find", "exec", "volumes", "images", "network", "resolve",
+    "why", "logs", "run", "health", "status", "ports", "cat", "grep", "ps", "ls", "find", "exec",
+    "volumes", "images", "network", "resolve",
 ];
 
 /// F10.1 (v0.1.3): operators with `kubectl -n <ns>` muscle memory
@@ -245,9 +245,7 @@ fn detect_namespace_flag_typo(raw: &[std::ffi::OsString]) -> Option<String> {
     // Walk the argv looking for a pair (--<ns-flag> <value>) AND a
     // bare positional token that doesn't already look like a selector
     // (no `/`, no `:`, no leading `@`). Order is flexible.
-    const NS_FLAGS: &[&str] = &[
-        "--on", "--in", "--at", "--host", "--ns", "--namespace",
-    ];
+    const NS_FLAGS: &[&str] = &["--on", "--in", "--at", "--host", "--ns", "--namespace"];
     let mut ns_flag: Option<&str> = None;
     let mut ns_value: Option<String> = None;
     let mut bare: Option<String> = None;
@@ -266,7 +264,10 @@ fn detect_namespace_flag_typo(raw: &[std::ffi::OsString]) -> Option<String> {
             continue;
         }
         // `--ns-flag=value` form.
-        if let Some(f) = NS_FLAGS.iter().find(|f| cur.starts_with(&format!("{}=", f))) {
+        if let Some(f) = NS_FLAGS
+            .iter()
+            .find(|f| cur.starts_with(&format!("{}=", f)))
+        {
             let v = &cur[f.len() + 1..];
             if v.is_empty() {
                 return None;
@@ -285,11 +286,7 @@ fn detect_namespace_flag_typo(raw: &[std::ffi::OsString]) -> Option<String> {
         }
         // Plain positional. Treat the first non-selector-shaped one
         // as the candidate bare-service token.
-        if bare.is_none()
-            && !cur.contains('/')
-            && !cur.contains(':')
-            && !cur.starts_with('@')
-        {
+        if bare.is_none() && !cur.contains('/') && !cur.contains(':') && !cur.starts_with('@') {
             bare = Some(cur.to_string());
         }
         i += 1;
@@ -301,7 +298,6 @@ fn detect_namespace_flag_typo(raw: &[std::ffi::OsString]) -> Option<String> {
          Did you mean 'inspect {verb} {ns}/{svc}'?"
     ))
 }
-
 
 #[cfg(test)]
 mod f3_tests {
@@ -361,10 +357,7 @@ mod f3_tests {
 
     #[test]
     fn f3_bare_help_unchanged() {
-        assert_eq!(
-            rewrite(&["inspect", "help"]),
-            vec!["inspect", "help"]
-        );
+        assert_eq!(rewrite(&["inspect", "help"]), vec!["inspect", "help"]);
         assert_eq!(rewrite(&["inspect"]), vec!["inspect"]);
     }
 

@@ -83,9 +83,20 @@ pub fn run(args: ChmodArgs) -> Result<ExitKind> {
             None => stat_inner,
         };
         let prev_mode = runner
-            .run(&s.ns.namespace, &s.ns.target, &stat_cmd, RunOpts::with_timeout(15))
+            .run(
+                &s.ns.namespace,
+                &s.ns.target,
+                &stat_cmd,
+                RunOpts::with_timeout(15),
+            )
             .ok()
-            .and_then(|o| if o.ok() { Some(o.stdout.trim().to_string()) } else { None })
+            .and_then(|o| {
+                if o.ok() {
+                    Some(o.stdout.trim().to_string())
+                } else {
+                    None
+                }
+            })
             .filter(|s| !s.is_empty() && s.chars().all(|c| ('0'..='7').contains(&c)));
         let label = format!(
             "{}{}:{path}",

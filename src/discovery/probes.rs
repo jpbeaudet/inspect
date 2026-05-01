@@ -423,8 +423,7 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
     // F2: classify the aggregate outcome and route it to the right
     // channel — silent / debug-only / single warning / fatal error.
     let succeeded = total.saturating_sub(incomplete_ids.len());
-    let classification =
-        classify_inspect_outcome(total, succeeded, batch_was_slow, &last_error);
+    let classification = classify_inspect_outcome(total, succeeded, batch_was_slow, &last_error);
     match &classification {
         InspectClassification::Clean => {}
         InspectClassification::SlowButSuccessful { detail } => {
@@ -1498,9 +1497,7 @@ mod tests {
     // unchanged: every bucket the spec calls out has a named test.
     // -------------------------------------------------------------------------
 
-    use super::{
-        classify_inspect_outcome, compute_docker_inspect_timeout, InspectClassification,
-    };
+    use super::{classify_inspect_outcome, compute_docker_inspect_timeout, InspectClassification};
     use std::time::Duration;
 
     /// F2 contract #1: a healthy host with 37 containers, every one
@@ -1548,7 +1545,10 @@ mod tests {
             }
             other => panic!("expected GenuineFailure, got {other:?}"),
         }
-        assert!(c.warning_line().is_none(), "fatal must not double as warning");
+        assert!(
+            c.warning_line().is_none(),
+            "fatal must not double as warning"
+        );
         let line = c.fatal_line().expect("fatal must produce a hint");
         assert!(line.contains("daemon is unreachable"));
         assert!(line.contains("inspect run"));

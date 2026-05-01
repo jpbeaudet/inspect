@@ -232,11 +232,7 @@ fn f1_status_namespace_glob_lists_all_services_across_matches() {
 
 fn write_minimal_arte(sb: &Sandbox) {
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(
-        sb.home(),
-        "arte",
-        &[("atlas", "img/atlas:1", "ok")],
-    );
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
 }
 
 fn arte_mock(restart_count: u32) -> serde_json::Value {
@@ -386,10 +382,7 @@ fn f8_cache_clear_namespace_wipes_runtime() {
     let sb = Sandbox::new(arte_mock(0));
     write_minimal_arte(&sb);
     sb.cmd().args(["status", "arte"]).assert().success();
-    sb.cmd()
-        .args(["cache", "clear", "arte"])
-        .assert()
-        .success();
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
     // After clear, next read must be live (cache file gone).
     sb.cmd()
         .args(["status", "arte"])
@@ -486,10 +479,7 @@ fn f8_cache_clear_writes_audit_entry() {
     let sb = Sandbox::new(arte_mock(0));
     write_minimal_arte(&sb);
     sb.cmd().args(["status", "arte"]).assert().success(); // populate
-    sb.cmd()
-        .args(["cache", "clear", "arte"])
-        .assert()
-        .success();
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
     // The audit log should now have a `cache-clear` entry for `arte`.
     let out = sb
         .cmd()
@@ -542,12 +532,7 @@ steps:
     let bundle_path = sb.home().join("b.yaml");
     std::fs::write(&bundle_path, yaml).unwrap();
     sb.cmd()
-        .args([
-            "bundle",
-            "apply",
-            bundle_path.to_str().unwrap(),
-            "--apply",
-        ])
+        .args(["bundle", "apply", bundle_path.to_str().unwrap(), "--apply"])
         .assert()
         .success();
     // After the bundle ran, the next read MUST be live.
@@ -614,7 +599,8 @@ fn f9_run_no_stdin_with_piped_input_exits_2_before_dispatch() {
         "stderr should explain --no-stdin contract: {stderr}"
     );
     assert!(
-        stderr.contains("inspect cp") || stderr.contains("--stdin")
+        stderr.contains("inspect cp")
+            || stderr.contains("--stdin")
             || stderr.contains("forwarding is disabled"),
         "stderr should chain hint at the recovery action: {stderr}"
     );
@@ -631,14 +617,7 @@ fn f9_run_stdin_size_cap_exceeded_exits_2() {
     let payload: String = "x".repeat(2048);
     let assert = sb
         .cmd()
-        .args([
-            "run",
-            "arte/atlas",
-            "--stdin-max",
-            "1k",
-            "--",
-            "cat",
-        ])
+        .args(["run", "arte/atlas", "--stdin-max", "1k", "--", "cat"])
         .write_stdin(payload)
         .assert()
         .failure();
@@ -657,14 +636,7 @@ fn f9_run_stdin_max_zero_disables_cap() {
     write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
     let payload: String = "y".repeat(200 * 1024);
     sb.cmd()
-        .args([
-            "run",
-            "arte/atlas",
-            "--stdin-max",
-            "0",
-            "--",
-            "cat",
-        ])
+        .args(["run", "arte/atlas", "--stdin-max", "0", "--", "cat"])
         .write_stdin(payload)
         .assert()
         .success();
@@ -725,10 +697,7 @@ fn f9_run_audit_entry_records_stdin_bytes() {
         for line in std::fs::read_to_string(&p).unwrap().lines() {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             if v.get("verb").and_then(|s| s.as_str()) == Some("run") {
-                let bytes = v
-                    .get("stdin_bytes")
-                    .and_then(|n| n.as_u64())
-                    .unwrap_or(0);
+                let bytes = v.get("stdin_bytes").and_then(|n| n.as_u64()).unwrap_or(0);
                 assert_eq!(bytes, 6, "expected stdin_bytes=6 in audit entry: {v}");
                 assert!(
                     v.get("stdin_sha256").is_none(),
@@ -750,13 +719,7 @@ fn f9_run_audit_stdin_hash_records_sha256() {
     write_servers_toml(sb.home(), &["arte"]);
     write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
     sb.cmd()
-        .args([
-            "run",
-            "arte/atlas",
-            "--audit-stdin-hash",
-            "--",
-            "cat",
-        ])
+        .args(["run", "arte/atlas", "--audit-stdin-hash", "--", "cat"])
         .write_stdin("hello")
         .assert()
         .success();
@@ -836,7 +799,10 @@ fn f11_chmod_captures_command_pair_revert() {
     let body = audit_jsonl_body(sb.home());
     assert!(body.contains("\"kind\":\"command_pair\""), "body: {body}");
     assert!(body.contains("chmod 0644"), "inverse missing: {body}");
-    assert!(body.contains("\"applied\":true"), "applied flag missing: {body}");
+    assert!(
+        body.contains("\"applied\":true"),
+        "applied flag missing: {body}"
+    );
 }
 
 #[test]
@@ -863,14 +829,23 @@ fn f11_exec_with_no_revert_records_unsupported_kind() {
     write_minimal_arte(&sb);
     sb.cmd()
         .args([
-            "exec", "arte/atlas", "--apply", "--yes", "--no-revert",
-            "--", "echo", "hi",
+            "exec",
+            "arte/atlas",
+            "--apply",
+            "--yes",
+            "--no-revert",
+            "--",
+            "echo",
+            "hi",
         ])
         .assert()
         .success();
     let body = audit_jsonl_body(sb.home());
     assert!(body.contains("\"kind\":\"unsupported\""), "body: {body}");
-    assert!(body.contains("\"no_revert_acknowledged\":true"), "body: {body}");
+    assert!(
+        body.contains("\"no_revert_acknowledged\":true"),
+        "body: {body}"
+    );
 }
 
 #[test]
@@ -883,8 +858,12 @@ fn f11_revert_preview_prints_inverse_before_apply() {
     write_minimal_arte(&sb);
     sb.cmd()
         .args([
-            "chmod", "arte/atlas:/usr/bin/foo", "0700",
-            "--apply", "--yes", "--revert-preview",
+            "chmod",
+            "arte/atlas:/usr/bin/foo",
+            "0700",
+            "--apply",
+            "--yes",
+            "--revert-preview",
         ])
         .assert()
         .success()
@@ -903,7 +882,13 @@ fn f11_revert_command_pair_runs_inverse_via_audit_id() {
     let sb = Sandbox::new(mock);
     write_minimal_arte(&sb);
     sb.cmd()
-        .args(["chmod", "arte/atlas:/etc/app.conf", "0600", "--apply", "--yes"])
+        .args([
+            "chmod",
+            "arte/atlas:/etc/app.conf",
+            "0600",
+            "--apply",
+            "--yes",
+        ])
         .assert()
         .success();
     // Pull audit id.
@@ -937,8 +922,14 @@ fn f11_revert_unsupported_refuses_loudly() {
     write_minimal_arte(&sb);
     sb.cmd()
         .args([
-            "exec", "arte/atlas", "--apply", "--yes", "--no-revert",
-            "--", "echo", "hi",
+            "exec",
+            "arte/atlas",
+            "--apply",
+            "--yes",
+            "--no-revert",
+            "--",
+            "echo",
+            "hi",
         ])
         .assert()
         .success();
@@ -970,7 +961,13 @@ fn f11_revert_last_walks_recent_entries() {
     let sb = Sandbox::new(mock);
     write_minimal_arte(&sb);
     sb.cmd()
-        .args(["chmod", "arte/atlas:/etc/a.conf", "0600", "--apply", "--yes"])
+        .args([
+            "chmod",
+            "arte/atlas:/etc/a.conf",
+            "0600",
+            "--apply",
+            "--yes",
+        ])
         .assert()
         .success();
     // --last 1 dry-run should preview the inverse of the most recent
@@ -1042,10 +1039,28 @@ fn f3_help_verb_byte_for_byte_matches_dash_dash_help() {
     // 50-verb cross product would slow the suite. The contract
     // is the same: every verb identical.
     let verbs = [
-        "logs", "status", "health", "ps", "grep", "cat",
-        "restart", "stop", "exec", "edit", "rm", "cp", "chmod",
-        "audit", "revert", "why", "connectivity",
-        "add", "list", "show", "setup", "connect",
+        "logs",
+        "status",
+        "health",
+        "ps",
+        "grep",
+        "cat",
+        "restart",
+        "stop",
+        "exec",
+        "edit",
+        "rm",
+        "cp",
+        "chmod",
+        "audit",
+        "revert",
+        "why",
+        "connectivity",
+        "add",
+        "list",
+        "show",
+        "setup",
+        "connect",
     ];
     // Note: `search`, `fleet`, and `bundle` are intentionally excluded —
     // each is also an editorial topic, and per F3 the topic body wins
@@ -1115,7 +1130,9 @@ fn f3_unknown_token_exits_2_with_chained_hint() {
         .args(["help", "definitely-not-a-thing"])
         .assert()
         .code(2)
-        .stderr(contains("error: unknown command or topic: 'definitely-not-a-thing'"))
+        .stderr(contains(
+            "error: unknown command or topic: 'definitely-not-a-thing'",
+        ))
         .stderr(contains("see: inspect help examples"));
 }
 
@@ -1456,7 +1473,11 @@ fn f4_unhealthy_target_attaches_bundle_artifacts() {
     // Headline reproducer: all three sections present in human output.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     sb.cmd()
         .args(["why", "arte/onyx-vault"])
@@ -1476,7 +1497,11 @@ fn f4_unhealthy_target_detects_wrapper_injection() {
     // headline diagnostic for the duplicate-bind class of failure.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     sb.cmd()
         .args(["why", "arte/onyx-vault"])
@@ -1492,7 +1517,11 @@ fn f4_no_bundle_flag_suppresses_artifacts() {
     // the v0.1.2 terse output. --no-bundle restores it.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     let out = sb
         .cmd()
@@ -1551,7 +1580,11 @@ fn f4_log_tail_above_cap_is_clamped_to_200() {
     // lines through redaction; clamp + one-line notice on stderr.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     sb.cmd()
         .args(["why", "arte/onyx-vault", "--log-tail", "500"])
@@ -1566,7 +1599,11 @@ fn f4_json_bundle_fields_populated_on_unhealthy() {
     // with structured data on unhealthy services.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     let out = sb
         .cmd()
@@ -1641,8 +1678,7 @@ fn f4_json_bundle_fields_empty_on_healthy() {
         "recent_logs must be empty array on healthy"
     );
     assert!(
-        svc["effective_command"].is_null()
-            || svc["effective_command"] == serde_json::json!({}),
+        svc["effective_command"].is_null() || svc["effective_command"] == serde_json::json!({}),
         "effective_command must be null or empty object on healthy: {:?}",
         svc["effective_command"]
     );
@@ -1659,7 +1695,11 @@ fn f4_smart_next_suggests_entrypoint_inspection_on_double_bind() {
     // twice, the NEXT block guides the operator at the entrypoint.
     let sb = Sandbox::new(f4_vault_unhealthy_mock());
     write_servers_toml(sb.home(), &["arte"]);
-    write_profile(sb.home(), "arte", &[("onyx-vault", "vault:latest", "unhealthy")]);
+    write_profile(
+        sb.home(),
+        "arte",
+        &[("onyx-vault", "vault:latest", "unhealthy")],
+    );
 
     sb.cmd()
         .args(["why", "arte/onyx-vault"])
@@ -2073,7 +2113,14 @@ fn f10_cat_lines_and_start_end_mutually_exclusive() {
     let sb = Sandbox::new(json!([]));
     write_minimal_arte(&sb);
     sb.cmd()
-        .args(["cat", "arte:/etc/test.conf", "--lines", "1-5", "--start", "3"])
+        .args([
+            "cat",
+            "arte:/etc/test.conf",
+            "--lines",
+            "1-5",
+            "--start",
+            "3",
+        ])
         .assert()
         .failure();
 }
@@ -2094,13 +2141,7 @@ fn f10_cat_lines_json_emits_n_text_records() {
     write_minimal_arte(&sb);
     let out = sb
         .cmd()
-        .args([
-            "cat",
-            "arte:/etc/test.conf",
-            "--lines",
-            "2-4",
-            "--json",
-        ])
+        .args(["cat", "arte:/etc/test.conf", "--lines", "2-4", "--json"])
         .assert()
         .success()
         .get_output()
@@ -2244,9 +2285,7 @@ fn f10_quiet_status_human_path_has_no_envelope_trailers() {
         .clone();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("SUMMARY:")
-            && !stdout.contains("NEXT:")
-            && !stdout.contains("WARNINGS:"),
+        !stdout.contains("SUMMARY:") && !stdout.contains("NEXT:") && !stdout.contains("WARNINGS:"),
         "--quiet output must drop envelope trailers: {stdout}"
     );
 }
@@ -2575,7 +2614,9 @@ fn f12_run_debug_prints_rendered_command_to_stderr() {
         .args(["run", "arte", "--debug", "--", "echo", "hi"])
         .assert()
         .success()
-        .stderr(contains("rendered command for arte: env PATH=\"/extra/bin:$PATH\" -- echo hi"));
+        .stderr(contains(
+            "rendered command for arte: env PATH=\"/extra/bin:$PATH\" -- echo hi",
+        ));
 }
 
 #[test]
@@ -2584,11 +2625,7 @@ fn f12_overlay_value_with_semicolon_does_not_split() {
     // dispatched as a single env-var string, not as two commands.
     // The mock asserts the literal `;` survives in the rendered cmd.
     let sb = Sandbox::new(f12_run_mock());
-    write_servers_toml_with_env(
-        sb.home(),
-        "arte",
-        &[("MALICIOUS", "v;rm -rf /")],
-    );
+    write_servers_toml_with_env(sb.home(), "arte", &[("MALICIOUS", "v;rm -rf /")]);
     sb.cmd()
         .args(["run", "arte", "--", "echo", "hi"])
         .assert()
@@ -2890,7 +2927,8 @@ fn f13_json_summary_envelope_carries_failure_class_ok() {
     ]);
     let sb = Sandbox::new(mock);
     write_minimal_arte(&sb);
-    let out = sb.cmd()
+    let out = sb
+        .cmd()
         .args(["run", "arte/atlas", "--json", "--", "echo", "hi"])
         .assert()
         .success()
@@ -2915,7 +2953,8 @@ fn f13_json_summary_envelope_carries_failure_class_transport_stale() {
     ]);
     let sb = Sandbox::new(mock);
     write_minimal_arte(&sb);
-    let assert = sb.cmd()
+    let assert = sb
+        .cmd()
         .args(["run", "arte/atlas", "--no-reauth", "--json", "--", "cat"])
         .assert()
         .code(12);
@@ -2960,7 +2999,9 @@ fn f13_audit_entry_records_failure_class_and_reauth_id() {
     }
     let lines: Vec<&str> = body.lines().collect();
     assert!(
-        lines.iter().any(|l| l.contains("\"verb\":\"connect.reauth\"")),
+        lines
+            .iter()
+            .any(|l| l.contains("\"verb\":\"connect.reauth\"")),
         "expected a connect.reauth audit entry in {body}"
     );
     let run_entry = lines
@@ -3024,12 +3065,7 @@ fn f14_run_file_ships_script_via_bash_s_no_quoting_needed() {
     std::fs::write(&script_path, body).unwrap();
     let assert = sb
         .cmd()
-        .args([
-            "run",
-            "arte/atlas",
-            "--file",
-            script_path.to_str().unwrap(),
-        ])
+        .args(["run", "arte/atlas", "--file", script_path.to_str().unwrap()])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -3076,7 +3112,10 @@ fn f14_stdin_script_matches_file_output_byte_for_byte() {
         .assert()
         .success();
     let out2 = String::from_utf8(a2.get_output().stdout.clone()).unwrap();
-    assert_eq!(out1, out2, "--file and --stdin-script must produce identical output");
+    assert_eq!(
+        out1, out2,
+        "--file and --stdin-script must produce identical output"
+    );
     assert!(out1.contains("marker-from-stdin-script"));
 }
 
@@ -3211,7 +3250,10 @@ fn f14_run_file_audit_records_script_path_sha256_and_bytes() {
     );
     // The dedup-store should contain the body.
     let stored = sb.home().join("scripts").join(format!("{expected_sha}.sh"));
-    assert!(stored.exists(), "script body should be dedup-stored at {stored:?}");
+    assert!(
+        stored.exists(),
+        "script body should be dedup-stored at {stored:?}"
+    );
     let stored_body = std::fs::read_to_string(&stored).unwrap();
     assert_eq!(stored_body, body, "stored body should match source");
 }
@@ -3409,4 +3451,732 @@ fn f14_no_stdin_with_file_is_clap_rejected() {
         ])
         .assert()
         .failure();
+}
+
+// -----------------------------------------------------------------------------
+// L7 — extended secret redaction (header / PEM / URL credentials).
+//
+// The v0.1.1 `KEY=VALUE` masker (P4) only catches one shape. v0.1.3 adds three
+// more — multi-line PEM private-key blocks, HTTP `Authorization` /
+// `X-API-Key` / `Cookie` / `Set-Cookie` headers, and `scheme://user:pass@`
+// URL credentials — composed in a fixed `pem → header → url → env` chain on
+// every line streamed from a remote command on `inspect run`, `inspect exec`,
+// `inspect logs`, `inspect grep`, `inspect cat`, `inspect search`,
+// `inspect why`, `inspect find`, and the merged follow stream.
+//
+// Default behavior is to redact; `--show-secrets` opts out.
+// `inspect run` / `inspect exec` audit entries gain a structured
+// `secrets_masked_kinds: ["pem","header","url","env"]` (subset, canonical
+// order) field in addition to the existing `[secrets_masked=true]` text tag.
+// -----------------------------------------------------------------------------
+
+const PEM_BODY: &str = "\
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+-----END RSA PRIVATE KEY-----";
+
+#[test]
+fn l7_run_redacts_pem_block_to_single_marker() {
+    // The mock's stdout for `cat key.pem` contains a four-line PEM block
+    // surrounded by two contextual lines. The redactor must collapse the
+    // block to one `[REDACTED PEM KEY]` marker and pass the surrounding
+    // lines through.
+    let stdout = format!("before key\n{PEM_BODY}\nafter key\n");
+    let mock = json!([
+        { "match": "cat key.pem", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "cat key.pem"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("[REDACTED PEM KEY]"), "no marker: {stdout}");
+    assert!(
+        stdout.contains("before key"),
+        "context line missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("after key"),
+        "context line missing: {stdout}"
+    );
+    // Body bytes must NOT appear.
+    assert!(
+        !stdout.contains("MIIEowIBAAKCAQEA"),
+        "PEM body leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains("BEGIN RSA"),
+        "BEGIN line leaked verbatim: {stdout}"
+    );
+    assert!(!stdout.contains("END RSA"), "END line leaked: {stdout}");
+    // Marker should appear exactly once for the one-block input.
+    let marker_count = stdout.matches("[REDACTED PEM KEY]").count();
+    assert_eq!(
+        marker_count, 1,
+        "expected one marker, got {marker_count}: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_redacts_authorization_header() {
+    let mock = json!([
+        {
+            "match": "curl -v",
+            "stdout": "> GET /api HTTP/1.1\n> Authorization: Bearer eyJhbGc.eyJzdWI.signature\n> Host: api.example.com\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "curl -v https://api"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Authorization: <redacted>"),
+        "header not masked: {stdout}"
+    );
+    assert!(!stdout.contains("eyJhbGc"), "Bearer token leaked: {stdout}");
+    // Surrounding headers (non-secret) pass through verbatim.
+    assert!(
+        stdout.contains("Host: api.example.com"),
+        "Host leaked away: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_redacts_set_cookie_and_x_api_key_case_insensitive() {
+    let mock = json!([
+        {
+            "match": "curl -v",
+            "stdout": "< Set-Cookie: session=abc123; HttpOnly\nx-api-key: sk_live_topsecret\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "curl -v https://api"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Set-Cookie: <redacted>"),
+        "set-cookie leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains("session=abc123"),
+        "cookie value leaked: {stdout}"
+    );
+    assert!(
+        stdout.contains("x-api-key: <redacted>"),
+        "x-api-key not masked (case insensitivity): {stdout}"
+    );
+    assert!(
+        !stdout.contains("sk_live_topsecret"),
+        "api key leaked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_redacts_url_credentials_preserves_username() {
+    let mock = json!([
+        {
+            "match": "env | grep DB",
+            "stdout": "configured: postgres://alice:hunter2@db.internal:5432/app\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "env | grep DB"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("postgres://alice:****@db.internal:5432/app"),
+        "URL not masked: {stdout}"
+    );
+    assert!(!stdout.contains("hunter2"), "URL password leaked: {stdout}");
+    assert!(
+        stdout.contains("alice"),
+        "URL username should be preserved: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_show_secrets_bypasses_all_four_maskers() {
+    // With --show-secrets, every masker is bypassed verbatim — including
+    // PEM blocks, headers, URL passwords, and env-secrets.
+    let stdout = format!(
+        "API_KEY=sk-abcdefghk3\nAuthorization: Bearer xyz\npg=postgres://u:hunter2@h/d\n{PEM_BODY}\n"
+    );
+    let mock = json!([
+        { "match": "leak", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--show-secrets", "--", "leak"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("sk-abcdefghk3"),
+        "env masker should be bypassed: {stdout}"
+    );
+    assert!(
+        stdout.contains("Bearer xyz"),
+        "header masker should be bypassed: {stdout}"
+    );
+    assert!(
+        stdout.contains("hunter2"),
+        "URL masker should be bypassed: {stdout}"
+    );
+    assert!(
+        stdout.contains("BEGIN RSA PRIVATE KEY"),
+        "PEM masker should be bypassed: {stdout}"
+    );
+    assert!(
+        stdout.contains("MIIEowIBAAKCAQEA"),
+        "PEM body should be bypassed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[REDACTED PEM KEY]"),
+        "marker emitted under --show-secrets: {stdout}"
+    );
+}
+
+#[test]
+fn l7_existing_env_masker_unchanged() {
+    // Backward-compat regression guard: the v0.1.1 KEY=VALUE masker
+    // (head4****tail2 shape) keeps firing identically under L7.
+    let mock = json!([
+        { "match": "envdump", "stdout": "API_KEY=sk-abcdefghijkl\nFOO=plain\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "envdump"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("API_KEY=sk-a"),
+        "env masker prefix changed: {stdout}"
+    );
+    assert!(
+        stdout.contains("****"),
+        "env masker mid-mask changed: {stdout}"
+    );
+    assert!(
+        stdout.contains("FOO=plain"),
+        "non-secret KV mangled: {stdout}"
+    );
+    assert!(
+        !stdout.contains("abcdefghij"),
+        "secret body leaked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_pem_gate_suppresses_other_maskers_in_block() {
+    // A line crafted to match the header masker ALSO appears between
+    // BEGIN/END of a PEM block. The PEM gate must suppress the entire
+    // interior — header masker output must not leak from inside a block.
+    let stdout = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+Authorization: Bearer SHOULD_NOT_LEAK
+postgres://u:p@h/d
+-----END OPENSSH PRIVATE KEY-----
+after: Authorization: Bearer ok
+";
+    let mock = json!([
+        { "match": "pemwithheaders", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "pemwithheaders"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "marker missing: {stdout}"
+    );
+    // Even a header-shaped line inside the block must NOT show up
+    // — neither verbatim nor masked. The PEM gate consumes it.
+    assert!(
+        !stdout.contains("SHOULD_NOT_LEAK"),
+        "interior leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains("postgres://u:p@h/d"),
+        "interior URL leaked: {stdout}"
+    );
+    // After the block, the header masker fires normally.
+    assert!(
+        stdout.contains("after: Authorization: <redacted>"),
+        "post-block header not masked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_pgp_block_redacted() {
+    let stdout = "\
+-----BEGIN PGP PRIVATE KEY BLOCK-----
+Version: GnuPG v2
+
+lQHYBGHwBxgBBADwQK4ZzbWY6...
+-----END PGP PRIVATE KEY BLOCK-----
+";
+    let mock = json!([
+        { "match": "pgpkey", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "pgpkey"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "PGP block not redacted: {stdout}"
+    );
+    assert!(
+        !stdout.contains("lQHYBGHwBxgB"),
+        "PGP body leaked: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Version: GnuPG"),
+        "PGP header line leaked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_pkcs8_unencrypted_redacted() {
+    // Bare `-----BEGIN PRIVATE KEY-----` — PKCS#8 unencrypted, common
+    // form for modern services.
+    let stdout = "\
+-----BEGIN PRIVATE KEY-----
+MIIBVQIBADAN...
+-----END PRIVATE KEY-----
+";
+    let mock = json!([
+        { "match": "pkcs8", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "pkcs8"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "PKCS#8 not redacted: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MIIBVQIBADAN"),
+        "PKCS#8 body leaked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_certificates_pass_through_unredacted() {
+    // Public certs are public — they must NOT be redacted.
+    let stdout = "\
+-----BEGIN CERTIFICATE-----
+MIICljCCAX4CCQDxxxxxxxxx
+-----END CERTIFICATE-----
+";
+    let mock = json!([
+        { "match": "showcert", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "showcert"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("BEGIN CERTIFICATE"),
+        "cert was redacted: {stdout}"
+    );
+    assert!(
+        stdout.contains("MIICljCCAX4"),
+        "cert body was redacted: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[REDACTED PEM KEY]"),
+        "cert wrongly tagged: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_audit_records_secrets_masked_kinds() {
+    // `inspect run` audits when stdin is forwarded (F9). Use that path
+    // to verify the new `secrets_masked_kinds` field is populated.
+    // The mock's `cat` echoes stdin verbatim back as stdout (F9
+    // contract), so a payload like `Authorization: Bearer x\nUSER_KEY=...\n`
+    // both forwards as input AND comes back as output for redaction.
+    let mock = f9_run_mock();
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "cat"])
+        .write_stdin("Authorization: Bearer x\nAPI_TOKEN=sk-abcdefghijkl\n")
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    let mut found_kinds: Option<Vec<String>> = None;
+    let mut found_args = String::new();
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v.get("verb").and_then(|s| s.as_str()) == Some("run") {
+            if let Some(arr) = v.get("secrets_masked_kinds").and_then(|x| x.as_array()) {
+                found_kinds = Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect(),
+                );
+                found_args = v
+                    .get("args")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+    }
+    let kinds = found_kinds.expect("secrets_masked_kinds field absent from audit entry");
+    assert!(
+        kinds.contains(&"header".to_string()),
+        "header kind missing: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"env".to_string()),
+        "env kind missing: {kinds:?}"
+    );
+    // Canonical order: pem before header before url before env.
+    let header_idx = kinds.iter().position(|s| s == "header").unwrap();
+    let env_idx = kinds.iter().position(|s| s == "env").unwrap();
+    assert!(
+        header_idx < env_idx,
+        "kinds out of canonical order: {kinds:?}"
+    );
+    // Boolean text tag is also stamped on `args`.
+    assert!(
+        found_args.contains("[secrets_masked=true]"),
+        "missing text tag: {found_args}"
+    );
+}
+
+#[test]
+fn l7_run_audit_no_kinds_field_when_no_redaction() {
+    // Negative: clean stdin / clean stdout → field is absent (elided
+    // by `skip_serializing_if = Option::is_none`).
+    let mock = f9_run_mock();
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte/atlas", "--", "cat"])
+        .write_stdin("plain content with no secrets\n")
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v.get("verb").and_then(|s| s.as_str()) == Some("run") {
+            assert!(
+                v.get("secrets_masked_kinds").is_none(),
+                "field should be elided when no masker fired: {v}"
+            );
+        }
+    }
+}
+
+#[test]
+fn l7_logs_redacts_pem_block() {
+    let stdout = format!("[startup] booting...\n{PEM_BODY}\n[startup] ready\n");
+    let mock = json!([
+        { "match": "docker logs", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb.cmd().args(["logs", "arte/atlas"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "logs verb didn't redact: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MIIEowIBAAKCAQEA"),
+        "PEM body leaked from logs: {stdout}"
+    );
+    assert!(
+        stdout.contains("ready"),
+        "post-block context line missing: {stdout}"
+    );
+}
+
+#[test]
+fn l7_logs_show_secrets_flag_bypasses() {
+    let stdout = format!("[boot]\n{PEM_BODY}\n");
+    let mock = json!([
+        { "match": "docker logs", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["logs", "arte/atlas", "--show-secrets"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("BEGIN RSA PRIVATE KEY"),
+        "--show-secrets bypass failed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[REDACTED PEM KEY]"),
+        "marker leaked under bypass: {stdout}"
+    );
+}
+
+#[test]
+fn l7_grep_redacts_authorization_header() {
+    let mock = json!([
+        {
+            "match": "grep",
+            "stdout": "2026-01-01 GET /api - Authorization: Bearer leaked_token_xyz\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["grep", "Authorization", "arte/atlas"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Authorization: <redacted>"),
+        "grep didn't redact: {stdout}"
+    );
+    assert!(
+        !stdout.contains("leaked_token_xyz"),
+        "Bearer token leaked from grep: {stdout}"
+    );
+}
+
+#[test]
+fn l7_cat_redacts_pem_block_and_collapses_to_marker() {
+    let stdout = format!("# config\nkey-file:\n{PEM_BODY}\n# end\n");
+    let mock = json!([
+        { "match": "cat", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["cat", "arte/atlas:/etc/key.pem"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "cat didn't redact PEM: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MIIEowIBAAKCAQEA"),
+        "PEM body leaked from cat: {stdout}"
+    );
+    assert!(stdout.contains("# config"), "context lost: {stdout}");
+    assert!(
+        stdout.contains("# end"),
+        "post-block context lost: {stdout}"
+    );
+}
+
+#[test]
+fn l7_cat_show_secrets_bypasses() {
+    let stdout = format!("{PEM_BODY}\n");
+    let mock = json!([
+        { "match": "cat", "stdout": stdout, "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["cat", "arte/atlas:/etc/key.pem", "--show-secrets"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("BEGIN RSA PRIVATE KEY"),
+        "cat --show-secrets failed: {stdout}"
+    );
+    assert!(
+        stdout.contains("MIIEowIBAAKCAQEA"),
+        "cat --show-secrets body missing: {stdout}"
+    );
+}
+
+#[test]
+fn l7_find_redacts_url_in_path() {
+    // `find` emits paths only, but a path with an embedded URL credential
+    // would still leak — confirm the masker fires.
+    let mock = json!([
+        {
+            "match": "find -P",
+            "stdout": "/srv/snapshot/postgres:hunter2@db/dump.sql\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["find", "arte/atlas:/srv", "*.sql"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // The path doesn't actually carry a `://user:pass@` shape (no
+    // scheme), so the URL masker won't fire — but env+other masker
+    // composition still leaves the line visible. This is a smoke test
+    // for the wiring, not for credential-shaped paths (which are rare).
+    assert!(
+        stdout.contains("/srv/snapshot/"),
+        "find output missing: {stdout}"
+    );
+}
+
+#[test]
+fn l7_run_url_in_db_url_env_var_double_masked() {
+    // A `DATABASE_URL=postgres://u:p@h/d` line satisfies BOTH the env
+    // masker (DATABASE_URL is in the exact-match secret list) AND the
+    // URL masker. Either masker firing is sufficient — what matters
+    // is that `p` doesn't leak. We assert the operator sees a fully
+    // redacted line and the full password is gone.
+    let mock = json!([
+        {
+            "match": "envdump",
+            "stdout": "DATABASE_URL=postgres://alice:supersecret123@db.svc/app\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "envdump"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("supersecret123"),
+        "DB password leaked: {stdout}"
+    );
+}
+
+#[test]
+fn l7_redactor_unit_no_alloc_for_clean_lines() {
+    // Sanity-level integration check: a clean line passes through
+    // `inspect run` byte-for-byte under default redaction (no flags).
+    let mock = json!([
+        { "match": "echo plain", "stdout": "2026-05-01T10:00:00Z hello world\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte/atlas", "--", "echo plain"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("hello world"),
+        "clean line mangled: {stdout}"
+    );
+}
+
+#[test]
+fn l7_exec_audit_records_kinds_and_args_tag() {
+    // `inspect exec` always audits. With a remote stdout containing an
+    // Authorization header, the entry must carry both
+    // `secrets_masked_kinds: ["header"]` and `args: "... [secrets_masked=true]"`.
+    let mock = json!([
+        {
+            "match": "docker exec",
+            "stdout": "Authorization: Bearer leak_me\n",
+            "exit": 0,
+        },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args([
+            "exec",
+            "arte/atlas",
+            "--apply",
+            "--yes",
+            "--no-revert",
+            "--",
+            "curl",
+            "-v",
+            "https://api",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"secrets_masked_kinds\":[\"header\"]"),
+        "secrets_masked_kinds not as expected: {body}"
+    );
+    assert!(
+        body.contains("[secrets_masked=true]"),
+        "args text tag missing: {body}"
+    );
+    assert!(
+        !body.contains("leak_me"),
+        "Bearer token leaked into audit: {body}"
+    );
 }

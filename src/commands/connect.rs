@@ -127,9 +127,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
 fn run_show_overlay(namespace: &str, json: bool) -> anyhow::Result<ExitKind> {
     let servers = config_file::load().context("loading servers.toml")?;
     let cfg = servers.namespaces.get(namespace);
-    let overlay: BTreeMap<String, String> = cfg
-        .and_then(|c| c.env.clone())
-        .unwrap_or_default();
+    let overlay: BTreeMap<String, String> = cfg.and_then(|c| c.env.clone()).unwrap_or_default();
     if json {
         let mut entries: Vec<String> = overlay
             .iter()

@@ -91,12 +91,11 @@ pub fn dispatch_with_reauth<T>(
 
     // Stale + reauth-allowed: emit the operator notice, record the
     // reauth audit entry, attempt reauth, and retry once.
-    eprintln!(
-        "note: persistent session for {namespace} expired — re-authenticating…"
-    );
+    eprintln!("note: persistent session for {namespace} expired — re-authenticating…");
     let reauth_id = audit_store.map(|store| {
         let mut e = AuditEntry::new("connect.reauth", namespace);
-        e.args = format!("trigger=transport_stale,original_verb={original_verb},selector={selector}");
+        e.args =
+            format!("trigger=transport_stale,original_verb={original_verb},selector={selector}");
         e.exit = 0;
         let id = e.id.clone();
         let _ = store.append(&e);
@@ -143,13 +142,7 @@ mod tests {
     }
 
     impl RemoteRunner for MockRunner {
-        fn run(
-            &self,
-            _: &str,
-            _: &SshTarget,
-            _: &str,
-            _: RunOpts,
-        ) -> anyhow::Result<RemoteOutput> {
+        fn run(&self, _: &str, _: &SshTarget, _: &str, _: RunOpts) -> anyhow::Result<RemoteOutput> {
             let mut seq = self.sequence.lock().unwrap();
             let next = seq.remove(0);
             match next {
@@ -201,8 +194,13 @@ mod tests {
             None,
             "run",
             "arte/svc",
-            ReauthPolicy { allow_reauth: allow },
-            || r.run("arte", &target(), "echo", RunOpts::default()).map(|o| o.stdout),
+            ReauthPolicy {
+                allow_reauth: allow,
+            },
+            || {
+                r.run("arte", &target(), "echo", RunOpts::default())
+                    .map(|o| o.stdout)
+            },
         )
     }
 
@@ -251,7 +249,10 @@ mod tests {
         let m = mk(vec![Err("transport:unreachable")], true);
         let out = dispatch(&m, true);
         assert!(out.result.is_err());
-        assert_eq!(out.failure_class, Some(TransportClass::TransportUnreachable));
+        assert_eq!(
+            out.failure_class,
+            Some(TransportClass::TransportUnreachable)
+        );
         assert!(!out.retried);
         assert_eq!(*m.reauth_calls.lock().unwrap(), 0);
     }

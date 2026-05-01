@@ -337,8 +337,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
     // Best case: no operator ever sees stale data after a bundle
     // run (the F8 invariant must hold for `bundle apply` too, not
     // just for the `restart` lifecycle verb).
-    let mut bundle_touched: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut bundle_touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for &i in &completed {
         let s = &bundle.steps[i];
         if let Some(t) = s.target.as_deref().or(bundle.host.as_deref()) {

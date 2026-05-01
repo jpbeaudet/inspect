@@ -1,0 +1,386 @@
+//! Output redaction pipeline (L7, v0.1.3).
+//!
+//! Every line streamed from a remote command on `inspect run`,
+//! `inspect exec`, `inspect logs`, `inspect grep`, `inspect cat`,
+//! `inspect search`, `inspect why`, `inspect find`, and the merged
+//! follow stream is passed through this composer before it reaches
+//! local stdout (or a JSON envelope's `line` field). Four maskers run
+//! in a fixed order:
+//!
+//! 1. **PEM** — multi-line gate. A `-----BEGIN ... PRIVATE KEY-----`
+//!    line emits one `[REDACTED PEM KEY]` marker; every interior +
+//!    `END` line is suppressed. Stateful across lines within a single
+//!    redactor instance, stateless across instances.
+//! 2. **Header** — line-level regex. `Authorization`, `X-API-Key`,
+//!    `Cookie`, `Set-Cookie` (case-insensitive). Replaces the value
+//!    portion with `<redacted>`.
+//! 3. **URL** — line-level regex. Masks the password in
+//!    `scheme://user:pass@host` patterns: `user:****@host`.
+//! 4. **Env** — line-level KEY=VALUE masker (P4, v0.1.1). Preserved
+//!    verbatim; the existing `head4****tail2` partial-mask shape and
+//!    suffix list stay unchanged.
+//!
+//! Inside a PEM block, no other masker fires on the suppressed lines
+//! — the entire body is replaced with the single marker. The other
+//! three are independent transforms that compose on a single line.
+//!
+//! ## API contract
+//!
+//! [`OutputRedactor::mask_line`] returns `Option<Cow<str>>`:
+//! - `Some(line)` — emit the (possibly modified) line.
+//! - `None` — suppress this line entirely (caller must skip emission).
+//!
+//! [`OutputRedactor::was_active`] is `true` once any of the four
+//! maskers has fired since construction; the audit-args stamp on
+//! `inspect run` / `inspect exec` keys off this for the textual
+//! `[secrets_masked=true]` tag.
+//!
+//! [`OutputRedactor::active_kinds`] returns the deterministic ordered
+//! list of masker kinds that fired
+//! (`["pem", "header", "url", "env"]` — subset, in canonical order).
+//! The two write-verb audit paths record this on
+//! [`crate::safety::audit::AuditEntry::secrets_masked_kinds`] so
+//! post-hoc reviewers can tell `[secrets_masked=true]` apart by which
+//! pattern almost leaked.
+//!
+//! ## Lifetime / state
+//!
+//! Create one [`OutputRedactor`] per remote step (per ssh dispatch).
+//! Stateful PEM tracking must not leak across step boundaries because
+//! a step truncated mid-block would otherwise poison the next step's
+//! detection. The composer is cheap to construct (regex are compiled
+//! once globally via [`once_cell::sync::Lazy`]).
+
+mod env;
+mod header;
+mod pem;
+mod url;
+
+use std::borrow::Cow;
+use std::cell::Cell;
+
+use env::EnvMasker;
+use header::HeaderMasker;
+use pem::{PemDecision, PemMasker};
+use url::UrlCredMasker;
+
+/// Universal redaction placeholder used by structured renderers (e.g.
+/// `inspect show`) for fields whose value is a secret. Distinct from
+/// the per-masker output strings — those live with their masker.
+pub const REDACTED: &str = "<redacted>";
+
+/// Marker emitted on the BEGIN line of every recognized PEM
+/// private-key block; interior + END lines are suppressed by the
+/// composer.
+pub const PEM_REDACTED_MARKER: &str = "[REDACTED PEM KEY]";
+
+// Stable masker kind names. Recorded on
+// `AuditEntry::secrets_masked_kinds` when the corresponding masker
+// fires. Order matches the canonical chain order
+// (PEM → header → URL → env).
+pub const KIND_PEM: &str = "pem";
+pub const KIND_HEADER: &str = "header";
+pub const KIND_URL: &str = "url";
+pub const KIND_ENV: &str = "env";
+
+/// Display the redaction status of an `Option<String>` without ever
+/// printing its content. Used by `inspect show` and friends to render
+/// secret-bearing config fields.
+pub fn redact_opt(value: &Option<String>) -> &'static str {
+    match value {
+        Some(_) => REDACTED,
+        None => "<unset>",
+    }
+}
+
+/// Composed line-by-line redactor. One instance per remote-command
+/// invocation; the caller passes every emitted line through
+/// [`Self::mask_line`] and emits the result (skipping `None`).
+pub struct OutputRedactor {
+    show_secrets: bool,
+    pem: PemMasker,
+    header: HeaderMasker,
+    url: UrlCredMasker,
+    env: EnvMasker,
+    fired_pem: Cell<bool>,
+    fired_header: Cell<bool>,
+    fired_url: Cell<bool>,
+}
+
+impl OutputRedactor {
+    /// Construct a new composed redactor.
+    ///
+    /// * `show_secrets` — when `true`, every masker is bypassed and
+    ///   [`Self::mask_line`] returns the input verbatim. Operator
+    ///   opt-in via `--show-secrets` on the calling verb.
+    /// * `redact_all` — applied only by [`EnvMasker`]: mask every
+    ///   well-formed `KEY=VALUE` line regardless of key name. Has no
+    ///   effect on the PEM, header, or URL maskers (which already
+    ///   redact unconditionally on match).
+    pub fn new(show_secrets: bool, redact_all: bool) -> Self {
+        Self {
+            show_secrets,
+            pem: PemMasker::new(),
+            header: HeaderMasker::new(),
+            url: UrlCredMasker::new(),
+            env: EnvMasker::new(redact_all),
+            fired_pem: Cell::new(false),
+            fired_header: Cell::new(false),
+            fired_url: Cell::new(false),
+        }
+    }
+
+    /// Pass `line` through the four-masker pipeline.
+    ///
+    /// Returns:
+    /// - `None` — the line was inside (or ended) an active PEM
+    ///   private-key block; the caller MUST skip emission. The
+    ///   `[REDACTED PEM KEY]` marker has already been emitted on the
+    ///   block's BEGIN line.
+    /// - `Some(line)` — the line is safe to emit (possibly with
+    ///   header values, URL passwords, or env-secret values rewritten).
+    pub fn mask_line<'a>(&self, line: &'a str) -> Option<Cow<'a, str>> {
+        if self.show_secrets {
+            return Some(Cow::Borrowed(line));
+        }
+
+        // PEM is a multi-line gate. Inside / on END of a block it
+        // returns Suppress (and no other masker fires); on the BEGIN
+        // line it asks the composer to emit the marker; otherwise it
+        // passes through.
+        match self.pem.mask_line(line) {
+            PemDecision::Marker => {
+                self.fired_pem.set(true);
+                return Some(Cow::Borrowed(PEM_REDACTED_MARKER));
+            }
+            PemDecision::Suppress => {
+                self.fired_pem.set(true);
+                return None;
+            }
+            PemDecision::Pass => {}
+        }
+
+        // Header → URL → Env. Each transforms the line independently
+        // and returns either a new owned String (fired) or `None` /
+        // Cow::Borrowed (no change).
+        let mut current: Cow<'a, str> = Cow::Borrowed(line);
+        if let Some(masked) = self.header.mask_line(&current) {
+            self.fired_header.set(true);
+            current = Cow::Owned(masked);
+        }
+        if let Some(masked) = self.url.mask_line(&current) {
+            self.fired_url.set(true);
+            current = Cow::Owned(masked);
+        }
+        // EnvMasker preserves the input lifetime via `Cow<'a, str>`,
+        // so we collapse the two branches without an extra alloc when
+        // env didn't fire and current was still Borrowed.
+        Some(match current {
+            Cow::Borrowed(s) => self.env.mask_line(s),
+            Cow::Owned(owned) => match self.env.mask_line(&owned) {
+                Cow::Borrowed(_) => Cow::Owned(owned),
+                Cow::Owned(rewritten) => Cow::Owned(rewritten),
+            },
+        })
+    }
+
+    /// `true` once any masker has fired during this redactor's
+    /// lifetime. Used by the audit-args stamping in `inspect run` /
+    /// `inspect exec` to set the `[secrets_masked=true]` text tag.
+    pub fn was_active(&self) -> bool {
+        self.fired_pem.get()
+            || self.fired_header.get()
+            || self.fired_url.get()
+            || self.env.was_active()
+    }
+
+    /// Ordered list of masker kinds that fired during this redactor's
+    /// lifetime (canonical chain order: `pem`, `header`, `url`, `env`).
+    /// Empty when [`Self::was_active`] is `false`. Recorded on
+    /// `AuditEntry::secrets_masked_kinds`.
+    pub fn active_kinds(&self) -> Vec<&'static str> {
+        let mut out = Vec::with_capacity(4);
+        if self.fired_pem.get() {
+            out.push(KIND_PEM);
+        }
+        if self.fired_header.get() {
+            out.push(KIND_HEADER);
+        }
+        if self.fired_url.get() {
+            out.push(KIND_URL);
+        }
+        if self.env.was_active() {
+            out.push(KIND_ENV);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_secrets_passes_everything_through() {
+        let r = OutputRedactor::new(true, false);
+        assert_eq!(
+            r.mask_line("API_KEY=sk-abcdefghk3").unwrap().as_ref(),
+            "API_KEY=sk-abcdefghk3"
+        );
+        assert_eq!(
+            r.mask_line("Authorization: Bearer xyz").unwrap().as_ref(),
+            "Authorization: Bearer xyz"
+        );
+        assert_eq!(
+            r.mask_line("postgres://u:p@h/d").unwrap().as_ref(),
+            "postgres://u:p@h/d"
+        );
+        // Even a PEM BEGIN line passes through verbatim under
+        // --show-secrets, matching the spec's contract.
+        assert_eq!(
+            r.mask_line("-----BEGIN RSA PRIVATE KEY-----")
+                .unwrap()
+                .as_ref(),
+            "-----BEGIN RSA PRIVATE KEY-----"
+        );
+        assert!(!r.was_active());
+        assert!(r.active_kinds().is_empty());
+    }
+
+    #[test]
+    fn pem_block_emits_one_marker() {
+        let r = OutputRedactor::new(false, false);
+        let lines = [
+            "before",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "MIIBVQIBAD",
+            "AAAAAAAAAAA",
+            "-----END RSA PRIVATE KEY-----",
+            "after",
+        ];
+        let out: Vec<_> = lines
+            .iter()
+            .filter_map(|l| r.mask_line(l).map(|c| c.into_owned()))
+            .collect();
+        assert_eq!(
+            out,
+            vec![
+                "before".to_string(),
+                "[REDACTED PEM KEY]".to_string(),
+                "after".to_string(),
+            ]
+        );
+        assert!(r.was_active());
+        assert_eq!(r.active_kinds(), vec!["pem"]);
+    }
+
+    #[test]
+    fn header_value_masked() {
+        let r = OutputRedactor::new(false, false);
+        let out = r
+            .mask_line("Authorization: Bearer abc.def.ghi")
+            .unwrap()
+            .into_owned();
+        assert_eq!(out, "Authorization: <redacted>");
+        assert_eq!(r.active_kinds(), vec!["header"]);
+    }
+
+    #[test]
+    fn url_password_masked() {
+        let r = OutputRedactor::new(false, false);
+        let out = r
+            .mask_line("connecting postgres://alice:hunter2@db/app")
+            .unwrap()
+            .into_owned();
+        assert_eq!(out, "connecting postgres://alice:****@db/app");
+        assert_eq!(r.active_kinds(), vec!["url"]);
+    }
+
+    #[test]
+    fn env_masker_still_fires() {
+        let r = OutputRedactor::new(false, false);
+        let out = r
+            .mask_line("API_TOKEN=sk-abcdefghijkl")
+            .unwrap()
+            .into_owned();
+        assert!(out.starts_with("API_TOKEN=sk-a"));
+        assert!(out.contains("****"));
+        assert_eq!(r.active_kinds(), vec!["env"]);
+    }
+
+    #[test]
+    fn ordered_kinds_when_multiple_fire_across_lines() {
+        let r = OutputRedactor::new(false, false);
+        // env first
+        let _ = r.mask_line("API_KEY=sk-abcdefghijkl");
+        // then header
+        let _ = r.mask_line("Authorization: Bearer x");
+        // then URL
+        let _ = r.mask_line("postgres://u:p@h/d");
+        // then PEM
+        let _ = r.mask_line("-----BEGIN OPENSSH PRIVATE KEY-----");
+        let _ = r.mask_line("body");
+        let _ = r.mask_line("-----END OPENSSH PRIVATE KEY-----");
+        // Despite the firing order in real time, active_kinds() is
+        // canonical: PEM → header → URL → env.
+        assert_eq!(r.active_kinds(), vec!["pem", "header", "url", "env"]);
+    }
+
+    #[test]
+    fn pem_gate_suppresses_other_maskers_on_interior_lines() {
+        // A line inside a PEM block that *would otherwise* match the
+        // header masker MUST still be suppressed (no double-emit, no
+        // leak of header value because the block hasn't ended).
+        let r = OutputRedactor::new(false, false);
+        assert_eq!(
+            r.mask_line("-----BEGIN RSA PRIVATE KEY-----")
+                .unwrap()
+                .as_ref(),
+            "[REDACTED PEM KEY]"
+        );
+        // Intentionally crafted interior line that contains a
+        // header-shaped pattern and a URL credential. Must be
+        // suppressed.
+        assert!(r
+            .mask_line("Authorization: Bearer x postgres://u:p@h/d")
+            .is_none());
+        // Block ends; subsequent lines pass through normally.
+        assert!(r.mask_line("-----END RSA PRIVATE KEY-----").is_none());
+        let after = r.mask_line("Authorization: Bearer y").unwrap().into_owned();
+        assert_eq!(after, "Authorization: <redacted>");
+    }
+
+    #[test]
+    fn header_and_url_compose_on_one_line() {
+        // A header value that itself contains a URL credential — the
+        // header masker fires first and masks the entire value; the
+        // URL masker therefore has nothing to do.
+        let r = OutputRedactor::new(false, false);
+        let out = r
+            .mask_line("Cookie: session=postgres://u:p@h/d; theme=dark")
+            .unwrap()
+            .into_owned();
+        assert_eq!(out, "Cookie: <redacted>");
+        // Header fired; URL did not (the credential was already
+        // inside the masked value).
+        assert_eq!(r.active_kinds(), vec!["header"]);
+    }
+
+    #[test]
+    fn redact_opt_helper() {
+        assert_eq!(redact_opt(&Some("anything".to_string())), "<redacted>");
+        assert_eq!(redact_opt(&None), "<unset>");
+    }
+
+    #[test]
+    fn no_match_is_zero_alloc_borrow() {
+        // Sanity: a line that matches none of the four maskers should
+        // come back as Cow::Borrowed (the same underlying &str).
+        let r = OutputRedactor::new(false, false);
+        let input = "2026-05-01T10:00:00Z hello world";
+        let out = r.mask_line(input).unwrap();
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), input);
+        assert!(!r.was_active());
+    }
+}

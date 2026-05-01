@@ -116,12 +116,8 @@ pub fn get_runtime(
             Err(e) => {
                 if let Some(snap) = cached {
                     let reason = short_error(&e);
-                    let info = build_source_info(
-                        SourceMode::Stale,
-                        &snap,
-                        &ns.namespace,
-                        Some(reason),
-                    );
+                    let info =
+                        build_source_info(SourceMode::Stale, &snap, &ns.namespace, Some(reason));
                     Ok((snap, info))
                 } else {
                     Err(e)
@@ -256,7 +252,12 @@ fn fetch_live(runner: &dyn RemoteRunner, ns: &NsCtx) -> Result<RuntimeSnapshot> 
             let mut parts = line.splitn(3, '\t');
             let raw_name = parts.next().unwrap_or("").trim_start_matches('/').trim();
             let health = parts.next().unwrap_or("none").trim();
-            let restarts = parts.next().unwrap_or("0").trim().parse::<u32>().unwrap_or(0);
+            let restarts = parts
+                .next()
+                .unwrap_or("0")
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(0);
             if raw_name.is_empty() {
                 continue;
             }
@@ -274,8 +275,7 @@ fn fetch_live(runner: &dyn RemoteRunner, ns: &NsCtx) -> Result<RuntimeSnapshot> 
     // 3. Assemble per-service runtime states.
     let mut services: Vec<ServiceRuntime> = Vec::new();
     for name in &union {
-        let (health_status, restart_count) =
-            by_name.get(name).cloned().unwrap_or((None, 0));
+        let (health_status, restart_count) = by_name.get(name).cloned().unwrap_or((None, 0));
         services.push(ServiceRuntime {
             container_name: name.clone(),
             running: running_set.contains(name),

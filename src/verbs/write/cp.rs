@@ -225,7 +225,9 @@ fn push(args: CpArgs, local: String, remote_sel: String) -> Result<ExitKind> {
         entry.args = local.clone();
         entry.previous_hash = prev_hash.clone().map(|h| format!("sha256:{h}"));
         entry.new_hash = Some(format!("sha256:{new_hash}"));
-        entry.snapshot = prev_hash.clone().map(|h| snaps.path_for(&h).display().to_string());
+        entry.snapshot = prev_hash
+            .clone()
+            .map(|h| snaps.path_for(&h).display().to_string());
         entry.diff_summary = diff_summary(&[(prev_text, new_text.clone())]);
         entry.exit = out.exit_code;
         entry.duration_ms = dur;

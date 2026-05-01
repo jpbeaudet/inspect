@@ -83,7 +83,10 @@ pub fn render_env_prefix(overlay: &BTreeMap<String, String>) -> String {
 
 /// Apply an overlay to `cmd`. When `overlay` is empty, returns `cmd`
 /// borrowed unchanged so the no-overlay path is allocation-free.
-pub fn apply_to_cmd<'a>(cmd: &'a str, overlay: &BTreeMap<String, String>) -> std::borrow::Cow<'a, str> {
+pub fn apply_to_cmd<'a>(
+    cmd: &'a str,
+    overlay: &BTreeMap<String, String>,
+) -> std::borrow::Cow<'a, str> {
     if overlay.is_empty() {
         std::borrow::Cow::Borrowed(cmd)
     } else {
@@ -148,7 +151,10 @@ mod tests {
 
     #[test]
     fn dquote_preserves_var_references() {
-        assert_eq!(dquote_expandable("$HOME/.local/bin:$PATH"), "\"$HOME/.local/bin:$PATH\"");
+        assert_eq!(
+            dquote_expandable("$HOME/.local/bin:$PATH"),
+            "\"$HOME/.local/bin:$PATH\""
+        );
     }
 
     #[test]

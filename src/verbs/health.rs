@@ -55,7 +55,10 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
                     inventory_age_s: crate::profile::runtime::inventory_age(&ns.namespace)
                         .map(|d| d.as_secs()),
                     stale: true,
-                    reason: Some(format!("{}: runtime refresh failed (no cache)", ns.namespace)),
+                    reason: Some(format!(
+                        "{}: runtime refresh failed (no cache)",
+                        ns.namespace
+                    )),
                 });
             }
         }

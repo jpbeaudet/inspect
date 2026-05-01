@@ -77,9 +77,20 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
             None => stat_inner,
         };
         let prev_owner = runner
-            .run(&s.ns.namespace, &s.ns.target, &stat_cmd, RunOpts::with_timeout(15))
+            .run(
+                &s.ns.namespace,
+                &s.ns.target,
+                &stat_cmd,
+                RunOpts::with_timeout(15),
+            )
             .ok()
-            .and_then(|o| if o.ok() { Some(o.stdout.trim().to_string()) } else { None })
+            .and_then(|o| {
+                if o.ok() {
+                    Some(o.stdout.trim().to_string())
+                } else {
+                    None
+                }
+            })
             .filter(|s| !s.is_empty() && is_safe_owner(s));
         let label = format!(
             "{}{}:{path}",
