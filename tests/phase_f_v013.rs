@@ -4503,3 +4503,208 @@ fn f15_cp_dispatches_to_get_when_source_is_remote() {
         "cp remote→local should record transfer_direction=down: {body}"
     );
 }
+
+// =============================================================================
+// F16 — `inspect run --stream` / `--follow` line-streaming for long-running
+// remote commands. Forces SSH PTY allocation (`ssh -tt`) so the remote process
+// flips from block-buffered to line-buffered output and local Ctrl-C
+// propagates through the PTY layer to the remote process. Default timeout
+// is bumped to 8 hours; every `--stream` invocation is audited with
+// `streamed: true` so post-hoc audit can tell `tail -f`-shaped runs apart
+// from short-lived commands without parsing the args text.
+//
+// Note: real-SSH SIGINT propagation and the line-by-line *timing* of the
+// flush are exercised by the field-validation gate (the migration-operator's
+// destructive-migration smoke test). The unit tests below cover everything
+// that is observable through the in-process mock medium: clap mutex,
+// alias acceptance, audit-field shape, timeout-default override, and the
+// success / command-failed audit paths.
+// =============================================================================
+
+#[test]
+fn f16_stream_records_streamed_true_on_success() {
+    // The headline contract: every `--stream` invocation produces an
+    // audit entry with `streamed: true`, even on a successful run that
+    // would not otherwise be audited (since `inspect run` is normally
+    // un-audited unless stdin was forwarded).
+    let mock = json!([
+        { "match": "echo", "stdout": "line one\nline two\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--stream",
+            "--timeout-secs",
+            "5",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    let line = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    assert!(
+        line.contains("\"streamed\":true"),
+        "audit entry should record streamed=true: {line}"
+    );
+    assert!(
+        line.contains("\"failure_class\":\"ok\""),
+        "successful --stream run should still classify ok: {line}"
+    );
+}
+
+#[test]
+fn f16_follow_alias_accepted_and_records_streamed_true() {
+    // `--follow` is an alias for `--stream`; the long-form contract
+    // (audit-field shape) must hold under either spelling so operators
+    // can use whichever matches their muscle memory.
+    let mock = json!([
+        { "match": "tail", "stdout": "log line\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--follow",
+            "--timeout-secs",
+            "5",
+            "--",
+            "tail",
+            "-n0",
+            "/tmp/x",
+        ])
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("\"streamed\":true"),
+        "--follow should produce a streamed=true audit entry: {body}"
+    );
+}
+
+#[test]
+fn f16_stream_omitted_means_no_streamed_field_in_audit() {
+    // `streamed` is `Option<T>` with skip_serializing_if; a non-streaming
+    // run must not write the field at all, otherwise post-hoc audit
+    // tooling that filters on `streamed` would catch every run audit
+    // entry instead of only the long-running ones. We exercise this via
+    // the F9 stdin-forwarding path which guarantees a run audit entry
+    // exists to inspect even without `--stream`.
+    let mock = json!([
+        { "match": "cat", "stdout": "", "exit": 0, "echo_stdin": true },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(["run", "arte", "--", "cat"])
+        .write_stdin("payload\n")
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    let line = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry from stdin-forwarded run");
+    assert!(
+        !line.contains("\"streamed\":"),
+        "non-streaming run must omit the streamed field entirely: {line}"
+    );
+}
+
+#[test]
+fn f16_stream_records_streamed_true_on_command_failure() {
+    // The audit-field shape must hold across the failure path too:
+    // a non-zero remote exit under `--stream` still records
+    // streamed=true so post-mortem can tell a failed long-running
+    // command apart from a failed short-lived one.
+    let mock = json!([
+        { "match": "false-cmd", "stdout": "", "exit": 1 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--stream",
+            "--timeout-secs",
+            "5",
+            "--",
+            "false-cmd",
+        ])
+        .assert()
+        .failure();
+    let body = audit_jsonl_body(sb.home());
+    let line = body
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run\""))
+        .expect("expected a run audit entry");
+    assert!(
+        line.contains("\"streamed\":true"),
+        "failed --stream run should still record streamed=true: {line}"
+    );
+    assert!(
+        line.contains("\"failure_class\":\"command_failed\""),
+        "failed --stream run should classify command_failed: {line}"
+    );
+}
+
+#[test]
+fn f16_stream_and_stdin_script_are_clap_mutually_exclusive() {
+    // `--stream --stdin-script` is the half-duplex protocol headache
+    // explicitly deferred to v0.1.5; clap rejects it before any
+    // dispatch happens so the operator gets a clean message instead
+    // of a hung pipe.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let assert = sb
+        .cmd()
+        .args(["run", "arte", "--stream", "--stdin-script"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--stream") && stderr.contains("--stdin-script"),
+        "clap rejection should name both flags: {stderr}"
+    );
+}
+
+#[test]
+fn f16_stream_help_documents_flag_and_follow_alias() {
+    // F16 help-text discoverability gate: `inspect run --help` must
+    // mention `--stream`, the `--follow` alias, and the SSH-PTY
+    // (`-tt`) rationale so an LLM agent reading the help surface
+    // discovers the contract. The CLAUDE.md guide names `-h` as the
+    // load-bearing surface for agentic callers.
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["run", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("--stream"),
+        "run --help should document --stream: {stdout}"
+    );
+    assert!(
+        stdout.contains("--follow") || stdout.contains("follow"),
+        "run --help should document the --follow alias: {stdout}"
+    );
+    // The PTY rationale is the load-bearing piece an agent needs to
+    // know — without it `--stream` looks like a no-op flag.
+    assert!(
+        stdout.contains("PTY") || stdout.contains("-tt"),
+        "run --help should explain the PTY (-tt) mechanism: {stdout}"
+    );
+}

@@ -489,7 +489,14 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         out
     };
 
-    let timeout_secs = args.timeout_secs.unwrap_or(120);
+    // F16 (v0.1.3): streaming runs default to an 8-hour timeout
+    // (matches `inspect logs --follow`) since the operator is
+    // expected to terminate via Ctrl-C, not by reaching the timeout.
+    // Non-streaming runs keep the existing 120s default. The operator
+    // can override either default with `--timeout-secs`.
+    let timeout_secs = args
+        .timeout_secs
+        .unwrap_or(if args.stream { 60 * 60 * 8 } else { 120 });
     let mut ok = 0usize;
     let mut bad = 0usize;
     let mut last_inner: Option<i32> = None;
@@ -520,6 +527,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     };
     let stdin_audited = stdin_payload.is_some() && audit_store.is_some();
+    // F16 (v0.1.3): streamed runs are always audited so a post-hoc
+    // audit can tell `--stream` invocations apart from short-lived
+    // commands (e.g. `tail -f` vs `ls -la`) without parsing args text.
+    let stream_audited = args.stream && audit_store.is_some();
     // F14 (v0.1.3): dedup-store the script body once, before the
     // per-step loop. Errors here are non-fatal — the audit entry
     // still references the body by hash, and the operator's `--file`
@@ -641,6 +652,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     if let Some(bytes) = stdin_payload_ref {
                         opts_call = opts_call.with_stdin(bytes.clone());
                     }
+                    // F16 (v0.1.3): force PTY allocation for --stream
+                    // so the remote process line-buffers and SIGINT
+                    // propagates back through the tty layer.
+                    opts_call = opts_call.with_tty(args.stream);
                     runner_ref.run_streaming(
                         ns_name_ref,
                         &s.ns.target,
@@ -745,7 +760,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 // forwarded. F13 widens this to also audit when the
                 // wrapper retried (so the retry stamps `retry_of` /
                 // `reauth_id` for correlation).
-                if stdin_audited || exit.retried {
+                if stdin_audited || stream_audited || exit.retried {
                     if let Some(store) = &audit_store {
                         let mut e = crate::safety::audit::AuditEntry::new("run", &label);
                         e.args = stamp_args(&user_cmd, args.show_secrets, &redactor);
@@ -759,6 +774,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         }
                         e.rendered_cmd = Some(cmd.clone());
                         e.secrets_masked_kinds = collect_kinds(&redactor);
+                        e.streamed = args.stream;
                         let class = if code == 0 { "ok" } else { "command_failed" };
                         stamp_audit(&mut e, Some(class));
                         let _ = store.append(&e);
@@ -791,6 +807,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     }
                     entry.rendered_cmd = Some(cmd.clone());
                     entry.secrets_masked_kinds = collect_kinds(&redactor);
+                    entry.streamed = args.stream;
                     stamp_audit(&mut entry, Some(class.as_str()));
                     let _ = store.append(&entry);
                 }
@@ -801,7 +818,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 if !json {
                     eprintln!("{label}: {e}");
                 }
-                if stdin_audited {
+                if stdin_audited || stream_audited {
                     if let Some(store) = &audit_store {
                         let mut entry = crate::safety::audit::AuditEntry::new("run", &label);
                         entry.args = stamp_args(&user_cmd, args.show_secrets, &redactor);
@@ -816,6 +833,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         }
                         entry.rendered_cmd = Some(cmd.clone());
                         entry.secrets_masked_kinds = collect_kinds(&redactor);
+                        entry.streamed = args.stream;
                         let _ = store.append(&entry);
                     }
                 }

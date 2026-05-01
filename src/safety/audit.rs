@@ -199,6 +199,15 @@ pub struct AuditEntry {
     /// verified byte-for-byte from the audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_sha256: Option<String>,
+    /// F16 (v0.1.3): `true` when this `inspect run` invocation used
+    /// `--stream` / `--follow`, i.e. the remote command was
+    /// dispatched with a forced PTY (`ssh -tt`) for line-buffered
+    /// streaming and SIGINT propagation. `None` (or absent on read)
+    /// for non-streaming runs. Recorded so post-hoc audit can tell
+    /// `tail -f`-shaped invocations apart from short-lived commands
+    /// in the same audit log without parsing the args text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub streamed: bool,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -337,6 +346,7 @@ impl AuditEntry {
             transfer_remote: None,
             transfer_bytes: None,
             transfer_sha256: None,
+            streamed: false,
         }
     }
 }

@@ -45,6 +45,16 @@ pub struct RunOpts {
     /// commands that read until EOF (`sh`, `psql`, `cat`, `tee`)
     /// terminate normally.
     pub stdin: Option<Vec<u8>>,
+    /// F16 (v0.1.3): force PTY allocation (`ssh -tt`). Two effects:
+    /// (1) remote stdio flips from block-buffered to line-buffered, so
+    /// `docker logs -f` / `tail -f` / `journalctl -fu` deliver lines
+    /// in real time instead of in 4 KB bursts; (2) local Ctrl-C
+    /// (SIGINT) propagates through the PTY layer to the remote
+    /// process, so `--stream` invocations actually kill the remote
+    /// command instead of leaving it orphaned. Off by default for
+    /// non-streaming runs because PTY allocation can change command
+    /// behaviour (CRLF endings, color output, prompt suppression).
+    pub tty: bool,
 }
 
 impl RunOpts {
@@ -64,6 +74,7 @@ impl RunOpts {
         Self {
             timeout: Some(Duration::from_secs(final_secs)),
             stdin: None,
+            tty: false,
         }
     }
 
@@ -71,6 +82,14 @@ impl RunOpts {
     /// Builder-style for ergonomic call sites.
     pub fn with_stdin(mut self, bytes: Vec<u8>) -> Self {
         self.stdin = Some(bytes);
+        self
+    }
+
+    /// F16 (v0.1.3): force PTY allocation (`ssh -tt`) on this run.
+    /// Required for `--stream` so the remote process line-buffers and
+    /// SIGINT propagates back through the PTY. Builder-style.
+    pub fn with_tty(mut self, tty: bool) -> Self {
+        self.tty = tty;
         self
     }
 }
@@ -99,6 +118,14 @@ pub fn run_remote(
             .arg(&socket)
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
+    }
+    if opts.tty {
+        // F16 (v0.1.3): -tt forces PTY allocation even when local
+        // stdin is not a terminal (the runner spawns ssh with
+        // Stdio::null/piped, never a tty). The PTY makes the remote
+        // process line-buffer and propagates SIGINT through the tty
+        // layer when the local ssh receives Ctrl-C.
+        ssh.arg("-tt");
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
@@ -266,6 +293,11 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
     }
+    if opts.tty {
+        // F16 (v0.1.3): -tt forces a PTY for the remote command. See
+        // the same hook in `run_remote` above for rationale.
+        ssh.arg("-tt");
+    }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
     let stdin_bytes = opts.stdin.take();
@@ -413,6 +445,11 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
             .arg(&socket)
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
+    }
+    if opts.tty {
+        // F16 (v0.1.3): -tt for streaming-capturing dispatches too,
+        // matching `run_remote` and `run_remote_streaming`.
+        ssh.arg("-tt");
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);

@@ -827,6 +827,88 @@ streaming transfer briefly monopolises the multiplexed channel.
 --since` already covers log-retrieval), `--resume` for partial
 transfers (deferred to v0.1.5; chunked-protocol design pass).
 
+### 7.8 Streaming long-running commands: `inspect run --stream` (F16, v0.1.3)
+
+`inspect run --stream` (alias `--follow`) line-streams the remote
+command's stdout/stderr to local stdout as it arrives, instead of
+buffering until the remote process exits. Use it for the long tail
+of commands that produce output indefinitely until SIGINT —
+`docker logs -f`, `tail -f /var/log/...`, `journalctl -fu vault`,
+`python -m monitor`, anything that "never returns".
+
+```sh
+# Tail a container's logs until you Ctrl-C.
+inspect run arte --stream -- 'docker logs -f atlas-vault'
+
+# Same thing, with the --follow alias for muscle-memory parity.
+inspect run arte --follow -- 'tail -f /var/log/syslog'
+
+# Watch a long migration step in real time.
+inspect run arte --stream -- '/usr/local/bin/migrate-vault.sh'
+```
+
+**What `--stream` does.** It forces SSH PTY allocation (`ssh -tt`)
+on the dispatch. Two effects flow from the PTY:
+
+1. **Line-buffered remote output.** Most CLI tools (`grep`, `awk`,
+   `python`, ...) detect "stdout is a TTY" via `isatty(1)` and switch
+   from block-buffered (4 KB chunks) to line-buffered output. With
+   `--stream`, the remote tool sees a PTY and flushes line-by-line,
+   so output appears locally in real time instead of in bursts.
+2. **End-to-end Ctrl-C.** Local Ctrl-C (SIGINT) reaches the local
+   `ssh` client, which forwards it through the PTY layer to the
+   remote process. The command actually dies on the remote — it is
+   not orphaned the way it would be without a PTY (where the local
+   ssh would close the channel on Ctrl-C and the remote process
+   would inherit `init` as its parent and keep running).
+
+**Default timeout: 8 hours under `--stream`.** Streaming runs are
+expected to terminate via Ctrl-C, not by reaching the per-target
+timeout, so the default is bumped from the bare-`run` 120 s to
+match `inspect logs --follow`. Override with `--timeout-secs <N>`
+either way.
+
+**Audit-field shape.** Every `--stream` invocation produces a run
+audit entry with `streamed: true`, `failure_class`, the
+`rendered_cmd`, and the wall-clock `duration_ms`. Pre-F16
+`inspect run` was un-audited unless stdin was forwarded (F9) or
+the dispatch wrapper retried under F13; `--stream` joins those
+triggers, so a multi-hour migration's `--stream` blocks are
+recoverable from the audit log alone. Non-streaming runs
+*omit* the `streamed` field entirely (it is `Option<T>` with
+`skip_serializing_if = "is_false"`), so audit tooling that filters
+on `streamed` catches only the long-running invocations.
+
+**Composes with `--file` (script mode); mutex with
+`--stdin-script`.** `--stream --file <script>` is fine — the script
+body is delivered in one shot via `bash -s`, then the running
+script's output streams back. `--stream --stdin-script` is rejected
+at the clap level (the half-duplex case of streaming both directions
+on the same SSH stdin is a protocol headache deferred to v0.1.5);
+the operator gets a clean message naming both flags, not a hung
+pipe.
+
+**`inspect logs --follow` interop (no overlap).** F16 does **not**
+replace `inspect logs --follow` — the dedicated logs verb keeps its
+existing semantics (selector-aware, source-tier-aware, structured
+output, `--since` / `--match` / `--merged`). F16 is for the case
+when the operator wants streaming for a non-logs command, or for a
+multi-step script that includes a streaming step. If the question
+is "tail a container's logs," reach for `inspect logs <ns>/<svc>
+--follow`; if it is "tail anything else," `inspect run --stream` is
+the right hammer.
+
+**Limitations.** `--stream` relies on `ssh -tt` for SIGINT
+propagation, which works for every remote process that respects
+SIGINT. The corner case of a process that ignores SIGINT but exits
+on SIGTERM/SIGHUP (rare; mostly daemonised services) is not
+handled in v0.1.3 — escalation to channel-close on a second
+Ctrl-C is on the v0.1.5 polish list. The PTY can also alter
+output formatting (CRLF line endings, color codes) for tools that
+key off `isatty(1)`; if a downstream pipe needs strictly
+LF-terminated bytes, capture under bare `inspect run` instead of
+`--stream` or post-process with `tr -d '\r'`.
+
 ---
 
 ## 8. Audit and revert

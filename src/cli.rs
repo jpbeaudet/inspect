@@ -378,12 +378,46 @@ STDIN HANDLING (F9, v0.1.3)
   while local stdin has data waiting, `inspect run` exits 2 BEFORE
   dispatching the remote command (never silently discards input).
 
+STREAMING (F16, v0.1.3)
+  `--stream` (alias `--follow`) line-streams remote stdout/stderr
+  to local stdout instead of buffering until the remote command
+  exits. Required for long-running commands that produce output
+  indefinitely until SIGINT (`docker logs -f`, `tail -f`,
+  `journalctl -fu vault`, `python -m monitor`). Without `--stream`,
+  these commands either buffer until exit (silent until you Ctrl-C
+  the local `inspect`, which often orphans the remote process) or
+  work only by accident if the remote happens to flush eagerly.
+
+  Forces `ssh -tt` (PTY allocation): the PTY makes the remote
+  process line-buffer its output (so lines arrive in real time
+  instead of in 4 KB bursts) and propagates local Ctrl-C through
+  the PTY layer to the remote process (so the command actually
+  dies instead of being orphaned).
+
+  Default timeout is bumped to 8 hours under `--stream` (matches
+  `inspect logs --follow`); override either default with
+  `--timeout-secs <N>`.
+
+  Every `--stream` invocation writes a one-line audit entry with
+  `streamed: true` (and the usual `failure_class`, `rendered_cmd`,
+  `duration_ms`); non-streaming runs omit the `streamed` field.
+
+  Mutex with `--stdin-script` (clap-rejected; the half-duplex case
+  of streaming both directions on the same SSH stdin is deferred
+  to v0.1.5). `--stream --file <script>` is fine — the script body
+  is delivered in one shot, then output streams back.
+
+  See `inspect logs --follow` for the dedicated log-tailing verb;
+  F16 is for non-logs streaming commands.
+
 EXAMPLES
   $ inspect run arte/atlas -- env
   $ inspect run arte/atlas -- 'docker ps --format json'
   $ inspect run 'prod-*' -- 'df -h /var'
   $ inspect run arte 'docker exec -i atlas-pg sh' < ./init.sql
-  $ cat big.tar.gz | inspect run arte --stdin-max 100m -- 'tar -xz -C /opt'";
+  $ cat big.tar.gz | inspect run arte --stdin-max 100m -- 'tar -xz -C /opt'
+  $ inspect run arte --stream -- 'docker logs -f atlas-vault'
+  $ inspect run arte --follow -- 'tail -f /var/log/syslog'";
 
 const LONG_WATCH: &str = "\
 Block until a predicate over the target becomes true (B10, v0.1.2). \
@@ -1943,10 +1977,26 @@ pub struct RunArgs {
     /// stdin and ship it as the remote command body via `bash -s`.
     /// Stdin must NOT be a tty; the heredoc form
     /// `inspect run arte --stdin-script <<'BASH' ... BASH` is the
-    /// canonical use. Mutually exclusive with `--no-stdin` and
-    /// `--file` (clap-enforced).
-    #[arg(long, conflicts_with_all = ["no_stdin"])]
+    /// canonical use. Mutually exclusive with `--no-stdin`,
+    /// `--file`, and `--stream` (streaming + script-on-stdin is a
+    /// half-duplex protocol headache deferred to v0.1.5).
+    #[arg(long, conflicts_with_all = ["no_stdin", "stream"])]
     pub stdin_script: bool,
+    /// F16 (v0.1.3): line-stream remote stdout/stderr to local
+    /// stdout instead of buffering until the remote command exits.
+    /// Required for long-running commands like `docker logs -f`,
+    /// `tail -f /var/log/...`, `journalctl -fu vault`, or any other
+    /// process that produces output indefinitely until SIGINT. Forces
+    /// `ssh -tt` (PTY allocation) so (1) the remote process flips
+    /// from block-buffered to line-buffered output and lines arrive
+    /// in real time instead of in 4 KB bursts, and (2) local Ctrl-C
+    /// propagates through the PTY layer to the remote process so the
+    /// command actually dies instead of being orphaned. Default
+    /// timeout is bumped to 8 hours (override with
+    /// `--timeout-secs <N>`). Mutually exclusive with
+    /// `--stdin-script`. `--follow` is an alias.
+    #[arg(long, alias = "follow")]
+    pub stream: bool,
     /// F14 (v0.1.3): record the full script body inline in the audit
     /// entry. Off by default to keep the JSONL small; the body is
     /// otherwise dedup-stored under `~/.inspect/scripts/<sha256>.sh`

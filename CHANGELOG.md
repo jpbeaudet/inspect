@@ -14,6 +14,109 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F16 — `inspect run --stream` / `--follow` line-streaming for
+  long-running remote commands (migration-operator field feedback:
+  *"`docker compose up -d --force-recreate aware aware-embedder
+  2>&1 | tail -30` is fine, but I'd kill for `inspect run --stream
+  arte -- 'docker logs -f aware'` that line-streams back to the
+  client until I Ctrl-C. I worked around with `inspect logs
+  arte/<service>` (which exists) but it's a separate command shape
+  and doesn't compose with arbitrary scripts."*).** Adds a
+  `--stream` flag (alias `--follow`) on `inspect run` for the long
+  tail of non-logs commands that produce output indefinitely until
+  SIGINT (`tail -f /var/log/syslog`, `journalctl -fu vault`,
+  `python -m monitor`, etc.). Pre-F16, every such command either
+  buffered until exit (silent until the operator gave up and
+  Ctrl-C'd the local `inspect`, which often killed the process
+  locally without notifying the remote) or worked only by accident
+  if the remote happened to flush eagerly. F16 wires the existing
+  line-streaming SSH executor (already used by `inspect logs
+  --follow`) into the bare `inspect run` path, plus the SSH PTY
+  trick that makes the remote process line-buffer and propagates
+  Ctrl-C end-to-end.
+  - **`--stream` / `--follow` flag on `inspect run`.** Forces SSH
+    PTY allocation (`ssh -tt`) on the dispatch. Two effects flow
+    from the PTY: (1) the remote process flips from block-buffered
+    to line-buffered output, so lines arrive locally in real time
+    instead of in 4 KB bursts; (2) local Ctrl-C propagates through
+    the PTY layer to the remote process, so the command actually
+    dies instead of being orphaned on the remote host. The
+    `<ns> | …` line-prefixing is unchanged from the existing
+    streaming path (`inspect logs --follow` already used the same
+    `run_streaming` path); the only new behavior is the `-tt`
+    flip and the audit-field stamp.
+  - **Default timeout bumped to 8 hours under `--stream`.**
+    Streaming runs are expected to terminate via Ctrl-C, not by
+    reaching the per-target timeout. The non-streaming default
+    stays at 120 s; both can be overridden with
+    `--timeout-secs <N>`. The 8 h matches the existing
+    `inspect logs --follow` default so operators do not have to
+    learn two timeout regimes.
+  - **`RunOpts.tty: bool` builder hook in
+    `src/ssh/exec.rs`.** New field on the executor's per-call
+    options struct, threaded through all three SSH dispatch paths
+    (`run_remote`, `run_remote_streaming`,
+    `run_remote_streaming_capturing`). Off by default for
+    non-streaming runs because PTY allocation can change command
+    behaviour (CRLF endings, color output, prompt suppression);
+    `--stream` is the only call site that flips it today. Builder
+    style: `RunOpts::with_timeout(secs).with_tty(true)`.
+  - **`AuditEntry.streamed: bool` field (audit-schema, behavior
+    flag).** New field, `Option<T>`-shaped via
+    `skip_serializing_if = "is_false"` so pre-F16 entries
+    deserialize unchanged. Stamped `true` on every `--stream` /
+    `--follow` invocation and absent otherwise. Recorded so
+    post-hoc audit can tell `tail -f`-shaped invocations apart
+    from short-lived commands in the same audit log without
+    parsing the args text — the same separation the F15
+    `transfer_direction` field provides for uploads vs downloads.
+  - **`inspect run` is now audited on every `--stream`
+    invocation.** Pre-F16 the verb was un-audited unless stdin
+    was forwarded (F9) or the dispatch wrapper retried under F13.
+    `--stream` joins those triggers: every streaming run produces
+    an audit entry with `streamed: true`, `failure_class`, the
+    rendered command, and the wall-clock duration, so a
+    multi-hour migration's `--stream` blocks are recoverable from
+    the audit log alone.
+  - **Mutex with `--stdin-script`** (clap-enforced). Streaming a
+    script body over local stdin while also streaming output back
+    is a half-duplex protocol headache deferred to v0.1.5;
+    `--stream --file <script>` is fine (the body is delivered in
+    one shot, then the running script's output streams back).
+    `--stream --stdin-script` exits 2 with a clean clap message
+    naming both flags.
+  - **`inspect logs` interop (no overlap).** F16 does **not**
+    replace `inspect logs --follow`; the dedicated logs verb keeps
+    its existing semantics (selector-aware, source-tier-aware,
+    structured). F16 is for the case when the operator wants
+    streaming for a non-logs command. The `inspect logs`
+    discoverability hint added in F10.6 remains the canonical
+    pointer for log tailing.
+  - **Out of scope for v0.1.3 (deferred to v0.1.5).** Explicit
+    SSH-protocol `signal` request forwarding (F16 leans on
+    `ssh -tt`'s PTY-layer SIGINT propagation, which is the
+    standard OpenSSH idiom and works for every remote process
+    that respects SIGINT — but does not handle the corner case of
+    a remote process that ignores SIGINT but exits on
+    SIGTERM/SIGHUP, where double-Ctrl-C escalation via channel
+    close would be the next step). Documented in the v0.1.5
+    streaming-polish section.
+  - **Test coverage.** 6 acceptance tests in
+    `tests/phase_f_v013.rs` (`f16_*`) covering: `--stream`
+    records `streamed: true` on success, `--follow` alias is
+    accepted and produces the same audit shape, non-streaming
+    runs omit the `streamed` field entirely (the F9 audit path
+    is exercised to prove this), `--stream` on a failing command
+    still records `streamed: true` + `failure_class:
+    "command_failed"`, `--stream --stdin-script` is clap-rejected
+    with both flag names in the error, and `inspect run --help`
+    documents `--stream`, the `--follow` alias, and the PTY
+    (`-tt`) mechanism. Real-SSH SIGINT propagation and the
+    line-by-line *timing* of the flush are exercised by the
+    field-validation gate (the migration-operator's destructive-
+    migration smoke test) since the in-process mock medium
+    cannot model PTY semantics.
+
 - **F15 — `inspect put` / `inspect get` / `inspect cp` native file
   transfer over the persistent ControlPath master (migration-operator
   field feedback: *"I had to context-switch between

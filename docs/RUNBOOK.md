@@ -642,9 +642,118 @@ silenceable with `INSPECT_CP_WARN_BYTES=0`) and the remote disk.
 
 ---
 
+## 13. Streaming executor design (v0.1.3, F16)
+
+`inspect run --stream` (alias `--follow`) wires the existing
+line-streaming SSH executor (`run_remote_streaming` in
+`src/ssh/exec.rs`, originally written for `inspect logs --follow`)
+into the bare `inspect run` path, plus the SSH PTY trick that
+makes the remote process line-buffer and propagates Ctrl-C
+end-to-end. Three contracts are load-bearing:
+
+**`RunOpts.tty: bool` is the single dispatch knob.** The new
+`tty` field on `RunOpts` is the only thing F16 added to the
+executor's per-call options struct. It is threaded through all
+three SSH dispatch paths — `run_remote`, `run_remote_streaming`,
+`run_remote_streaming_capturing` — and at each site adds
+`ssh.arg("-tt")` immediately after the `-S <socket>` /
+`ControlPath` block, before `BatchMode=yes`. Off by default for
+non-streaming runs (PTY allocation can change command behaviour:
+CRLF endings via the PTY's ONLCR translation, color output via
+`isatty(1)`, prompt suppression for tools that read passwords
+from `/dev/tty`); `inspect run --stream` is the only call site
+in v0.1.3 that flips it. The drift discovery probe and every
+other internal dispatch keep `tty: false` explicitly via the
+`RunOpts { ..., tty: false }` struct literal in
+`src/discovery/drift.rs`.
+
+**Why `-tt` (double-t) and not `-t`.** OpenSSH's `-t` requests a
+PTY *if local stdin is a TTY*, which it never is when `inspect
+run` is dispatched (we hand `Stdio::null()` or a piped `Stdio`
+to the SSH child). `-tt` forces PTY allocation regardless of
+local stdin shape — this is the OpenSSH idiom for "I want a PTY
+because the *remote* tool needs one, even though I am wrapping
+this in a script." See `ssh(1)` "Multiple -t options force tty
+allocation, even if ssh has no local tty."
+
+**Default 8 h timeout.** `inspect run --stream` bumps the verb's
+default `--timeout-secs` from 120 to 28 800 (8 hours) because the
+operator is expected to terminate via Ctrl-C, not by reaching the
+timeout. Matches `inspect logs --follow`'s default so operators
+do not have to learn two regimes. Override with `--timeout-secs
+<N>` either way; the override path is the same `args.timeout_secs
+.unwrap_or(if args.stream { 28800 } else { 120 })` branch in
+`src/verbs/run.rs`.
+
+**`AuditEntry.streamed: bool` discriminator field.** New field on
+`AuditEntry`, `Option<T>`-shaped via `skip_serializing_if =
+"is_false"` so pre-F16 entries deserialize unchanged (matches the
+F11/F12/F13/F14/F15 audit-extension pattern). Stamped `true` on
+every `--stream` / `--follow` invocation and absent otherwise.
+The reason it exists at all: a post-hoc audit query needs to
+distinguish `tail -f`-shaped invocations from short-lived
+commands without parsing the args text — the same separation
+F15's `transfer_direction` field provides for uploads vs
+downloads.
+
+**`inspect run` audit trigger surface (post-F16).** `inspect run`
+remains un-audited by default (read verb), but writes an audit
+entry under any of these triggers:
+- F9: forwarded stdin (`stdin_audited` — the default when local
+  stdin is a non-tty pipe with data).
+- F13: dispatch wrapper retried after a stale-session reauth
+  (`exit.retried`).
+- F16: `--stream` / `--follow` was set (`stream_audited`).
+
+All three surface via the same audit-write path in the
+per-step loop in `src/verbs/run.rs`; `e.streamed = args.stream`
+stamps the F16 field on every audit entry written from a `run`
+invocation regardless of which trigger fired (so an audit entry
+written because of F9 stdin forwarding still records `streamed:
+false` correctly via the `skip_serializing_if` shape).
+
+**SIGINT propagation policy.** F16 leans on `ssh -tt`'s PTY-layer
+SIGINT propagation, which is the standard OpenSSH idiom and
+works for every remote process that respects SIGINT. The local
+`inspect` process registers SIGINT handlers via
+`exec::cancel::install_handlers` (see `main.rs`), and the
+streaming read loop in `run_remote_streaming` polls
+`exec::cancel::is_cancelled()` on every iteration so a
+cancellation from inside the local process tree (e.g. via
+`kill -INT <pid>`) tears down the SSH child cleanly. The
+end-to-end Ctrl-C path is: terminal sends SIGINT to the local
+shell → shell forwards to local `inspect` → local `inspect`'s
+SIGINT handler trips `cancel::is_cancelled()` AND the local SSH
+client (which received the same SIGINT from the controlling
+terminal) sends a SIGINT down the PTY to the remote process
+group. Both paths are tolerated; whichever wins first kills the
+SSH child and the read loop exits.
+
+**Mutex with `--stdin-script`.** Streaming a script body over
+local stdin while also streaming output back is a half-duplex
+protocol headache (the SSH stdin channel is closed once the
+script body is delivered, so any post-deliver SIGINT becomes
+ambiguous; resolving it cleanly needs explicit signal-channel
+support that is not in v0.1.3). Enforced at the clap level via
+`conflicts_with_all = ["no_stdin", "stream"]` on `stdin_script`,
+not at runtime, so the operator gets the rejection before any
+dispatch happens. `--stream --file <script>` is fine because the
+script body is delivered in one shot at dispatch time, not
+streamed.
+
+**Deferred to v0.1.5.** Explicit OpenSSH `signal` request
+forwarding (instead of relying on PTY-layer SIGINT) +
+double-Ctrl-C escalation via channel close (for processes that
+ignore SIGINT but exit on SIGTERM/SIGHUP). Today's `-tt`
+mechanism covers the field-feedback case (`docker logs -f`,
+`tail -f`, `journalctl -f`); the v0.1.5 escalation is for the
+rarer daemonised-process case.
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
-mode); §12 in F15 (file transfer). Any deviation between this
-runbook and the bible is a runbook bug.*
+mode); §12 in F15 (file transfer); §13 in F16 (streaming executor).
+Any deviation between this runbook and the bible is a runbook bug.*
