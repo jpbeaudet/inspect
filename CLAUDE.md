@@ -51,7 +51,7 @@ Run before *every* commit, in this order:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test 2>&1 | grep -E "^test result|^running" | tail -40
 ```
 
 A clean run is ~28 suites, 900+ tests, < 90s. Treat any failure as a
@@ -59,6 +59,28 @@ hard stop, never `--no-verify`. The flake on
 `verbs::cache::tests::ttl_zero_makes_every_cached_snapshot_stale` is
 an env-var parallel-execution race that does not reproduce when run
 in isolation — re-run the full suite once if you see it.
+
+**WSL `cargo` PATH (Claude-Code session).** This dev environment is
+WSL (`/mnt/c/Users/hp/inspect`) and the harness's default shell does
+**not** have `~/.cargo/bin` on `PATH`. Every cargo invocation must
+prefix:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"; cargo …
+```
+
+Bare `cargo …` will hit `command not found`. Apply the prefix to
+fmt / clippy / test / build / run / anything cargo.
+
+**Test output discipline.** Always pipe `cargo test` through
+`| grep -E "^test result|^running" | tail -40` (per the gate
+above) — the full output is hundreds of lines per suite and burns
+context for nothing. Running the suite a second time *just to
+change the output format* is wasted compute (28 suites × ~30s).
+If the first run was clean, the gate is green; do not re-run.
+The grep form shows one `running N tests` + one `test result:`
+line per suite, which is enough to spot any non-zero `failed`
+count.
 
 ## Per-backlog-item update sweep (mandatory)
 
