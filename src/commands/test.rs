@@ -8,7 +8,7 @@
 //!    safe permissions (0600 or 0400) on unix.
 //! 4. Verify TCP reachability of `host:port` (default 22) with a short timeout.
 //!
-//! Real SSH authentication is deferred to Phase 1 (`connect`). This command
+//! Real SSH authentication is the job of `inspect connect`. This command
 //! intentionally does not attempt cryptographic auth so it remains side-effect
 //! free and runnable from CI without secrets.
 
