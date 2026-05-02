@@ -44,6 +44,34 @@ Two consequences shape every policy below:
 
 ---
 
+## No silent deferrals
+
+Never stub a function with a "deferred to vX" message without
+explicit approval. If a feature is in the current backlog,
+implement it fully.
+
+Run before every commit (alongside the fmt / clippy / test gates):
+
+```sh
+grep -rE "defer|stub|todo|unimplemented|exit\(2\)" src/
+```
+
+Inspect every hit. Legitimate matches (e.g. `std::process::exit(2)`
+on a clap usage-error path, the existing `exit-code 2` documentation
+in `LONG_*` help constants) are fine — but a `// deferred to v0.1.5`
+or an `unimplemented!()` in a backlog-scoped code path is a policy
+violation, not a follow-up.
+
+Approved deferrals are tracked here. Adding an entry requires the
+maintainer's explicit "ok defer X" in the conversation; agents do
+not self-authorize.
+
+### Authorized deferrals
+
+*(none yet for v0.1.3)*
+
+---
+
 ## Pre-commit gates (mandatory)
 
 Run before *every* commit, in this order:
