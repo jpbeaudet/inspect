@@ -35,6 +35,14 @@ pub struct Profile {
     #[serde(default)]
     pub networks: Vec<Network>,
 
+    /// F6 (v0.1.3): compose projects discovered on this host via
+    /// `docker compose ls --format json`. Empty when the host runs
+    /// no compose projects (or docker compose is not installed).
+    /// Read by `inspect compose ls`, `inspect compose ps`, and the
+    /// new `compose_projects:` line in `inspect status`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compose_projects: Vec<ComposeProject>,
+
     /// Non-fatal warnings emitted during discovery (missing tools, denied
     /// permissions, partial inventories). Surfaced in the `setup` summary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +80,7 @@ impl Profile {
             networks: Vec::new(),
             warnings: Vec::new(),
             clock_offset_secs: None,
+            compose_projects: Vec::new(),
             groups: BTreeMap::new(),
             aliases: BTreeMap::new(),
             local_overrides: None,
@@ -324,6 +333,140 @@ pub struct Network {
     pub scope: Option<String>,
 }
 
+/// F6 (v0.1.3): a single compose project as reported by
+/// `docker compose ls --format json`. Discovered at `inspect setup`
+/// time and cached on the [`Profile`]; consulted by `inspect compose
+/// ls`, `inspect compose ps`, and the `compose_projects:` line in
+/// `inspect status`.
+///
+/// `working_dir` is the directory containing `compose_file` and is
+/// the path every subsequent `docker compose` command must `cd` into,
+/// because compose resolves relative `volumes`, `env_file`, etc.
+/// against it. Without this we'd reproduce the exact "operator drops
+/// back to `inspect run -- 'cd /opt/luminary-onyx && sudo docker
+/// compose …'`" pattern F6 was filed to eliminate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComposeProject {
+    /// Project name (the value of `-p` / `COMPOSE_PROJECT_NAME`).
+    pub name: String,
+    /// Raw status string from `docker compose ls`, e.g. `"running(3)"`
+    /// or `"running(2), exited(1)"`. Preserved verbatim so operators
+    /// can see the original docker phrasing; counts below are derived.
+    pub status: String,
+    /// Absolute path of the compose file (the leftmost entry from
+    /// `docker compose ls`'s `ConfigFiles` field).
+    pub compose_file: String,
+    /// Directory containing `compose_file` — every per-project verb
+    /// (`ps`, `config`, `logs`, `restart`) `cd`s here before invoking
+    /// docker so relative paths in the compose file resolve correctly.
+    pub working_dir: String,
+    /// Total services known to this project at discovery time
+    /// (sum of all per-state counts in `status`). Surfaced as
+    /// `service_count` in JSON envelopes.
+    #[serde(default)]
+    pub service_count: u32,
+    /// Services in the `running` state at discovery time. Surfaced
+    /// as `running_count` in JSON envelopes.
+    #[serde(default)]
+    pub running_count: u32,
+}
+
+impl ComposeProject {
+    /// Parse `docker compose ls --format json` output into a typed
+    /// list. Tolerates the field-name variation between docker
+    /// versions (older daemons sometimes lowercase keys, newer ones
+    /// sometimes add fields we don't care about). Per-row failures
+    /// are skipped silently — discovery should be best-effort, not
+    /// brittle.
+    pub fn parse_ls_json(raw: &str) -> Vec<Self> {
+        let value: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let arr = match value.as_array() {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(arr.len());
+        for entry in arr {
+            let name = entry
+                .get("Name")
+                .or_else(|| entry.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let status = entry
+                .get("Status")
+                .or_else(|| entry.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let config_files = entry
+                .get("ConfigFiles")
+                .or_else(|| entry.get("configFiles"))
+                .or_else(|| entry.get("config_files"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            // ConfigFiles is comma-separated when there are multiple
+            // overlay files (e.g. `docker-compose.yml,override.yml`);
+            // we treat the leftmost as canonical because that's how
+            // compose resolves the project's working directory.
+            let compose_file = config_files
+                .split(',')
+                .next()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let working_dir = std::path::Path::new(&compose_file)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let (running_count, service_count) = parse_status_counts(&status);
+            out.push(ComposeProject {
+                name: name.to_string(),
+                status,
+                compose_file,
+                working_dir,
+                service_count,
+                running_count,
+            });
+        }
+        out
+    }
+}
+
+/// Parse `docker compose ls` Status strings like `running(3)` or
+/// `running(2), exited(1)` into `(running_count, total_count)`.
+/// Unrecognized shapes return `(0, 0)` so the caller can still
+/// surface the raw string without inventing numbers.
+fn parse_status_counts(status: &str) -> (u32, u32) {
+    let mut running = 0u32;
+    let mut total = 0u32;
+    for part in status.split(',') {
+        let part = part.trim();
+        // Find `state(N)` shape.
+        let open = match part.find('(') {
+            Some(i) => i,
+            None => continue,
+        };
+        let close = match part.rfind(')') {
+            Some(i) if i > open => i,
+            _ => continue,
+        };
+        let state = part[..open].trim().to_ascii_lowercase();
+        let n: u32 = match part[open + 1..close].trim().parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        total = total.saturating_add(n);
+        if state == "running" {
+            running = running.saturating_add(n);
+        }
+    }
+    (running, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +506,80 @@ mod tests {
         let s = serde_yaml::to_string(&p).expect("serialize");
         let back: Profile = serde_yaml::from_str(&s).expect("deserialize");
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn parse_status_counts_basic() {
+        // running-only: count both as running and total.
+        assert_eq!(parse_status_counts("running(3)"), (3, 3));
+        // mixed states: total sums all, running stays distinct.
+        assert_eq!(parse_status_counts("running(2), exited(1)"), (2, 3));
+        // ordering doesn't matter.
+        assert_eq!(parse_status_counts("exited(1), running(2)"), (2, 3));
+        // case-insensitive on the state name (older daemons capitalize).
+        assert_eq!(parse_status_counts("Running(4)"), (4, 4));
+    }
+
+    #[test]
+    fn parse_status_counts_handles_unknown_states_and_garbage() {
+        // Unknown states (paused, dead) still contribute to total.
+        assert_eq!(parse_status_counts("paused(2)"), (0, 2));
+        // Garbage / empty returns zeros without panicking.
+        assert_eq!(parse_status_counts(""), (0, 0));
+        assert_eq!(parse_status_counts("running"), (0, 0));
+        assert_eq!(parse_status_counts("running()"), (0, 0));
+    }
+
+    #[test]
+    fn parse_compose_ls_real_output() {
+        // Modern docker compose v2 output: capitalized keys, ConfigFiles is comma-separated.
+        let raw = r#"[
+            {"Name":"luminary-onyx","Status":"running(3)","ConfigFiles":"/opt/luminary-onyx/docker-compose.yml"},
+            {"Name":"atlas","Status":"running(2), exited(1)","ConfigFiles":"/opt/atlas/docker-compose.yml,/opt/atlas/override.yml"}
+        ]"#;
+        let projects = ComposeProject::parse_ls_json(raw);
+        assert_eq!(projects.len(), 2);
+
+        assert_eq!(projects[0].name, "luminary-onyx");
+        assert_eq!(projects[0].status, "running(3)");
+        assert_eq!(
+            projects[0].compose_file,
+            "/opt/luminary-onyx/docker-compose.yml"
+        );
+        assert_eq!(projects[0].working_dir, "/opt/luminary-onyx");
+        assert_eq!(projects[0].running_count, 3);
+        assert_eq!(projects[0].service_count, 3);
+
+        // Multi-file overlay: leftmost wins; mixed-state status parses.
+        assert_eq!(projects[1].name, "atlas");
+        assert_eq!(projects[1].compose_file, "/opt/atlas/docker-compose.yml");
+        assert_eq!(projects[1].working_dir, "/opt/atlas");
+        assert_eq!(projects[1].running_count, 2);
+        assert_eq!(projects[1].service_count, 3);
+    }
+
+    #[test]
+    fn parse_compose_ls_tolerates_lowercase_keys_and_missing_fields() {
+        // Some older / non-CE daemons emit lowercase keys.
+        let raw = r#"[{"name":"foo","status":"exited(1)","configFiles":"/srv/foo/compose.yml"}]"#;
+        let projects = ComposeProject::parse_ls_json(raw);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "foo");
+        assert_eq!(projects[0].running_count, 0);
+        assert_eq!(projects[0].service_count, 1);
+    }
+
+    #[test]
+    fn parse_compose_ls_skips_nameless_entries_and_returns_empty_on_garbage() {
+        // Empty array, not-an-array, and entries with no name are all
+        // tolerated without panicking.
+        assert!(ComposeProject::parse_ls_json("[]").is_empty());
+        assert!(ComposeProject::parse_ls_json("not json at all").is_empty());
+        assert!(ComposeProject::parse_ls_json(r#"{"Name":"x"}"#).is_empty());
+        let raw = r#"[{"Status":"running(1)"},{"Name":"keepme","Status":"running(1)","ConfigFiles":"/x/c.yml"}]"#;
+        let projects = ComposeProject::parse_ls_json(raw);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "keepme");
     }
 
     #[test]

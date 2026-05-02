@@ -93,6 +93,11 @@ pub const TOPICS: &[Topic] = &[
         summary: "Worked examples and translation guide (grep -> inspect, etc.)",
         body: Some(include_str!("content/examples.md")),
     },
+    Topic {
+        id: "compose",
+        summary: "First-class compose verbs (ls/ps/config/logs/restart) — F6 (v0.1.3)",
+        body: Some(include_str!("content/compose.md")),
+    },
 ];
 
 /// Look up a topic by its canonical id. Comparison is case-insensitive
@@ -209,6 +214,12 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("disconnect-all", &["ssh", "discovery"]),
     // Aliases.
     ("alias", &["aliases", "selectors", "search"]),
+    // F6 (v0.1.3): the compose verb cluster cross-links into the
+    // compose editorial topic plus safety/formats. Listed once at
+    // the top level — sub-verbs (`compose ls`, `compose ps`, …) are
+    // discoverable via `inspect compose --help` and don't need
+    // individual rows here.
+    ("compose", &["compose", "safety", "formats"]),
     // Help is a verb too: it cross-links the user back to the index.
     ("help", &["quickstart", "examples"]),
 ];
@@ -337,7 +348,8 @@ mod tests {
 
     #[test]
     fn topic_count_matches_bible() {
-        assert_eq!(TOPICS.len(), 14);
+        // 14 HP-1 editorial topics + 1 F6 (v0.1.3) compose topic.
+        assert_eq!(TOPICS.len(), 15);
     }
 
     #[test]

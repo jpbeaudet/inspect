@@ -196,6 +196,30 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
         ),
     };
+    // F6 (v0.1.3): surface the cached compose project list. We
+    // always read from the inventory tier (not runtime) because
+    // compose project membership rarely changes between deploys
+    // and a fresh probe would cost a second remote round-trip per
+    // namespace just to refresh a count.
+    let mut compose_total = 0usize;
+    let mut compose_projects_json: Vec<Value> = Vec::new();
+    for ns in &nses {
+        if let Some(profile) = ns.profile.as_ref() {
+            for cp in &profile.compose_projects {
+                compose_total += 1;
+                compose_projects_json.push(json!({
+                    "namespace": ns.namespace,
+                    "name": cp.name,
+                    "status": cp.status,
+                    "compose_file": cp.compose_file,
+                    "working_dir": cp.working_dir,
+                    "service_count": cp.service_count,
+                    "running_count": cp.running_count,
+                }));
+            }
+        }
+    }
+
     let mut doc = OutputDoc::new(
         summary,
         json!({
@@ -206,7 +230,8 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
                 "healthy": healthy,
                 "unhealthy": unhealthy,
                 "unknown": unknown,
-            }
+            },
+            "compose_projects": compose_projects_json,
         }),
     )
     .with_meta("selector", args.selector.clone())
@@ -250,6 +275,16 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         for w in &refresh_warnings {
             crate::tee_eprintln!("warning: {w}");
         }
+    }
+
+    // F6 (v0.1.3): append a `compose_projects: N` DATA line so
+    // human operators see at a glance whether the host runs any
+    // compose projects (and how many) without dropping back to
+    // `inspect compose ls`. The line is only emitted when the
+    // count > 0 — adding "compose_projects: 0" to every status
+    // call on plain container hosts would be noise.
+    if compose_total > 0 {
+        data_lines.push(format!("compose_projects: {compose_total}"));
     }
 
     crate::format::render::render_doc(&doc, &fmt, &data_lines)?;

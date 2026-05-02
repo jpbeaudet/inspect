@@ -14,6 +14,151 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F6 — First-class `inspect compose` verb cluster.** v0.1.2 field
+  feedback ("no obvious `inspect compose` integration … first-class
+  compose verbs would replace 80% of my `run` usage") — operators
+  were dropping back to `inspect run arte -- 'cd /opt/luminary-onyx
+  && sudo docker compose …'` for ps / logs / config / restart and
+  losing the structured output, audit trail, redaction, and selector
+  grammar in the process. v0.1.3 ships a complete compose surface so
+  this fallback is no longer the path of least resistance.
+  - **Discovery + cache schema.** New `ComposeProject { name,
+    status, compose_file, working_dir, service_count, running_count
+    }` struct on `Profile` (`#[serde(default)]`,
+    `skip_serializing_if = "Vec::is_empty"`, so pre-F6 profiles
+    deserialize unchanged). New `discovery::probes::probe_compose_projects`
+    runs `docker compose ls --all --format json` over the persistent
+    socket and is wired into `discovery::engine::discover` so every
+    `inspect setup` populates the cache. The `Status` field is parsed
+    into `(running_count, service_count)` via a small native parser
+    (no extra crate per the Dependency Policy); both `running(N)` and
+    `running(2), exited(1)` shapes are handled, and unknown states
+    contribute to total but not running. The `--all` flag is intentional —
+    operators want stopped projects to remain visible without having
+    to remember a docker-side flag.
+  - **Read sub-verbs (no audit, no apply gate):**
+    - `inspect compose ls <ns>` — reads from the cached profile;
+      `--refresh` (alias `--live`) re-probes via `docker compose ls`
+      live. Multi-namespace selectors fan out and tag each project
+      with its owning namespace in the JSON envelope. Empty
+      namespaces emit `(no compose projects)` with chained next-steps
+      pointing at `inspect setup` (cold cache) and `--refresh`
+      (just-deployed project).
+    - `inspect compose ps <ns>/<project>` — runs `docker compose -p
+      <p> ps --all --format json` over the socket and renders a
+      per-service table (service / state / image / ports / uptime).
+      Tolerates both modern v2 ndjson and older single-array output;
+      `Publishers` are formatted as `host:container/proto`. JSON
+      schema: `data.services = [{service, state, image, ports,
+      uptime}, ...]`. Down-service rollups suggest `inspect compose
+      logs` as the next step.
+    - `inspect compose config <ns>/<project>` — runs `docker compose
+      -p <p> config` and streams stdout through the L7 redaction
+      pipeline (PEM / header / URL / env maskers); `--show-secrets`
+      bypasses. Summary line includes `— secrets masked` when any
+      masker fired. The full body is preserved in `data.config` for
+      agent consumers.
+    - `inspect compose logs <ns>/<project>[/<service>]` — wraps
+      `docker compose -p <p> logs --no-color [--tail N] [--since X]
+      [--follow] [<svc>]`. Streaming with redaction on every line;
+      `--follow` bumps the timeout to 8h (matches `inspect logs
+      --follow`). Without a service portion, every service in the
+      project is aggregated; with one, narrowed to that service.
+  - **Write sub-verbs (audited; require `--apply`):**
+    - `inspect compose up <ns>/<project>` — `verb=compose.up`. Default
+      is `-d`; `--no-detach` switches to foreground. `--force-recreate`
+      passthrough. Audit args stamp `[project=…] [compose_file_hash=
+      <sha-12>]` plus `[no_detach=true]` / `[force_recreate=true]`
+      when set. Revert: `kind=unsupported` with a preview pointing
+      at `inspect compose down`.
+    - `inspect compose down <ns>/<project>` — `verb=compose.down`.
+      `--volumes` is destructive and stamps `[volumes=true]` into the
+      audit args; `--rmi` adds `--rmi local` and stamps `[rmi=local]`.
+      The dry-run preview surfaces a `(DESTRUCTIVE: --volumes would
+      remove named volumes)` warning when applicable. Revert:
+      unsupported.
+    - `inspect compose pull <ns>/<project>[/<service>]` —
+      `verb=compose.pull`. Streams via `run_streaming_capturing` so
+      progress is visible during multi-minute pulls; the audit entry
+      records `streamed=true` and `lines_streamed`. 30-minute
+      timeout. `--ignore-pull-failures` passthrough with audit tag.
+    - `inspect compose build <ns>/<project>[/<service>]` —
+      `verb=compose.build`. Streams identically to pull (some builds
+      legitimately take 30+ minutes). 1-hour timeout.
+      `--no-cache` and `--pull` passthrough with audit tags.
+    - `inspect compose restart <ns>/<project>/<service>` —
+      `verb=compose.restart`. Without a service portion, refuses to
+      fan out unless `--all` is passed (defensive default — "you
+      didn't tell me which service, prove you really mean every
+      service"). With `--all`, enumerates services via `docker
+      compose -p <p> config --services` and iterates per-service so
+      each gets its own audit entry. F8 cache invalidation runs
+      after the loop so the next `inspect status` reflects post-
+      restart state.
+  - **Inspect-run-style sub-verb (no audit, no apply gate):**
+    - `inspect compose exec <ns>/<project>/<service> -- <cmd>` —
+      mirrors `inspect run`'s contract exactly: no audit, no apply
+      gate, output streams through the L7 four-masker pipeline
+      (`--show-secrets` and `--redact-all` honored). Service portion
+      is mandatory (compose exec without a target service is
+      meaningless). Forces `docker compose exec -T` so the output is
+      line-oriented for the redactor. `--user` (`-u`) and `--workdir`
+      (`-w`) are passthrough flags. 8h timeout matches `inspect run
+      --stream` so a long-running interactive query inside the
+      container can complete.
+  - **Selector grammar.** Parsed inline by `verbs::compose::resolve`
+    (not through `selector::resolve`, which would treat `<ns>/<x>`
+    as `<ns>/<service>` and lose the project context). Three forms:
+    `<ns>` for `compose ls`; `<ns>/<project>` for project-scoped
+    verbs; `<ns>/<project>/<service>` for service-scoped verbs.
+    The colon-shape selector (`<ns>:/path`) is rejected with a
+    chained hint pointing operators at the file-path verbs. Unit
+    tests pin every parse case.
+  - **Project resolution.** `project_in_profile(ns, project)` looks
+    up the project in the namespace's cached profile and returns a
+    chained-hint error when the namespace has no cached profile, or
+    when the project name doesn't match — the unknown-project error
+    enumerates the *known* projects on that namespace so the
+    operator's next typo recovery is one keystroke away.
+  - **`inspect status` integration.** Status now reads
+    `profile.compose_projects` for every selected namespace and
+    emits a `compose_projects: N` line in the human DATA section
+    (suppressed when N=0 to avoid noise on plain container hosts)
+    plus an always-present `compose_projects` array in `--json`.
+    Each JSON entry carries `{namespace, name, status, compose_file,
+    working_dir, service_count, running_count}` — the same shape as
+    `compose ls --json` so agents can navigate without re-binding.
+  - **Help.** New editorial topic `compose` under `src/help/content/`
+    documenting the read / write / exec sub-verb tiers, the audit-tag
+    table, the selector grammar, the per-verb JSON schemas, the
+    revert-kind = unsupported policy, and the discovery + status
+    integration. Wired into `TOPICS`, `VERB_TOPICS`, the
+    `SEE_ALSO_COMPOSE` cross-link, the `topic_count_matches_bible`
+    invariant (14 → 15), and the `topic_ids` golden snapshot.
+  - **Audit shape.** Five new `verb` values: `compose.up`,
+    `compose.down`, `compose.pull`, `compose.build`,
+    `compose.restart`. All five record `revert.kind = unsupported`
+    with a preview that names the exact rollback command (when one
+    exists) so `inspect revert <id>` returns useful chained hints
+    instead of silently no-opping. The `args` field is a bracketed-
+    tag string (`[project=<name>] [service=<name>] [compose_file_hash=
+    <sha-12>] [<flag>=true] …`) so `inspect audit grep` filters by
+    project, service, or specific flag with a substring match.
+  - **Tests.** New `f6_*` acceptance suite in
+    `tests/phase_f_v013.rs` covers the parse layer, the discovery
+    probe's JSON parsing tolerance, the per-verb dispatch including
+    the deferred-stub-replacement (no `intentionally not
+    implemented` exit-2 anywhere), the audited write-verb shape,
+    and the status-integration count line + JSON field. Unit tests
+    in each verb module pin the protocol parsing
+    (`docker compose ls`, `docker compose ps` ndjson + array forms,
+    `Status` count parser, etc.).
+  - **Out of scope.** Compose verbs ship without `inspect bundle`
+    integration (a v0.1.5+ design topic) and without per-service
+    `compose up <ns>/<p>/<svc>` (compose itself supports targeted
+    `up <svc>`, but the audit-tag taxonomy needs another pass before
+    it lands in inspect's contract).
+
 - **L6 — Per-branch rollback tracking in bundle matrix steps + new
   `inspect bundle status <id>` verb.** v0.1.2 retrospective:
   `parallel: true` + `matrix:` steps rolled back the WHOLE matrix

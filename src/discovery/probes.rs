@@ -5,8 +5,8 @@
 //! degrade gracefully when a tool is missing or a command fails.
 
 use crate::profile::schema::{
-    HealthStatus, Image, LogDriver, Mount, Network, Port, RemoteTooling, Service, ServiceKind,
-    Volume,
+    ComposeProject, HealthStatus, Image, LogDriver, Mount, Network, Port, RemoteTooling, Service,
+    ServiceKind, Volume,
 };
 use crate::ssh::{run_remote, RunOpts, SshTarget};
 use crate::verbs::quote::shquote;
@@ -20,6 +20,8 @@ pub struct ProbeResult {
     pub networks: Vec<Network>,
     pub remote_tooling: Option<RemoteTooling>,
     pub host_listeners: Vec<HostListener>,
+    /// F6 (v0.1.3): compose projects discovered by `probe_compose_projects`.
+    pub compose_projects: Vec<ComposeProject>,
     pub warnings: Vec<String>,
     /// F2 (v0.1.3): a probe-level *fatal* condition. When `Some`, the
     /// discovery engine escalates to an `error:` (non-zero exit) with
@@ -656,6 +658,38 @@ pub fn probe_docker_inventory(ns: &str, target: &SshTarget) -> ProbeResult {
             }
         }
     }
+    r
+}
+
+/// F6 (v0.1.3): probe compose projects via `docker compose ls --format
+/// json`. Best-effort: hosts without `docker compose` installed
+/// (compose v1, or no compose plugin) return an empty list with no
+/// warning, because the absence of compose is normal on plain
+/// container hosts. A genuine command failure (daemon down) is
+/// already reported by [`probe_docker_containers`]; we don't
+/// double-warn here.
+///
+/// The default `docker compose ls` only returns *running* projects.
+/// We pass `--all` so stopped projects show up too — operators want
+/// to see "this project exists but is currently down" without
+/// having to remember the flag.
+pub fn probe_compose_projects(ns: &str, target: &SshTarget) -> ProbeResult {
+    let mut r = ProbeResult::default();
+    let cmd = "docker compose ls --all --format json 2>/dev/null";
+    let out = match run_remote(ns, target, cmd, RunOpts::with_timeout(15)) {
+        Ok(o) => o,
+        Err(_) => return r,
+    };
+    if !out.ok() {
+        // Treat as "no compose plugin" — silent. The docker probe
+        // already covers genuine daemon failures.
+        return r;
+    }
+    let raw = out.stdout.trim();
+    if raw.is_empty() || raw == "[]" {
+        return r;
+    }
+    r.compose_projects = ComposeProject::parse_ls_json(raw);
     r
 }
 

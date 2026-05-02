@@ -261,13 +261,14 @@ fn help_all_dumps_every_topic() {
             "`inspect help all` missing topic title {id:?}"
         );
     }
-    // Deterministic separator between topics (13 separators for 14 topics
-    // after v0.1.2 added `bundle` and `watch`).
+    // Deterministic separator between topics. Count = topic_count - 1.
+    // 14 topics through v0.1.2 → 13 separators; F6 (v0.1.3) added the
+    // `compose` topic, taking us to 15 topics → 14 separators.
     let bar = "=".repeat(72);
     assert_eq!(
         text.matches(bar.as_str()).count(),
-        13,
-        "expected 13 topic separators in `inspect help all`"
+        14,
+        "expected 14 topic separators in `inspect help all` (F6 added the compose topic)"
     );
 }
 
@@ -289,6 +290,9 @@ fn every_topic_has_at_least_three_examples() {
         "discovery",
         "ssh",
         "examples",
+        // F6 (v0.1.3): compose topic must satisfy the ≥3-examples
+        // contract just like the rest.
+        "compose",
     ] {
         let out = inspect()
             .args(["help", id])
@@ -328,6 +332,8 @@ fn every_see_also_reference_resolves() {
         "discovery",
         "ssh",
         "examples",
+        // F6 (v0.1.3): compose joins the editorial topic registry.
+        "compose",
     ]
     .iter()
     .copied()

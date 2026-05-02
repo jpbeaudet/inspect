@@ -11,6 +11,7 @@
 
 pub mod cache;
 pub mod cat;
+pub mod compose;
 pub mod correlation;
 pub mod cursor;
 pub mod dispatch;

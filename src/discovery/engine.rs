@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::probes::{
-    probe_clock_offset, probe_docker_containers, probe_docker_inventory, probe_host_listeners,
-    probe_remote_tooling, probe_systemd_units,
+    probe_clock_offset, probe_compose_projects, probe_docker_containers, probe_docker_inventory,
+    probe_host_listeners, probe_remote_tooling, probe_systemd_units,
 };
 use crate::profile::cache::{ensure_profiles_dir, save_profile};
 use crate::profile::schema::{Profile, RemoteTooling, ServiceKind};
@@ -56,6 +56,13 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
         profile.networks.extend(inv.networks);
         profile.images.extend(inv.images);
         profile.warnings.extend(inv.warnings);
+
+        // F6 (v0.1.3): compose projects. Best-effort; silent when
+        // `docker compose` is not installed (the absence of compose
+        // is normal on plain container hosts).
+        let cp = probe_compose_projects(namespace, target);
+        profile.compose_projects.extend(cp.compose_projects);
+        profile.warnings.extend(cp.warnings);
     } else {
         profile
             .warnings

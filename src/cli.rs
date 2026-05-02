@@ -61,6 +61,12 @@ const SEE_ALSO_SSH: &str = "See also: inspect help ssh, inspect help discovery";
 const SEE_ALSO_ALIAS: &str =
     "See also: inspect help aliases, inspect help selectors, inspect help search";
 const SEE_ALSO_HELP: &str = "See also: inspect help quickstart, inspect help examples";
+// F6 (v0.1.3): the compose verb cluster cross-links into the safety
+// + write topics for the audited `compose restart`, the formats topic
+// for the per-sub `--json` schemas, and the dedicated `compose`
+// editorial topic for the deferred-verb policy.
+const SEE_ALSO_COMPOSE: &str =
+    "See also: inspect help compose, inspect help safety, inspect help formats";
 
 // ---------------------------------------------------------------------------
 // HP-2: per-verb `long_about` blocks.
@@ -341,6 +347,75 @@ EXAMPLES
   $ inspect restart arte/pulse
   $ inspect restart arte/pulse --apply
   $ inspect stop 'prod-*/atlas' --apply --yes-all";
+
+const LONG_COMPOSE: &str = "\
+First-class verbs over Docker Compose projects discovered on the namespace.
+
+Replaces the v0.1.2-era `inspect run <ns> -- 'cd <project_dir> && sudo \
+docker compose ...'` pattern: every sub-verb resolves the project's \
+working directory from the cached profile, so operators never type the \
+path. Compose project discovery runs at `inspect setup` time via \
+`docker compose ls --format json` and is surfaced by both \
+`inspect compose ls` and the new `compose_projects:` line in \
+`inspect status`.
+
+READ SUBCOMMANDS
+  ls       List compose projects on the namespace.
+  ps       Per-service status table for one project.
+  config   Effective merged compose config (redacted).
+  logs     Aggregated logs for a project, or one service inside it.
+
+WRITE SUBCOMMANDS (audited; require --apply)
+  up       Bring up a project. verb=compose.up.
+  down     Tear down a project. verb=compose.down. --volumes is destructive.
+  pull     Pull images for a project. verb=compose.pull. Streams progress.
+  build    Build images for a project. verb=compose.build. Streams progress.
+  restart  Restart a single service. verb=compose.restart.
+
+EXEC (inspect-run-style; not audited)
+  exec     Run a command inside a compose service container. Mirrors
+           `inspect run`'s contract (no apply gate, no audit, output
+           runs through the L7 redaction pipeline).
+
+SELECTORS
+  <ns>                       — for `compose ls`
+  <ns>/<project>             — for `compose ps`, `compose config`,
+                               aggregated `compose logs`, and
+                               `compose restart --all`
+  <ns>/<project>/<service>   — for narrowed `compose logs` and
+                               for `compose restart` (the safe default)
+
+  The existing `<ns>/<service>` form continues to work for the
+  generic read/write verbs (`inspect logs`, `inspect restart`) because
+  F5's resolver tries the compose service label first.
+
+JSON SCHEMAS (--json)
+  ls:      data.compose_projects = [{name, status, working_dir,
+           compose_file, service_count, running_count}, ...]
+  ps:      data.services = [{service, state, ports, image, uptime}, ...]
+  restart: audit entry with verb=compose.restart, plus per-service rows
+           in DATA. Each audit entry records project, service, and
+           compose_file_hash so the post-mortem can verify the file
+           didn't change between the audit and a re-run.
+
+EXIT CODES
+  0   ok
+  1   no matching compose project / service
+  2   usage error (missing service portion without --all, malformed selector,
+      or one of the deferred sub-verbs)
+
+EXAMPLES
+  $ inspect compose ls arte
+  $ inspect compose ps arte/luminary-onyx
+  $ inspect compose config arte/luminary-onyx --json
+  $ inspect compose logs arte/luminary-onyx --tail 200
+  $ inspect compose logs arte/luminary-onyx/onyx-vault --follow
+  $ inspect compose restart arte/luminary-onyx/onyx-vault --apply
+  $ inspect compose up arte/luminary-onyx --apply
+  $ inspect compose down arte/luminary-onyx --apply --yes
+  $ inspect compose pull arte/luminary-onyx --apply
+  $ inspect compose build arte/luminary-onyx --no-cache --apply
+  $ inspect compose exec arte/luminary-onyx/onyx-vault -- ps -ef";
 
 const LONG_EXEC: &str = "\
 Run a state-changing command on the selected targets. Audited; \
@@ -981,6 +1056,11 @@ pub enum Command {
     /// YAML-driven multi-step orchestration with rollback.
     #[command(long_about = LONG_BUNDLE)]
     Bundle(BundleArgs),
+
+    // ---- v0.1.3 F6 compose ---------------------------------------------------
+    /// First-class verbs over Docker Compose projects (F6, v0.1.3).
+    #[command(long_about = LONG_COMPOSE)]
+    Compose(ComposeArgs),
 
     // ---- Help system (HP-0) -------------------------------------------------
     /// Show help on a topic, search help, or list all topics.
@@ -2867,6 +2947,302 @@ pub struct RevertArgs {
     pub last: Option<usize>,
 }
 
+// ---- F6 compose (v0.1.3) ----------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_COMPOSE,
+    after_help = SEE_ALSO_COMPOSE,
+)]
+pub struct ComposeArgs {
+    #[command(subcommand)]
+    pub command: ComposeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComposeCommand {
+    /// List compose projects discovered on the namespace. Reads
+    /// from the cached profile; pass `--refresh` to re-probe live.
+    Ls(ComposeLsArgs),
+    /// Per-service status table for one project. Wraps `docker
+    /// compose -p <project> ps --all --format json` over the
+    /// persistent ssh socket.
+    Ps(ComposePsArgs),
+    /// Effective merged compose config for one project. Wraps
+    /// `docker compose -p <project> config` over the persistent
+    /// socket; output streams through the redaction pipeline so
+    /// secret-shaped values in `environment:` blocks and URL
+    /// auth portions are masked unless `--show-secrets` is passed.
+    Config(ComposeConfigArgs),
+    /// Aggregated logs for a project, or one service inside it.
+    /// Wraps `docker compose -p <project> logs` with the same
+    /// `--tail` / `--follow` / `--since` flags as `inspect logs`.
+    Logs(ComposeLogsArgs),
+    /// Restart a single service inside a compose project. Audited
+    /// (`verb=compose.restart`); requires `--apply` to actually
+    /// execute. Without a service portion in the selector, refuses
+    /// to fan out unless `--all` is passed (defensive default —
+    /// "the user typed `--all`, they meant it").
+    Restart(ComposeRestartArgs),
+
+    /// Bring up a compose project (`docker compose -p <p> up [-d]`).
+    /// Audited (`verb=compose.up`); requires `--apply`.
+    Up(ComposeUpArgs),
+    /// Tear down a compose project (`docker compose -p <p> down`).
+    /// Audited (`verb=compose.down`); requires `--apply`. Pass
+    /// `--volumes` to also remove named volumes (DESTRUCTIVE).
+    Down(ComposeDownArgs),
+    /// Pull images for a project (`docker compose -p <p> pull`).
+    /// Audited (`verb=compose.pull`); requires `--apply`. Streams
+    /// docker pull progress lines so operators see what's happening
+    /// during multi-minute pulls.
+    Pull(ComposePullArgs),
+    /// Build images for a project (`docker compose -p <p> build`).
+    /// Audited (`verb=compose.build`); requires `--apply`. Streams
+    /// build output for visibility on long builds.
+    Build(ComposeBuildArgs),
+    /// Run a command inside a compose service (`docker compose -p
+    /// <p> exec <svc> ...`). Mirrors `inspect run` — no audit, no
+    /// apply gate, output redacted unless `--show-secrets`.
+    Exec(ComposeExecArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeLsArgs {
+    /// Namespace selector (no service portion). Multi-namespace
+    /// selectors (`prod-*`, `arte~staging`) are supported and the
+    /// projects are tagged with their owning namespace in the
+    /// JSON envelope.
+    pub selector: String,
+    /// Bypass the cached project list and re-probe live via
+    /// `docker compose ls --all --format json`. Use after a `compose
+    /// up` (run out-of-band) to see a freshly-deployed project
+    /// without waiting for the next `inspect setup`. `--live` is
+    /// an alias for symmetry with the other read verbs.
+    #[arg(long, alias = "live")]
+    pub refresh: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposePsArgs {
+    /// Project selector: `<ns>/<project>`. Globs are not supported
+    /// here — `compose ps` is a single-project verb.
+    pub selector: String,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeConfigArgs {
+    /// Project selector: `<ns>/<project>`.
+    pub selector: String,
+    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// default — every line otherwise runs through the redaction
+    /// pipeline (env / header / URL / PEM maskers).
+    #[arg(long)]
+    pub show_secrets: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeLogsArgs {
+    /// Project or service selector: `<ns>/<project>[/<service>]`.
+    /// Without the service portion, logs from every service in the
+    /// project are aggregated.
+    pub selector: String,
+    /// Show logs since duration (e.g. `30s`, `5m`, `1h`, `2d`).
+    /// Forwarded as `docker compose logs --since <duration>`.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Number of lines from the tail. Forwarded as `--tail N`.
+    #[arg(long)]
+    pub tail: Option<u64>,
+    /// Stream logs (`docker compose logs --follow`).
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+    /// L7 (v0.1.3): print secret-shaped values verbatim.
+    #[arg(long)]
+    pub show_secrets: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeRestartArgs {
+    /// Service selector: `<ns>/<project>/<service>`. Without the
+    /// service portion, `--all` is required (defensive default —
+    /// "you didn't tell me which service, prove you really mean
+    /// every service").
+    pub selector: String,
+    /// Restart every service in the project. Required when no
+    /// service portion is given on the selector; harmless (a no-op)
+    /// when a single service is named.
+    #[arg(long)]
+    pub all: bool,
+    /// Actually perform the restart. Without this flag the verb
+    /// is a dry-run that lists every service that *would* restart.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the large-fanout interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Useful for
+    /// change-management tickets, incident IDs, or simply "why did I
+    /// run this?". Limited to 240 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+// F6 (v0.1.3): per-sub-verb args for the audited compose-state
+// mutations (`up`/`down`/`pull`/`build`) and the `inspect run`-style
+// `exec`. Each carries the standard write-verb safety knobs (`--apply`
+// / `--yes` / `--yes-all` / `--reason`) plus a small set of compose
+// passthrough flags. `exec` deliberately omits `--apply` — it mirrors
+// `inspect run`, which is unaudited because the operator's intent is
+// inspection, not state mutation.
+
+#[derive(Debug, Args)]
+pub struct ComposeUpArgs {
+    /// Project selector: `<ns>/<project>`.
+    pub selector: String,
+    /// Run the project in the foreground (drops the default `-d`).
+    /// Useful only when piping to a TUI; rare in inspect's audited
+    /// workflow because output goes through the audit-capture path.
+    #[arg(long)]
+    pub no_detach: bool,
+    /// Force-recreate every container even if config / image
+    /// haven't changed (`--force-recreate` passthrough).
+    #[arg(long)]
+    pub force_recreate: bool,
+    /// Actually perform the up. Without this flag, the verb is a
+    /// dry-run that lists every service that *would* be brought up.
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry. Limited to 240
+    /// characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeDownArgs {
+    /// Project selector: `<ns>/<project>`.
+    pub selector: String,
+    /// Also remove named volumes declared in the compose file.
+    /// **DESTRUCTIVE.** Confirms via the standard apply gate; pair
+    /// with `--apply --yes-all` only after you've manually verified
+    /// the volume contents are recoverable.
+    #[arg(long)]
+    pub volumes: bool,
+    /// Also remove all images used by the project (`--rmi local`).
+    #[arg(long)]
+    pub rmi: bool,
+    /// Actually perform the down. Without this flag, the verb is a
+    /// dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposePullArgs {
+    /// Project or service selector: `<ns>/<project>[/<service>]`.
+    /// With a service portion, only that one image is pulled.
+    pub selector: String,
+    /// Continue pulling other services if one fails
+    /// (`--ignore-pull-failures`).
+    #[arg(long)]
+    pub ignore_pull_failures: bool,
+    /// Actually perform the pull. Without this flag, the verb lists
+    /// what would be pulled.
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeBuildArgs {
+    /// Project or service selector: `<ns>/<project>[/<service>]`.
+    pub selector: String,
+    /// Skip the build cache (`--no-cache`).
+    #[arg(long)]
+    pub no_cache: bool,
+    /// Always pull base images during build (`--pull`).
+    #[arg(long)]
+    pub pull: bool,
+    /// Actually perform the build.
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub yes_all: bool,
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ComposeExecArgs {
+    /// Service selector: `<ns>/<project>/<service>`. The service
+    /// portion is mandatory (compose exec without a target service
+    /// is meaningless).
+    pub selector: String,
+    /// Command and arguments after `--`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub cmd: Vec<String>,
+    /// Run as user inside the container (`-u` passthrough).
+    #[arg(short = 'u', long, value_name = "USER")]
+    pub user: Option<String>,
+    /// Working directory inside the container (`-w` passthrough).
+    #[arg(short = 'w', long, value_name = "DIR")]
+    pub workdir: Option<String>,
+    /// L7 (v0.1.3): print secret-shaped values verbatim.
+    #[arg(long)]
+    pub show_secrets: bool,
+    /// L7 (v0.1.3): mask every `KEY=VALUE` line regardless of key
+    /// name. Useful when the remote command emits config blobs you
+    /// have not vetted.
+    #[arg(long)]
+    pub redact_all: bool,
+    /// Free-form note. `compose exec` is not audited (mirrors
+    /// `inspect run`), so this is purely informational and is
+    /// echoed once to stderr at the start of the run.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
 #[cfg(test)]
 mod hp2_cross_check {
     //! HP-2 cross-check: the literal `SEE_ALSO_*` constants in this
@@ -2922,6 +3298,7 @@ mod hp2_cross_check {
         assert_match("connections", super::SEE_ALSO_SSH);
         assert_match("disconnect-all", super::SEE_ALSO_SSH);
         assert_match("alias", super::SEE_ALSO_ALIAS);
+        assert_match("compose", super::SEE_ALSO_COMPOSE);
         assert_match("help", super::SEE_ALSO_HELP);
     }
 }

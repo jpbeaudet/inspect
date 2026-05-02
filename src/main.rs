@@ -171,6 +171,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Recipe(args) => commands::recipe::run(args),
         Command::Fleet(args) => commands::fleet::run(args),
         Command::Bundle(args) => commands::bundle::run(args),
+        Command::Compose(args) => verbs::compose::dispatch(args),
         Command::Help(args) => commands::help::run(args),
     }
 }

@@ -1106,6 +1106,152 @@ be ambiguous (which script body wins?); `--steps` and
 
 ---
 
+### 7.10 First-class compose verbs: `inspect compose` (F6, v0.1.3)
+
+Compose is the dominant deployment shape on the hosts inspect
+targets, but v0.1.2 treated compose projects as opaque collections
+of containers. To inspect a compose project's effective config or
+restart a single service, operators dropped back to:
+
+```sh
+inspect run arte -- 'cd /opt/luminary-onyx && sudo docker compose ps'
+```
+
+…and lost structured output, audit trail, redaction, and selector
+grammar in the process. F6 ships a complete first-class compose
+sub-verb cluster so this fallback is no longer the path of least
+resistance.
+
+**Discovery.** `inspect setup <ns>` now runs `docker compose ls
+--all --format json` and caches a `compose_projects: [...]` list on
+the namespace's profile (one entry per project: `name`, `status`,
+`compose_file`, `working_dir`, `service_count`, `running_count`).
+The discovery probe is best-effort: hosts without `docker compose`
+return an empty list silently. `inspect compose ls --refresh` re-
+probes live without waiting for the next setup.
+
+**Selectors.** The compose sub-verbs use a slightly narrower
+grammar than the generic verbs:
+
+```
+<ns>                        for `compose ls`
+<ns>/<project>              for `compose ps`, `compose config`,
+                            aggregated `compose logs`,
+                            `compose restart --all`,
+                            `compose up`, `compose down`,
+                            project-wide `compose pull` / `compose build`
+<ns>/<project>/<service>    for narrowed `compose logs`,
+                            per-service `compose pull` / `compose build`,
+                            the safe `compose restart`,
+                            and `compose exec`
+```
+
+The existing `<ns>/<service>` form continues to work for the
+generic verbs (`inspect logs`, `inspect restart`) because F5's
+resolver tries the compose service label first.
+
+**Read sub-verbs** (no audit, no apply gate):
+
+```sh
+inspect compose ls arte                          # list projects
+inspect compose ls arte --refresh                # bypass cache
+inspect compose ps arte/luminary-onyx            # per-service table
+inspect compose config arte/luminary-onyx        # merged YAML, redacted
+inspect compose logs arte/luminary-onyx --tail 200
+inspect compose logs arte/luminary-onyx/onyx-vault --follow
+```
+
+`config` runs every line through the L7 four-masker pipeline
+(PEM / header / URL / env), so secret-shaped values in
+`environment:` blocks are masked unless you pass `--show-secrets`.
+`logs` uses the same redactor on every emitted line.
+
+**Write sub-verbs** (audited; require `--apply`):
+
+```sh
+inspect compose up arte/luminary-onyx --apply
+inspect compose down arte/luminary-onyx --apply --yes
+inspect compose down arte/luminary-onyx --volumes --apply --yes-all
+inspect compose pull arte/luminary-onyx --apply
+inspect compose pull arte/luminary-onyx/onyx-vault --apply
+inspect compose build arte/luminary-onyx --no-cache --apply
+inspect compose restart arte/luminary-onyx/onyx-vault --apply
+inspect compose restart arte/luminary-onyx --all --apply --yes-all
+```
+
+Each write records an audit entry with `verb=compose.<sub>` and
+the bracketed-tag `args` field:
+
+```
+[project=<name>] [service=<name>] [compose_file_hash=<sha-12>] [...]
+```
+
+`compose_file_hash` is the first 12 hex chars of the project's
+compose file SHA-256, fetched via `cat <compose_file>` at audit
+time. A post-mortem can verify the compose file did not change
+between the audit and a re-run by re-hashing it on the host and
+comparing prefixes.
+
+`pull` and `build` stream their output via the streaming-capturing
+runner so multi-minute pulls and 30+-minute builds remain visible
+in real time. `up` / `down` / `restart` are buffered.
+
+`down --volumes` is **destructive**: it removes named volumes.
+The dry-run preview surfaces a `(DESTRUCTIVE: --volumes would
+remove named volumes)` warning when applicable. Pair with
+`--apply --yes-all` only after you've verified the volume
+contents are recoverable.
+
+**Restart's defensive default.** Without a service portion,
+`compose restart` refuses to fan out unless `--all` is passed:
+
+```sh
+$ inspect compose restart arte/luminary-onyx
+error: selector 'arte/luminary-onyx' targets the whole project — pass
+--all to confirm restarting every service, or narrow to
+'arte/luminary-onyx/<service>'.
+hint: `inspect compose ps arte/luminary-onyx` lists the services in
+this project.
+```
+
+The intent is "you didn't tell me which service, prove you really
+mean every service." With `--all`, restart enumerates services via
+`docker compose -p <p> config --services` and iterates per-service
+so each gets its own audit entry.
+
+**`compose exec` is `inspect run`-style** — no audit, no apply gate,
+output redacted unless `--show-secrets`:
+
+```sh
+inspect compose exec arte/luminary-onyx/onyx-vault -- ps -ef
+inspect compose exec arte/luminary-onyx/onyx-vault -u root -- df -h
+inspect compose exec arte/luminary-onyx/onyx-vault -w /app -- bash -c 'ls && env'
+```
+
+Use the audited write verbs (`compose restart`, `compose up`,
+`compose down`) for state mutations; use `compose exec` for
+inspection and fast iteration inside a running service container.
+
+**Revert kind = `unsupported`.** All five compose write verbs
+record `revert.kind = unsupported` in their audit entries. The
+preview field names the rollback command when one exists
+(e.g. `compose down` for a `compose up` audit), so
+`inspect revert <id>` returns useful chained hints rather than
+silently no-opping.
+
+**`inspect status` integration.** Status reads
+`profile.compose_projects` for every selected namespace and emits
+a `compose_projects: N` line in the human DATA section (omitted
+when N=0 to avoid noise on plain container hosts). The `--json`
+output always includes a `compose_projects` array with the same
+shape as `compose ls --json`, so agents navigate without
+re-binding.
+
+**JSON schemas.** See `inspect help compose` for the full
+per-sub-verb JSON schema reference.
+
+---
+
 ## 8. Audit and revert
 
 ```sh
