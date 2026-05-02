@@ -12,8 +12,22 @@ DESCRIPTION
   resolution, group expansion, and the connectivity matrix.
 
   Discovery scans: docker ps/inspect, volumes, networks, images,
-  listening ports (ss/netstat), systemd units, health endpoints,
-  log driver configuration, and remote tooling (rg, jq, sed).
+  listening ports (TCP via ss -tlnp / netstat -tlnp; UDP via
+  ss -ulnp / netstat -ulnp — L9, v0.1.3), systemd units, health
+  endpoints, log driver configuration, and remote tooling
+  (rg, jq, sed).
+
+UDP LISTENERS (L9, v0.1.3)
+  The host-listener probe scans both TCP and UDP. Pre-L9 only TCP
+  was surfaced, so DNS forwarders, mDNS responders, syslog
+  receivers (`:514/udp`), IPSec daemons, and WireGuard endpoints
+  were invisible to `inspect ports` and `inspect status`. v0.1.3
+  fixes that — every host listener record carries an explicit
+  `proto: tcp|udp`. Filter with `inspect ports <sel> --proto udp`
+  (or `--proto tcp`); default `all` shows both. UDP listeners
+  shown by `ss -uln` are *bound sockets*, not "the service is
+  actually receiving traffic" — operators chasing dead UDP
+  services still need a real probe (e.g., `dig @host` for DNS).
 
 DRIFT DETECTION
   Every command runs an async drift check in the background. If the

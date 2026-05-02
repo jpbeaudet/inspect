@@ -14,6 +14,78 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L9 — UDP listener probe in `discovery::probes` + `--proto` filter
+  on `inspect ports`.** The host-listener probe pre-L9 scanned only
+  TCP (`ss -tlnp` / `netstat -tlnp`), so UDP services on managed
+  appliances — DNS forwarders, mDNS responders, syslog receivers on
+  `:514/udp`, IPSec daemons, WireGuard endpoints — were invisible to
+  `inspect ports` and `inspect status`. Operators chasing UDP issues
+  fell back to running raw `ss -uln` over `inspect run`. v0.1.3
+  closes the gap.
+  - **Probe extension.** `probe_host_listeners` now runs both probes
+    (TCP first, UDP second) in independent attempts: a host that
+    surfaces TCP listeners but rejects UDP probing still surfaces
+    TCP. Each probe falls back to the matching `netstat -[tu]lnp`
+    invocation when `ss` is missing. The "no host-port listing
+    available" warning fires only when both axes fail. New
+    `parse_listener_line_with_proto(line, proto)` parser shared by
+    both axes (the line shape is identical between TCP and UDP;
+    only the proto differs).
+  - **Profile schema.** `HostListener.proto` was already a `String`
+    field defaulting to `"tcp"` (pre-L9 hardcoded the value); L9
+    stamps `tcp` or `udp` explicitly per probe. The discovery
+    engine's `already_mapped` check is refined to match on
+    `(host_port, proto)` rather than `host_port` alone — a TCP
+    service on `:53` no longer suppresses a host UDP listener on
+    `:53` (distinct sockets, distinct triage paths).
+  - **`inspect ports --proto tcp|udp|all`.** New flag (default
+    `all`) on `PortsArgs`. Rendered command is built by
+    `ProtoAxis::build_probe_cmd` — for `all`, the verb runs
+    `ss -tlnp; ss -ulnp` (or `netstat` fallbacks) in one ssh
+    round-trip, with `--- tcp ---` / `--- udp ---` markers between
+    probes so the local parser can attribute every line to a proto.
+    For `tcp` or `udp`, only the matching probe runs.
+    `--port` / `--port-range` compose with `--proto`; the proto is
+    a separate axis.
+  - **PROTO column + JSON `proto` field.** Each emitted row prefixes
+    the data line with `[tcp]` or `[udp]` so the proto is visible
+    at a glance; the JSON envelope carries an explicit `proto` key
+    on every row so agent consumers can branch without re-parsing
+    the rendered text.
+  - **Container-port path (`docker port <ctr>`)** unchanged at the
+    probe layer (docker already includes the proto in its
+    `<port>/<proto>` output); the verb reads the proto out of the
+    line and applies the same `--proto` filter client-side.
+  - **Help surface.** `LONG_PORTS` updated with the `--proto` flag
+    and the L9 examples; `discovery.md` editorial topic gains a
+    "UDP LISTENERS (L9, v0.1.3)" section that's blunt about the
+    probe's bound-socket-vs-receiving-traffic distinction (so
+    operators don't mistake "port shows up in `inspect ports`" for
+    "service is healthy"). `MANUAL.md` §"Filtering `inspect ports`"
+    expanded with a "Why UDP matters" sub-section, the worked
+    examples, and the JSON-envelope `proto` field contract.
+  - **Tests.** 3 inline unit tests in
+    `src/discovery/probes.rs::tests::l9_*` (UDP `ss` row, UDP
+    `netstat` row, IPv6 UDP `[::]:port` bind). 7 in
+    `src/verbs/ports.rs::tests::l9_*` (`ProtoAxis::parse` accepts
+    tcp/udp/all + safe-default; `build_probe_cmd` emits both
+    markers + commands for `all`, narrows correctly for `tcp` /
+    `udp`, falls back to `netstat` only when `ss` is absent;
+    marker recognition; docker-port `/udp` suffix detection).
+    9 acceptance tests in `tests/phase_f_v013.rs::l9_*` (UDP +
+    TCP probe rows feed into the cached profile via the engine's
+    `already_mapped` check; `inspect ports --proto udp` filters
+    correctly; `inspect ports --proto tcp` excludes UDP rows;
+    PROTO column rendered in human output; JSON envelope carries
+    `proto`; mock-driven probe runs both axes in one ssh
+    round-trip; help-topic + help-search discoverability for the
+    `--proto` flag and the UDP-coverage notice). Full suite green:
+    28 suites, 0 failed.
+  - **Composes.** L9 lays the groundwork for L10 (port-level diff
+    in `DriftDiff`) — once port-level diffing lands, UDP additions
+    and removals between snapshots will surface automatically
+    through the same parser.
+
 - **L8 — Round out the v0.1.3 compose surface (per-service narrowing,
   `compose logs` triage flags, bundle `compose:` step kind).** F6
   shipped the first-class `inspect compose` verb cluster but with

@@ -77,11 +77,15 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
             // the profile carries something useful even on hosts that don't
             // run docker. Container listeners would be redundant here, so we
             // only keep ports that aren't already mapped through a known
-            // container port mapping.
-            let already_mapped = profile
-                .services
-                .iter()
-                .any(|s| s.ports.iter().any(|p| p.host == hl.port));
+            // container port mapping. L9 (v0.1.3): match on (host_port,
+            // proto) so a TCP service on :53 doesn't suppress a host UDP
+            // listener on :53 — they're distinct sockets and operators
+            // chasing DNS issues need both surfaced.
+            let already_mapped = profile.services.iter().any(|s| {
+                s.ports
+                    .iter()
+                    .any(|p| p.host == hl.port && p.proto == hl.proto)
+            });
             if already_mapped {
                 continue;
             }

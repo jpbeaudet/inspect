@@ -273,22 +273,45 @@ inspect resolve 'prod-*/storage'
 
 ### Filtering `inspect ports`
 
-`inspect ports <ns>` accepts two server-side filters so you don't
+`inspect ports <ns>` accepts three server-side filters so you don't
 have to pipe through `grep` (and lose the SUMMARY/NEXT envelope):
 
 - `--port <n>` — keep only rows mentioning a specific port number.
 - `--port-range <lo-hi>` — keep only rows in `[lo, hi]` (inclusive).
+- `--proto tcp|udp|all` (L9, v0.1.3) — narrow to one transport.
+  Default `all` runs both TCP (`ss -tlnp` / `netstat -tlnp`) and
+  UDP (`ss -ulnp` / `netstat -ulnp`) probes in one ssh round-trip;
+  `tcp` or `udp` skips the other probe entirely.
 
-The filters are mutually exclusive. The token-aware matcher handles
-both the `0.0.0.0:8200` and `8200/tcp` shapes, so it doesn't fire
-on incidental digits inside an interface name or a netns label. The
+`--port` and `--port-range` are mutually exclusive; `--proto`
+composes with both. The token-aware matcher handles both the
+`0.0.0.0:8200` and `8200/tcp` shapes, so it doesn't fire on
+incidental digits inside an interface name or a netns label. The
 SUMMARY's "N listener(s)" count reflects the filtered total, not
 the raw row count.
+
+Each emitted row prefixes the data line with `[tcp]` or `[udp]`
+so the proto is visible at a glance, and the JSON envelope carries
+an explicit `proto` field on every row (matches the host-listener
+records cached in the profile).
 
 ```sh
 inspect ports arte --port 8200
 inspect ports arte --port-range 8000-8999
+inspect ports arte --proto udp                 # DNS forwarders, syslog receivers, etc.
+inspect ports arte --proto tcp --port-range 8000-8999
 ```
+
+**Why UDP matters (L9, v0.1.3).** Pre-L9 the host-listener probe
+scanned only TCP, so UDP services on managed appliances (DNS
+forwarders, mDNS responders, syslog receivers on `:514/udp`,
+IPSec daemons, WireGuard endpoints) were invisible to `inspect
+ports` and `inspect status`. The v0.1.3 probe runs both axes and
+tags every cached listener record with `proto`. UDP listeners
+shown by `ss -uln` are *bound sockets*, not "the service is
+actually receiving traffic" — operators chasing dead UDP services
+still need a real probe (e.g., `dig @host` for DNS); inventory is
+necessary but not sufficient.
 
 ### 5.1 Logs and grep — line filters and cursors (v0.1.1)
 

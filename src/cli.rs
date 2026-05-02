@@ -2075,10 +2075,13 @@ pub struct SimpleSelectorArgs {
 #[derive(Debug, Args)]
 #[command(
     long_about = "List listening ports. Filter to a single port with \
-`--port <n>` or a range with `--port-range <lo-hi>`.\n\n\
+`--port <n>` or a range with `--port-range <lo-hi>`. L9 (v0.1.3): both \
+TCP and UDP listeners are surfaced by default; narrow with \
+`--proto tcp|udp` when you only care about one side.\n\n\
 EXAMPLES\n  \
   $ inspect ports arte\n  \
   $ inspect ports arte --port 8200\n  \
+  $ inspect ports arte --proto udp\n  \
   $ inspect ports 'prod-*' --port-range 8000-9000",
     after_help = SEE_ALSO_READ,
 )]
@@ -2094,6 +2097,13 @@ pub struct PortsArgs {
     /// `<lo>-<hi>`. Mutually exclusive with `--port`.
     #[arg(long, value_name = "LO-HI")]
     pub port_range: Option<String>,
+    /// L9 (v0.1.3): protocol filter. Default `all` runs both TCP
+    /// (`ss -tlnp` / `netstat -tlnp`) and UDP (`ss -ulnp` /
+    /// `netstat -ulnp`) probes; `tcp` or `udp` narrows to one
+    /// side. Each emitted row carries an explicit `proto` so JSON
+    /// consumers can branch without re-parsing.
+    #[arg(long, value_name = "TCP|UDP|ALL", default_value = "all", value_parser = ["tcp", "udp", "all"])]
+    pub proto: String,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

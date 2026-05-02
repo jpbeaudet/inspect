@@ -693,26 +693,73 @@ pub fn probe_compose_projects(ns: &str, target: &SshTarget) -> ProbeResult {
     r
 }
 
-/// Probe host-level listening sockets via `ss -tlnpH` (preferred) with
-/// `netstat -tlnp` fallback.
+/// Probe host-level listening sockets. L9 (v0.1.3): runs both TCP
+/// (`ss -H -tlnp`) and UDP (`ss -H -ulnp`) probes — pre-L9 surfaced
+/// only TCP, leaving DNS forwarders, mDNS responders, syslog
+/// receivers, IPSec daemons, and WireGuard endpoints invisible to
+/// `inspect ports` and `inspect status`. Each probe falls back to
+/// the matching `netstat` invocation when `ss` is missing. Per-proto
+/// failures are independent — a host that exposes TCP listeners but
+/// rejects UDP probing still surfaces TCP. Each parsed line is
+/// tagged with its proto so the downstream `Port.proto` and the
+/// JSON envelopes get the right value (the schema's
+/// `default_proto` was already `"tcp"` for backwards compat with
+/// pre-L9 profiles, but L9 stamps both protos explicitly).
 pub fn probe_host_listeners(ns: &str, target: &SshTarget) -> ProbeResult {
     let mut r = ProbeResult::default();
-    let tries = ["ss -H -tlnp 2>/dev/null", "netstat -tlnp 2>/dev/null"];
-    for cmd in tries {
+    let mut got_tcp = false;
+    let mut got_udp = false;
+    probe_listeners_one_proto(
+        ns,
+        target,
+        "tcp",
+        &["ss -H -tlnp 2>/dev/null", "netstat -tlnp 2>/dev/null"],
+        &mut r,
+        &mut got_tcp,
+    );
+    probe_listeners_one_proto(
+        ns,
+        target,
+        "udp",
+        &["ss -H -ulnp 2>/dev/null", "netstat -ulnp 2>/dev/null"],
+        &mut r,
+        &mut got_udp,
+    );
+    if !got_tcp && !got_udp {
+        r.warnings
+            .push("no host-port listing available (ss/netstat absent or no permission)".into());
+    }
+    r
+}
+
+/// L9 (v0.1.3): run one of the two probe-command lists (TCP or UDP)
+/// and tag every parsed listener with the given `proto`. The first
+/// command that returns ok + non-empty stdout wins; subsequent
+/// fallbacks are skipped so we don't double-count a host that has
+/// both `ss` and `netstat`. Sets `got` to true on success so the
+/// outer probe can decide whether the global "nothing reachable"
+/// warning fires.
+fn probe_listeners_one_proto(
+    ns: &str,
+    target: &SshTarget,
+    proto: &str,
+    cmds: &[&str],
+    r: &mut ProbeResult,
+    got: &mut bool,
+) {
+    for cmd in cmds {
         if let Ok(out) = run_remote(ns, target, cmd, RunOpts::with_timeout(10)) {
             if out.ok() && !out.stdout.trim().is_empty() {
                 for line in out.stdout.lines() {
-                    if let Some(l) = parse_listener_line(line) {
+                    if let Some(l) = parse_listener_line_with_proto(line, proto) {
                         r.host_listeners.push(l);
                     }
                 }
-                return r;
+                *got = true;
+                return;
             }
         }
     }
-    r.warnings
-        .push("no host-port listing available (ss/netstat absent or no permission)".into());
-    r
 }
 
 /// Probe non-Docker services via systemd. Returns at most a few hundred
@@ -1213,11 +1260,18 @@ pub(crate) fn parse_health_from_status(status: &str) -> Option<HealthStatus> {
     }
 }
 
-pub(crate) fn parse_listener_line(line: &str) -> Option<HostListener> {
-    // ss -H -tlnp output (one socket per line):
+/// L9 (v0.1.3): parse one row of `ss -H -[tu]lnp` or
+/// `netstat -[tu]lnp` output and tag the resulting `HostListener`
+/// with the supplied proto. The line shape is identical between
+/// TCP and UDP so the parser is shared — only the caller knows
+/// which probe produced this row.
+pub(crate) fn parse_listener_line_with_proto(line: &str, proto: &str) -> Option<HostListener> {
+    // ss -H -tlnp / -ulnp output (one socket per line):
     //   LISTEN 0  4096  0.0.0.0:22  0.0.0.0:*  users:(("sshd",pid=1,fd=3))
-    // netstat -tlnp output:
+    //   UNCONN 0  0     0.0.0.0:53  0.0.0.0:*  users:(("dnsmasq",pid=...))
+    // netstat -tlnp / -ulnp output:
     //   tcp  0  0  0.0.0.0:22  0.0.0.0:*  LISTEN  1/sshd
+    //   udp  0  0  0.0.0.0:53  0.0.0.0:*          1/dnsmasq
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -1229,10 +1283,6 @@ pub(crate) fn parse_listener_line(line: &str) -> Option<HostListener> {
         .find(|t| t.contains(':') && !t.contains("users:"))?;
     let port_str = bind.rsplit(':').next()?;
     let port: u16 = port_str.parse().ok()?;
-
-    // Both `ss -tln` and `netstat -tln` filter to TCP, so we always tag
-    // these listeners as `tcp`. UDP discovery is deferred.
-    let proto = "tcp";
 
     let process = extract_process(line);
     Some(HostListener {
@@ -1418,17 +1468,49 @@ mod tests {
     #[test]
     fn parse_ss_line() {
         let l = "LISTEN 0  4096  0.0.0.0:22  0.0.0.0:*  users:((\"sshd\",pid=1,fd=3))";
-        let r = parse_listener_line(l).unwrap();
+        let r = parse_listener_line_with_proto(l, "tcp").unwrap();
         assert_eq!(r.port, 22);
+        assert_eq!(r.proto, "tcp");
         assert_eq!(r.process.as_deref(), Some("sshd"));
     }
 
     #[test]
     fn parse_netstat_line() {
         let l = "tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN      42/myapp";
-        let r = parse_listener_line(l).unwrap();
+        let r = parse_listener_line_with_proto(l, "tcp").unwrap();
         assert_eq!(r.port, 8080);
+        assert_eq!(r.proto, "tcp");
         assert_eq!(r.process.as_deref(), Some("myapp"));
+    }
+
+    // L9 (v0.1.3): UDP-shaped probe rows from `ss -H -ulnp` and
+    // `netstat -ulnp`. The line shape is identical between TCP and
+    // UDP; the proto comes from the caller.
+    #[test]
+    fn l9_parse_ss_udp_line() {
+        let l = "UNCONN 0  0  0.0.0.0:53  0.0.0.0:*  users:((\"dnsmasq\",pid=99,fd=4))";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 53);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("dnsmasq"));
+    }
+
+    #[test]
+    fn l9_parse_netstat_udp_line() {
+        let l = "udp        0      0 0.0.0.0:514             0.0.0.0:*                           7/rsyslogd";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 514);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("rsyslogd"));
+    }
+
+    #[test]
+    fn l9_parse_ipv6_udp_bind() {
+        let l = "UNCONN 0  0  [::]:5353  [::]:*  users:((\"avahi\",pid=42,fd=5))";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 5353);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("avahi"));
     }
 
     #[test]

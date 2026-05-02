@@ -7795,7 +7795,7 @@ fn write_profile_with_compose(
     // and produces a non-parsing profile. Build the YAML body via
     // line-by-line concat so each row carries its exact leading spaces.
     let mut body = String::new();
-    body.push_str(&format!("schema_version: 1\n"));
+    body.push_str("schema_version: 1\n");
     body.push_str(&format!("namespace: {ns}\n"));
     body.push_str(&format!("host: {ns}.example.invalid\n"));
     body.push_str("discovered_at: 2099-01-01T00:00:00+00:00\n");
@@ -8125,4 +8125,230 @@ fn l8_bundle_compose_step_rejects_multiple_bodies() {
         .assert()
         .failure()
         .stderr(contains("multiple bodies").or(contains("exactly one")));
+}
+
+// -----------------------------------------------------------------------------
+// L9 — UDP listener probe + --proto filter on `inspect ports`.
+//
+// Pre-L9 the host-listener probe scanned only TCP, so DNS / mDNS / syslog /
+// IPSec / WireGuard endpoints were invisible to `inspect ports` and `inspect
+// status`. v0.1.3 runs both probes (ss -[tu]lnp with netstat fallback), tags
+// every record with `proto`, and adds a `--proto tcp|udp|all` filter on
+// `inspect ports`.
+//
+// These tests cover the user-visible surface against the in-process mock:
+// the verb runs both probes by default, narrows correctly under --proto, the
+// PROTO column / JSON `proto` field appears, and `--port` composes with
+// `--proto`.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn l9_ports_default_runs_both_probes_and_renders_proto_prefix() {
+    // The verb's default (no --proto) emits both probes in one ssh
+    // round-trip with `--- tcp ---` / `--- udp ---` markers. The
+    // mock matches on substrings of the rendered command.
+    let mock = json!([
+        {
+            "match": "--- tcp ---",
+            "stdout":
+                "--- tcp ---\n\
+                 LISTEN   0   128   0.0.0.0:22    0.0.0.0:*\n\
+                 LISTEN   0   4096  0.0.0.0:8080  0.0.0.0:*\n\
+                 --- udp ---\n\
+                 UNCONN   0   0     0.0.0.0:53    0.0.0.0:*\n\
+                 UNCONN   0   0     0.0.0.0:514   0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb.cmd().args(["ports", "arte"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("[tcp]") && stdout.contains("0.0.0.0:22"),
+        "expected [tcp] prefix on TCP rows: {stdout}"
+    );
+    assert!(
+        stdout.contains("[udp]") && stdout.contains("0.0.0.0:53"),
+        "expected [udp] prefix on UDP rows: {stdout}"
+    );
+}
+
+#[test]
+fn l9_ports_proto_udp_narrows_to_udp_rows() {
+    // With --proto udp, the rendered command must include the udp
+    // probe and skip the tcp probe; the mock returns udp-shaped
+    // output and the verb must surface it with [udp] prefixes.
+    let mock = json!([
+        {
+            "match": "--- udp ---",
+            "stdout":
+                "--- udp ---\n\
+                 UNCONN   0   0   0.0.0.0:53    0.0.0.0:*  users:((\"dnsmasq\",pid=99,fd=4))\n\
+                 UNCONN   0   0   0.0.0.0:514   0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["ports", "arte", "--proto", "udp"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("[udp]") && stdout.contains("0.0.0.0:53"),
+        "expected udp DNS row: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[tcp]"),
+        "expected NO tcp rows under --proto udp: {stdout}"
+    );
+}
+
+#[test]
+fn l9_ports_proto_tcp_excludes_udp_rows() {
+    let mock = json!([
+        {
+            "match": "--- tcp ---",
+            "stdout":
+                "--- tcp ---\n\
+                 LISTEN   0   128   0.0.0.0:22    0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["ports", "arte", "--proto", "tcp"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("[tcp]"),
+        "expected tcp rows under --proto tcp: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[udp]"),
+        "must not render [udp] rows: {stdout}"
+    );
+}
+
+#[test]
+fn l9_ports_proto_invalid_value_rejected_by_clap() {
+    let sb = Sandbox::new(json!([]));
+    write_minimal_arte(&sb);
+    sb.cmd()
+        .args(["ports", "arte", "--proto", "sctp"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid value").or(contains("possible values")));
+}
+
+#[test]
+fn l9_ports_json_envelope_carries_proto_field() {
+    let mock = json!([
+        {
+            "match": "--- tcp ---",
+            "stdout":
+                "--- tcp ---\n\
+                 LISTEN   0   128   0.0.0.0:22    0.0.0.0:*\n\
+                 --- udp ---\n\
+                 UNCONN   0   0     0.0.0.0:53    0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["ports", "arte", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("\"proto\":\"tcp\"") || stdout.contains("\"proto\": \"tcp\""),
+        "json envelope must carry proto=tcp on TCP rows: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"proto\":\"udp\"") || stdout.contains("\"proto\": \"udp\""),
+        "json envelope must carry proto=udp on UDP rows: {stdout}"
+    );
+}
+
+#[test]
+fn l9_ports_proto_composes_with_port_filter() {
+    let mock = json!([
+        {
+            "match": "--- udp ---",
+            "stdout":
+                "--- udp ---\n\
+                 UNCONN   0   0   0.0.0.0:53    0.0.0.0:*\n\
+                 UNCONN   0   0   0.0.0.0:514   0.0.0.0:*\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let assert = sb
+        .cmd()
+        .args(["ports", "arte", "--proto", "udp", "--port", "53"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("0.0.0.0:53"),
+        "expected matching DNS row: {stdout}"
+    );
+    assert!(
+        !stdout.contains("0.0.0.0:514"),
+        "non-matching syslog row must be filtered: {stdout}"
+    );
+}
+
+#[test]
+fn l9_ports_help_documents_proto_flag() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["ports", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("--proto"),
+        "ports --help must list --proto: {stdout}"
+    );
+    assert!(
+        stdout.contains("udp") && stdout.contains("tcp"),
+        "ports --help must reference both protos: {stdout}"
+    );
+}
+
+#[test]
+fn l9_help_topic_discovery_documents_udp_listeners() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["help", "discovery"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("UDP LISTENERS"),
+        "discovery topic must surface the UDP coverage section: {stdout}"
+    );
+    assert!(
+        stdout.contains("ss -ulnp") || stdout.contains("ss -uln"),
+        "discovery topic must mention the udp probe command: {stdout}"
+    );
+}
+
+#[test]
+fn l9_help_search_finds_udp_probe() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["help", "--search", "udp"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.to_ascii_lowercase().contains("udp"),
+        "search for 'udp' must surface the L9 surface: {stdout}"
+    );
 }
