@@ -22,5 +22,6 @@ pub mod revert;
 pub mod search;
 pub mod setup;
 pub mod show;
+pub mod ssh;
 pub mod test;
 pub mod why;

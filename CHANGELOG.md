@@ -14,6 +14,121 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L4 — Password authentication, extended session TTL, and audited
+  `inspect ssh add-key` migration helper.** v0.1.2 onboarding
+  feedback: legacy boxes and locked-down bastions that only accept
+  password auth had no first-class path through `inspect`; operators
+  were shelling out to plain `ssh` and losing the discovery cache,
+  ControlMaster reuse, and audit trail. v0.1.3 closes the gap with
+  three coupled additions.
+  - **Profile schema.** Three new `Option<...>` fields on
+    `NamespaceConfig` (`auth = "key"|"password"`, `password_env`,
+    `session_ttl`); `serde(default)` + `skip_serializing_if`, so
+    pre-L4 `~/.inspect/servers.toml` round-trips byte-identical.
+    `validate()` rejects unknown auth modes ("kerberos" → loud
+    config error), refuses `password_env` without
+    `auth = "password"` (no silent semantic flip from a typo),
+    parses `session_ttl` via the existing `ssh::ttl::parse_ttl`,
+    and hard-caps any value above 24h so a forgotten laptop cannot
+    hold a live remote session indefinitely.
+  - **Password auth at connect.** New `AuthSelection.password_auth`
+    + `AuthSelection.password_env` plus `AuthMode::{EnvPassword,
+    InteractivePassword}` carry the mode through `start_master` in
+    `src/ssh/master.rs`. The password branch skips the agent / key
+    attempt entirely (forces `PubkeyAuthentication=no`,
+    `PreferredAuthentications=password`, and
+    `NumberOfPasswordPrompts=1` at the ssh layer) and reuses the
+    existing `SSH_ASKPASS` pipeline for both env-var and
+    interactive paths. Up to `PASSWORD_MAX_ATTEMPTS = 3` interactive
+    attempts before aborting with a chained
+    `see: inspect help ssh` hint and per-attempt diagnostics. A
+    one-time per-namespace warning ("password auth is less secure
+    than key-based") fires on first successful password connect,
+    tracked via `~/.inspect/.password_warned/<ns>` so subsequent
+    connects stay quiet. The marker is cleared by
+    `inspect ssh add-key --apply` when it flips a namespace off
+    password auth, so re-onboarding the same namespace later
+    re-warns.
+  - **Session TTL plumbing.** New `TtlSource::{PerNamespace,
+    PasswordDefault}` variants and `resolve_with_ns(flag, per_ns,
+    password_auth)` in `src/ssh/ttl.rs` — priority chain
+    `--ttl flag` → `INSPECT_PERSIST_TTL env` → namespace
+    `session_ttl` → password-default 12h → codespace 4h / local 30m.
+    Cap is re-applied after resolution so `--ttl 48h legacy-box`
+    (where `legacy-box.auth = "password"`) is rejected the same way
+    `session_ttl = "48h"` is. Key auth is unchanged — only password
+    mode picks up the longer default and the cap.
+  - **`inspect ssh add-key <ns>` (audited write verb, L4).** New
+    `Ssh(SshArgs)` enum variant + `commands::ssh` module. Default
+    is dry-run; `--apply` performs the install + audit-log entry.
+    Without `--key`, generates a fresh ed25519 keypair at
+    `~/.ssh/inspect_<ns>_ed25519` (private 0600, public 0644);
+    `--key <path>` reuses an existing key but refuses if the
+    matching `.pub` is absent (no silent regeneration of operator
+    key material). Public-key install rides the open ssh master so
+    the operator's password is entered exactly once during the
+    migration; the install is idempotent
+    (`grep -F -x` + append-if-absent) and verifies by re-reading
+    `authorized_keys` after the write. Remote permissions are
+    normalized (`~/.ssh` 0700, `authorized_keys` 0600). After a
+    successful install, the verb prompts to rewrite
+    `~/.inspect/servers.toml` to `auth = "key"`,
+    `key_path = "<path>"` (drops `password_env` and
+    `session_ttl`). `--no-rewrite-config` skips the prompt; non-tty
+    stdin auto-declines (no config writes without explicit
+    confirmation). Audit shape:
+    `verb=ssh.add-key, target=<ns>,
+    args="[key_path=...] [generated=true|false] [installed=true]
+    [config_rewritten=true|false]"`, `revert.kind=command_pair`
+    documenting the manual `authorized_keys` remove (the verb does
+    not attempt to revoke automatically — that requires further
+    operator intent).
+  - **`inspect connections` surfaces the new state.** Extended row
+    schema with `auth` (`key`/`password`/`?`), `session_ttl`
+    (configured), and `expires_in` (upper bound — ControlPersist
+    resets on traffic so the real lifetime is at least this long;
+    measured against the socket's mtime). Both human and JSON
+    output get the new fields. The L4 spec literal said
+    `inspect connectivity` but `connections` is the SSH-session-state
+    verb (`connectivity` is the service-to-service network-edge
+    probe); the rationalization is documented in the commit body.
+  - **Help surface (load-bearing for agentic callers).** New
+    `LONG_SSH` cluster help and `LONG_SSH_ADD_KEY` per-sub help in
+    `src/cli.rs` document every flag, the audit-tag taxonomy, the
+    config-flip semantics, and the exit-code contract.
+    `src/help/content/ssh.md` rewritten with full credential-
+    resolution chains for both auth modes, password-auth migration
+    walkthrough, audit-entry shape, and security notes.
+    `VERB_TOPICS` gains `("ssh", &["ssh", "safety"])`.
+  - **Tests.** 13 inline unit tests in
+    `src/config/namespace.rs::tests::l4_*` (auth-mode validation,
+    `password_env` cross-field rule, `session_ttl` parsing + 24h
+    cap, merge precedence both directions); 5 in
+    `src/ssh/ttl.rs::tests::l4_*` (per-ns precedence, password
+    default, key auth unchanged, flag wins, 24h cap). 1 in
+    `src/commands/connections.rs::tests::l4_*` (compact duration
+    formatter for the `expires_in` column). 2 in
+    `src/commands/ssh.rs::tests` (default key path, pubkey-path
+    derivation). 11 acceptance tests in
+    `tests/phase_f_v013.rs::l4_*` (round-trip of password-auth
+    namespace through `show --json`; 24h cap surfaces at config
+    load with chained hint; `password_env` without
+    `auth = "password"` rejected; unknown auth mode rejected;
+    `add-key` dry-run preview for both auth modes;
+    `--no-rewrite-config` dry-run notice; `--apply` without live
+    session emits the chained `inspect connect <ns>` hint;
+    `--key` missing-pub rejection; help-topic surfaces add-key +
+    password auth; help-search finds the password-auth path;
+    `connections --json` empty-list invariant; default auth is
+    never serialized as `password`). Full suite green; the
+    interactive password prompt and remote install paths require a
+    real host and are exercised by the field-validation gate.
+  - **Sequencing note.** Cross-session passphrase persistence via
+    the OS keychain is L2 — the next item in the v0.1.3
+    implementation order. L4 lands first because it establishes
+    the password-auth + add-key path that L2 layers onto; both
+    ship in v0.1.3.
+
 - **F6 — First-class `inspect compose` verb cluster.** v0.1.2 field
   feedback ("no obvious `inspect compose` integration … first-class
   compose verbs would replace 80% of my `run` usage") — operators

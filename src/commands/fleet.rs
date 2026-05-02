@@ -593,14 +593,25 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
                 if matches!(check_socket(&sock, &target), MasterStatus::Alive) {
                     continue;
                 }
+                // L4 (v0.1.3): fleet prewarm honors per-namespace
+                // auth mode but never prompts (allow_interactive=false);
+                // a password-auth namespace without `password_env` set
+                // will fail prewarm fast and retry in the child.
+                let password_auth = resolved.config.auth.as_deref() == Some("password");
                 let auth = AuthSelection {
                     passphrase_env: resolved.config.key_passphrase_env.as_deref(),
                     allow_interactive: false,
                     skip_existing_mux_check: false,
+                    password_auth,
+                    password_env: resolved.config.password_env.as_deref(),
                 };
-                let ttl = crate::ssh::ttl::resolve(None)
-                    .map(|(t, _)| t)
-                    .unwrap_or_else(|_| "8h".to_string());
+                let ttl = crate::ssh::ttl::resolve_with_ns(
+                    None,
+                    resolved.config.session_ttl.as_deref(),
+                    Some(password_auth),
+                )
+                .map(|(t, _)| t)
+                .unwrap_or_else(|_| "8h".to_string());
                 if let Err(e) = start_master(&ns, &target, &ttl, auth) {
                     eprintln!("fleet: prewarm: ns '{ns}' will retry in child (reason: {e})");
                 }

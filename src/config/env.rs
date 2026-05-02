@@ -57,6 +57,14 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         // config-file only (the policy is rarely set per-invocation;
         // the file pattern matches F13 and F12).
         history: None,
+        // L4 (v0.1.3): auth / password_env / session_ttl are
+        // config-file only — same rationale as F12/F13/F18 (the
+        // policy rarely changes per invocation, and password
+        // material in env vars is what `password_env` itself names,
+        // so the env-override path is not where that value belongs).
+        auth: None,
+        password_env: None,
+        session_ttl: None,
     })
 }
 

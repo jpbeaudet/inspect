@@ -53,6 +53,25 @@ pub struct NamespaceConfig {
     /// transcript file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryNsOverride>,
+    /// L4 (v0.1.3): authentication mode. `Some("key")` (default
+    /// when `None`) uses the existing key/agent path; `Some("password")`
+    /// switches to interactive / `password_env`-sourced password auth
+    /// for legacy boxes and locked-down bastions that do not accept
+    /// keys. Any other value is rejected by `validate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// L4 (v0.1.3): name of the env var holding the SSH password
+    /// when `auth = "password"`. Never store the password itself on
+    /// disk. Falls back to an interactive prompt when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
+    /// L4 (v0.1.3): per-namespace `ControlPersist` override. Default
+    /// is `12h` for password-auth namespaces (vs. the existing 30m
+    /// local / 4h codespace defaults for key auth). Capped at `24h`
+    /// — `validate` rejects anything longer so a forgotten laptop
+    /// doesn't hold a live remote session indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ttl: Option<String>,
 }
 
 /// F18 (v0.1.3): per-namespace transcript policy override. See
@@ -105,6 +124,15 @@ impl NamespaceConfig {
             env,
             auto_reauth: other.auto_reauth.or(self.auto_reauth),
             history: other.history.clone().or_else(|| self.history.clone()),
+            auth: other.auth.clone().or_else(|| self.auth.clone()),
+            password_env: other
+                .password_env
+                .clone()
+                .or_else(|| self.password_env.clone()),
+            session_ttl: other
+                .session_ttl
+                .clone()
+                .or_else(|| self.session_ttl.clone()),
         }
     }
 
@@ -140,6 +168,36 @@ impl NamespaceConfig {
                         key: k.clone(),
                     });
                 }
+            }
+        }
+        // L4 (v0.1.3): auth must be exactly `key` or `password` when
+        // set; password_env requires auth=password to make sense;
+        // session_ttl must parse and be ≤ 24h.
+        if let Some(mode) = self.auth.as_deref() {
+            if mode != "key" && mode != "password" {
+                return Err(ConfigError::InvalidAuthMode {
+                    namespace: namespace.to_string(),
+                    value: mode.to_string(),
+                });
+            }
+        }
+        if self.password_env.is_some() && self.auth.as_deref() != Some("password") {
+            return Err(ConfigError::PasswordEnvWithoutPasswordAuth {
+                namespace: namespace.to_string(),
+            });
+        }
+        if let Some(ttl) = self.session_ttl.as_deref() {
+            let dur =
+                crate::ssh::ttl::parse_ttl(ttl).map_err(|e| ConfigError::InvalidSessionTtl {
+                    namespace: namespace.to_string(),
+                    value: ttl.to_string(),
+                    reason: e.to_string(),
+                })?;
+            if dur.as_secs() > 24 * 60 * 60 {
+                return Err(ConfigError::SessionTtlAboveCap {
+                    namespace: namespace.to_string(),
+                    value: ttl.to_string(),
+                });
             }
         }
         Ok(())
@@ -208,6 +266,9 @@ mod tests {
             env: None,
             auto_reauth: None,
             history: None,
+            auth: None,
+            password_env: None,
+            session_ttl: None,
         }
     }
 
@@ -256,5 +317,115 @@ mod tests {
         assert!(validate_namespace_name("").is_err());
         assert!(validate_namespace_name("-bad").is_err());
         assert!(validate_namespace_name("bad name").is_err());
+    }
+
+    // ---- L4 (v0.1.3): auth / password_env / session_ttl --------------------
+
+    #[test]
+    fn l4_auth_mode_defaults_to_key_when_unset() {
+        let c = cfg(Some("h"), Some("u"), None);
+        assert!(c.validate("ns").is_ok());
+        assert!(c.auth.is_none()); // None ⇒ "key" semantically; resolver/connect path handles the default.
+    }
+
+    #[test]
+    fn l4_auth_mode_accepts_key_and_password() {
+        for v in ["key", "password"] {
+            let mut c = cfg(Some("h"), Some("u"), None);
+            c.auth = Some(v.into());
+            assert!(c.validate("ns").is_ok(), "expected '{v}' to validate");
+        }
+    }
+
+    #[test]
+    fn l4_auth_mode_rejects_unknown() {
+        let mut c = cfg(Some("h"), Some("u"), None);
+        c.auth = Some("kerberos".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::InvalidAuthMode { value, .. }) if value == "kerberos"
+        ));
+    }
+
+    #[test]
+    fn l4_password_env_requires_password_auth() {
+        let mut c = cfg(Some("h"), Some("u"), None);
+        c.password_env = Some("LEGACY_BOX_PASS".into());
+        // No auth set ⇒ rejected.
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::PasswordEnvWithoutPasswordAuth { .. })
+        ));
+        // auth=key ⇒ rejected (password_env makes no sense for key auth).
+        c.auth = Some("key".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::PasswordEnvWithoutPasswordAuth { .. })
+        ));
+        // auth=password ⇒ accepted.
+        c.auth = Some("password".into());
+        assert!(c.validate("ns").is_ok());
+    }
+
+    #[test]
+    fn l4_session_ttl_accepts_well_formed_durations() {
+        for v in ["30m", "1h", "12h", "23h", "24h", "1440m", "86400s"] {
+            let mut c = cfg(Some("h"), Some("u"), None);
+            c.session_ttl = Some(v.into());
+            assert!(c.validate("ns").is_ok(), "expected '{v}' to validate");
+        }
+    }
+
+    #[test]
+    fn l4_session_ttl_rejects_garbage() {
+        let mut c = cfg(Some("h"), Some("u"), None);
+        c.session_ttl = Some("forever".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::InvalidSessionTtl { value, .. }) if value == "forever"
+        ));
+    }
+
+    #[test]
+    fn l4_session_ttl_caps_at_24h() {
+        for v in ["48h", "25h", "2d", "1500m", "86401s"] {
+            let mut c = cfg(Some("h"), Some("u"), None);
+            c.session_ttl = Some(v.into());
+            assert!(
+                matches!(
+                    c.validate("ns"),
+                    Err(ConfigError::SessionTtlAboveCap { value, .. }) if value == v
+                ),
+                "expected '{v}' to be rejected by 24h cap"
+            );
+        }
+    }
+
+    #[test]
+    fn l4_merge_preserves_l4_fields() {
+        let mut file = cfg(Some("h"), Some("u"), None);
+        file.auth = Some("password".into());
+        file.password_env = Some("LEGACY_BOX_PASS".into());
+        file.session_ttl = Some("12h".into());
+        let env = cfg(Some("h"), Some("u"), None);
+        let merged = file.merge_over(&env);
+        assert_eq!(merged.auth.as_deref(), Some("password"));
+        assert_eq!(merged.password_env.as_deref(), Some("LEGACY_BOX_PASS"));
+        assert_eq!(merged.session_ttl.as_deref(), Some("12h"));
+    }
+
+    #[test]
+    fn l4_env_overrides_l4_fields() {
+        let mut file = cfg(Some("h"), Some("u"), None);
+        file.auth = Some("key".into());
+        file.session_ttl = Some("4h".into());
+        let mut env = cfg(Some("h"), Some("u"), None);
+        env.auth = Some("password".into());
+        env.password_env = Some("ENV_PASS".into());
+        env.session_ttl = Some("12h".into());
+        let merged = file.merge_over(&env);
+        assert_eq!(merged.auth.as_deref(), Some("password"));
+        assert_eq!(merged.password_env.as_deref(), Some("ENV_PASS"));
+        assert_eq!(merged.session_ttl.as_deref(), Some("12h"));
     }
 }

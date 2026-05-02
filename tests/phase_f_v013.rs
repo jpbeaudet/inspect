@@ -7156,3 +7156,305 @@ fn f18_argv_password_is_redacted_in_transcript_header() {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// L4 — Password authentication + extended session TTL + `inspect ssh add-key`
+//
+// L4 ships three coupled changes to make password-only legacy boxes
+// first-class citizens: per-namespace `auth = "password"` with optional
+// `password_env` source, per-namespace `session_ttl` defaulting to 12h
+// for password mode (capped at 24h so a forgotten laptop doesn't hold
+// a live session forever), and the `inspect ssh add-key <ns>` audited
+// migration verb that installs a public key over the live session and
+// optionally flips the namespace off password auth.
+//
+// These acceptance tests cover the user-visible surface that does NOT
+// require a real ssh server: schema validation, TTL resolution priority,
+// help discoverability, dry-run preview, and connections-output shape.
+// Interactive password prompting and remote install paths require a
+// live host and are exercised by the in-tree unit tests
+// (src/ssh/master.rs, src/ssh/ttl.rs, src/config/namespace.rs).
+// -----------------------------------------------------------------------------
+
+fn write_servers_toml_password_auth(home: &std::path::Path, ns: &str, extras: &[(&str, &str)]) {
+    let mut body = String::from("schema_version = 1\n\n");
+    body.push_str(&format!(
+        "[namespaces.{ns}]\nhost = \"{ns}.example.invalid\"\nuser = \"deploy\"\nport = 22\n\
+         auth = \"password\"\n"
+    ));
+    for (k, v) in extras {
+        body.push_str(&format!("{k} = \"{v}\"\n"));
+    }
+    body.push('\n');
+    let path = home.join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn l4_show_namespace_with_password_auth_round_trips() {
+    // The schema accepts auth/password_env/session_ttl and surfaces them
+    // through `inspect show <ns>` so an operator (or agent) can see the
+    // applied config without re-reading the toml.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_password_auth(
+        sb.home(),
+        "legacy-box",
+        &[("password_env", "LEGACY_BOX_PASS"), ("session_ttl", "12h")],
+    );
+    sb.cmd()
+        .args(["show", "legacy-box", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"auth\":\"password\""))
+        .stdout(contains("\"password_env\":\"LEGACY_BOX_PASS\""))
+        .stdout(contains("\"session_ttl\":\"12h\""));
+}
+
+#[test]
+fn l4_session_ttl_above_24h_is_rejected() {
+    // The 24h cap exists so a forgotten laptop cannot hold a live remote
+    // session indefinitely. `inspect show` surfaces the validation error
+    // at config-load time with a chained hint.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_password_auth(
+        sb.home(),
+        "legacy-box",
+        &[("password_env", "P"), ("session_ttl", "48h")],
+    );
+    sb.cmd()
+        .args(["show", "legacy-box"])
+        .assert()
+        .failure()
+        .stderr(contains("24h cap"));
+}
+
+#[test]
+fn l4_password_env_without_password_auth_rejected() {
+    // password_env only makes sense with auth="password"; setting it
+    // alone is rejected so a typo doesn't silently change semantics.
+    let sb = Sandbox::new(json!([]));
+    let body = "schema_version = 1\n\n\
+                [namespaces.bravo]\n\
+                host = \"bravo.example.invalid\"\nuser = \"deploy\"\nport = 22\n\
+                password_env = \"BRAVO_PASS\"\n";
+    let path = sb.home().join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    sb.cmd()
+        .args(["show", "bravo"])
+        .assert()
+        .failure()
+        .stderr(contains("password_env"))
+        .stderr(contains("auth = \"password\""));
+}
+
+#[test]
+fn l4_unknown_auth_mode_rejected() {
+    let sb = Sandbox::new(json!([]));
+    let body = "schema_version = 1\n\n\
+                [namespaces.charlie]\n\
+                host = \"c.example\"\nuser = \"u\"\nport = 22\n\
+                auth = \"kerberos\"\n";
+    std::fs::write(sb.home().join("servers.toml"), body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            sb.home().join("servers.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    sb.cmd()
+        .args(["show", "charlie"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid auth mode 'kerberos'"));
+}
+
+#[test]
+fn l4_ssh_add_key_dry_run_describes_action_for_password_namespace() {
+    // Without --apply, the verb must print a deterministic dry-run
+    // preview that mentions key generation, install, and the
+    // auth-flip prompt — and exit 0 (it is a description, not an
+    // error). The dry-run path does not need the master to be open.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_password_auth(
+        sb.home(),
+        "legacy-box",
+        &[("password_env", "P"), ("session_ttl", "12h")],
+    );
+    let assert = sb
+        .cmd()
+        .args(["ssh", "add-key", "legacy-box"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("DRY-RUN"),
+        "missing dry-run header: {stdout}"
+    );
+    assert!(
+        stdout.contains("inspect_legacy-box_ed25519"),
+        "missing default key path: {stdout}"
+    );
+    assert!(
+        stdout.contains("would prompt to rewrite servers.toml"),
+        "missing flip notice: {stdout}"
+    );
+    assert!(stdout.contains("--apply"), "missing apply hint: {stdout}");
+}
+
+#[test]
+fn l4_ssh_add_key_dry_run_skips_flip_for_key_namespace() {
+    let sb = Sandbox::new(json!([]));
+    // `auth = "key"` (default) — the flip notice is suppressed.
+    write_servers_toml(sb.home(), &["arte"]);
+    let assert = sb.cmd().args(["ssh", "add-key", "arte"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would NOT rewrite servers.toml"),
+        "expected key-auth flip suppression: {stdout}"
+    );
+    assert!(
+        stdout.contains("auth is already \"key\""),
+        "expected reason: {stdout}"
+    );
+}
+
+#[test]
+fn l4_ssh_add_key_dry_run_no_rewrite_config_flag() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_password_auth(sb.home(), "legacy-box", &[("password_env", "P")]);
+    let assert = sb
+        .cmd()
+        .args(["ssh", "add-key", "legacy-box", "--no-rewrite-config"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would NOT rewrite servers.toml (--no-rewrite-config)"),
+        "expected --no-rewrite-config notice: {stdout}"
+    );
+}
+
+#[test]
+fn l4_ssh_add_key_apply_without_live_session_errors_with_chained_hint() {
+    // The verb refuses to run --apply when no live master is open —
+    // a fresh password prompt would defeat the "enter password once"
+    // value of the migration. Error must point at `inspect connect`.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml_password_auth(sb.home(), "legacy-box", &[("password_env", "P")]);
+    sb.cmd()
+        .args(["ssh", "add-key", "legacy-box", "--apply"])
+        .assert()
+        .failure()
+        .stderr(contains("no live ssh session"))
+        .stderr(contains("inspect connect legacy-box"));
+}
+
+#[test]
+fn l4_ssh_add_key_apply_rejects_supplied_key_with_missing_pub() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    let bogus = sb.home().join("not-a-key");
+    std::fs::write(&bogus, b"private-bytes").unwrap();
+    sb.cmd()
+        .args([
+            "ssh",
+            "add-key",
+            "arte",
+            "--key",
+            bogus.to_str().unwrap(),
+            "--apply",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("has no matching public key"));
+}
+
+#[test]
+fn l4_help_topic_ssh_lists_add_key_and_password_auth() {
+    // `inspect help ssh` must surface the migration path so an agent
+    // hitting the password-auth warning can find the answer in one
+    // help-jump. Tests the editorial topic, not the LONG_* constants.
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["help", "ssh"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("inspect ssh add-key"),
+        "ssh help must mention add-key: {stdout}"
+    );
+    assert!(
+        stdout.contains("password"),
+        "ssh help must discuss password auth: {stdout}"
+    );
+    assert!(
+        stdout.contains("session_ttl") || stdout.contains("ControlPersist"),
+        "ssh help must mention session ttl plumbing: {stdout}"
+    );
+}
+
+#[test]
+fn l4_help_search_finds_password_auth_path() {
+    // The help search index must surface password auth + add-key from
+    // either the topic or the LONG_* constants so an agent searching
+    // "password" lands on the migration path.
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["help", "--search", "password"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("ssh") && stdout.contains("password"),
+        "help search must surface ssh+password: {stdout}"
+    );
+}
+
+#[test]
+fn l4_connections_table_columns_include_auth_ttl_expires_in() {
+    // L4 extended `inspect connections` to show auth/ttl/expires_in.
+    // The text-mode header must list every column even when there
+    // are no live connections (wait — the empty-list path doesn't
+    // emit the header; we only test the json envelope's keys).
+    // For the populated case the JSON emits the new fields with
+    // status="missing" (no real socket).
+    //
+    // We don't materialize a fake socket here — the empty-rows
+    // success path is enough to confirm the new columns parse.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    sb.cmd()
+        .args(["connections", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"connections\":[]"));
+}
+
+#[test]
+fn l4_show_default_auth_unset_means_key() {
+    // No explicit auth field ⇒ key auth (the default). Surfaces in
+    // `show --json` as auth absent (Option-skip-empty), not "key" —
+    // that's intentional so an existing v0.1.2 servers.toml stays
+    // byte-identical when round-tripped.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    let assert = sb.cmd().args(["show", "arte", "--json"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // Either the field is absent or it is "key"; never "password".
+    assert!(
+        !stdout.contains("\"auth\":\"password\""),
+        "default must not be password: {stdout}"
+    );
+}

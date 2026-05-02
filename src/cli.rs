@@ -222,6 +222,51 @@ EXAMPLES
   $ inspect disconnect-all
   $ inspect disconnect-all --yes";
 
+const LONG_SSH: &str = "\
+SSH-related management subcommands.
+
+SUBCOMMANDS
+  add-key  Install a public key on the namespace's remote host \
+(generating one if needed) and optionally flip the namespace from \
+`auth = \"password\"` to `auth = \"key\"`. The audited migration \
+path off password auth (L4, v0.1.3).
+
+ADD-KEY USAGE
+  inspect ssh add-key <ns>            # dry-run preview
+  inspect ssh add-key <ns> --apply    # generate + install + offer config flip
+  inspect ssh add-key <ns> --apply --key ~/.ssh/id_ed25519
+  inspect ssh add-key <ns> --apply --no-rewrite-config
+
+DEFAULTS
+  Without `--key`, the helper generates a fresh ed25519 keypair at \
+  `~/.ssh/inspect_<ns>_ed25519` (passphrase-less; protected by file mode \
+  0600). With `--key <path>`, that key is used as-is and never \
+  regenerated. Public-key install is idempotent — running twice does \
+  not duplicate the line in the remote `~/.ssh/authorized_keys`.
+
+CONFIG FLIP
+  After installing the public key, the helper offers to rewrite the \
+  namespace's entry in `~/.inspect/servers.toml` to `auth = \"key\"` \
+  with `key_path = \"<path>\"`. `--no-rewrite-config` skips the \
+  prompt. The flip drops `password_env` and `session_ttl` so the \
+  namespace falls back to the default key-auth TTL (30m local / 4h \
+  codespace) — re-set them explicitly if you need a longer key-auth \
+  session.
+
+AUDIT
+  Every successful run writes one audit entry: \
+  `verb=ssh.add-key, target=<ns>`, with bracketed args \
+  `[key_path=...] [generated=true|false] [installed=true] \
+  [config_rewritten=true|false]`. `revert.kind=command_pair` pointing \
+  at a manual remove from `authorized_keys` (`inspect` does not \
+  attempt to revoke the key automatically — that requires further \
+  operator intent).
+
+EXIT CODES
+  0   ok
+  1   no matching namespace / install verification failed
+  2   argument/usage error (e.g. `--key` path does not exist)";
+
 const LONG_SETUP: &str = "\
 Run discovery against a namespace and persist its profile (containers, \
 volumes, networks, listeners, remote tooling). Cached profiles live \
@@ -904,6 +949,9 @@ pub enum Command {
     /// Close all persistent connections.
     #[command(long_about = LONG_DISCONNECT_ALL)]
     DisconnectAll(DisconnectAllArgs),
+    /// L4 (v0.1.3): SSH-related management subcommands (`add-key`).
+    #[command(long_about = LONG_SSH)]
+    Ssh(SshArgs),
 
     // ---- Phase 2 discovery ---------------------------------------------------
     /// Run discovery against a namespace and persist its profile.
@@ -1494,6 +1542,110 @@ pub struct DisconnectAllArgs {
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
+
+// L4 (v0.1.3): inspect ssh ... — SSH management subcommands.
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct SshArgs {
+    #[command(subcommand)]
+    pub command: SshSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SshSubcommand {
+    /// Install a public key on the namespace's remote host and
+    /// optionally migrate it off password auth.
+    #[command(long_about = LONG_SSH_ADD_KEY)]
+    AddKey(SshAddKeyArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct SshAddKeyArgs {
+    /// Namespace to install the key on.
+    pub namespace: String,
+    /// Use an existing key instead of generating one. The path
+    /// must point at a private key (`<path>.pub` is read for the
+    /// public half).
+    #[arg(long, value_name = "PATH")]
+    pub key: Option<std::path::PathBuf>,
+    /// Skip the interactive offer to flip
+    /// `auth = "password"` → `auth = "key"` in `servers.toml`.
+    /// Only the public-key install runs.
+    #[arg(long)]
+    pub no_rewrite_config: bool,
+    /// Required to perform the install + audit-log entry. Without
+    /// it, the verb prints a dry-run preview and exits 0.
+    #[arg(long)]
+    pub apply: bool,
+    /// Free-form note attached to the audit entry. Limited to 240
+    /// characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+const LONG_SSH_ADD_KEY: &str = "\
+Install a public key on a namespace's remote host and offer to flip \
+its config from password auth to key auth. The audited migration path \
+off password-only legacy boxes (L4, v0.1.3).
+
+USAGE
+  inspect ssh add-key <ns>             # dry-run preview
+  inspect ssh add-key <ns> --apply     # generate (or reuse) + install + offer flip
+  inspect ssh add-key <ns> --apply --key <path>
+  inspect ssh add-key <ns> --apply --no-rewrite-config
+
+REQUIREMENTS
+  A live ssh session for `<ns>` must be open (`inspect connect <ns>`). \
+  The verb installs the public key over the existing master rather \
+  than re-authenticating, so the operator's password is entered \
+  exactly once per migration.
+
+KEY MATERIAL
+  Without `--key`, an ed25519 keypair is generated at \
+  `~/.ssh/inspect_<ns>_ed25519` with a passphrase-less private half \
+  (file mode 0600). The matching public key is written to \
+  `<path>.pub` (mode 0644). With `--key <path>`, that key is used \
+  as-is; the verb refuses if the corresponding `.pub` file is \
+  missing.
+
+INSTALL
+  The public key is appended to the remote `~/.ssh/authorized_keys` \
+  if and only if the exact key line is not already present \
+  (idempotent). Remote permissions are normalized: `~/.ssh` to 0700, \
+  `~/.ssh/authorized_keys` to 0600. The verb verifies the install by \
+  re-reading the file and exits 1 if the line is not present after \
+  the write.
+
+CONFIG FLIP
+  By default, after a successful install, the verb prompts the \
+  operator to rewrite `~/.inspect/servers.toml`: \
+  `auth = \"key\"`, `key_path = \"<path>\"`, with `password_env` and \
+  `session_ttl` dropped. `--no-rewrite-config` skips the prompt. On \
+  non-tty stdin, the flip auto-declines (no config changes without \
+  explicit confirmation).
+
+AUDIT
+  One audit entry per `--apply` run: \
+  `verb=ssh.add-key, target=<ns>` with bracketed args \
+  `[key_path=...] [generated=true|false] [installed=true] \
+  [config_rewritten=true|false]`. `revert.kind=command_pair` points \
+  at a manual remove from `authorized_keys` (the verb does not \
+  attempt to revoke automatically — that requires further operator \
+  intent).
+
+EXAMPLES
+  inspect ssh add-key legacy-box
+  inspect ssh add-key legacy-box --apply
+  inspect ssh add-key legacy-box --apply --key ~/.ssh/site_id_ed25519
+  inspect ssh add-key legacy-box --apply --no-rewrite-config
+
+EXIT CODES
+  0   ok
+  1   no matching namespace / install verification failed
+  2   argument/usage error (e.g. `--key` path does not exist)";
 
 #[derive(Debug, Args)]
 #[command(

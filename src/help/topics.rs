@@ -212,6 +212,10 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("disconnect", &["ssh", "discovery"]),
     ("connections", &["ssh", "discovery"]),
     ("disconnect-all", &["ssh", "discovery"]),
+    // L4 (v0.1.3): the new `inspect ssh ...` family. Cross-links into
+    // the ssh editorial topic (which gained the password-auth +
+    // add-key sections in L4) and safety (audit-log shape).
+    ("ssh", &["ssh", "safety"]),
     // Aliases.
     ("alias", &["aliases", "selectors", "search"]),
     // F6 (v0.1.3): the compose verb cluster cross-links into the

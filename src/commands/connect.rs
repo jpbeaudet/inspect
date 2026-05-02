@@ -35,13 +35,29 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     resolved.config.validate(&resolved.name)?;
     let target = SshTarget::from_resolved(&resolved)?;
 
-    let (ttl, ttl_source) = ssh::ttl::resolve(args.ttl.as_deref())?;
+    // L4 (v0.1.3): password-auth namespaces get a 12h ControlPersist
+    // default and a 24h cap on operator-supplied --ttl. Per-namespace
+    // session_ttl slots between the env override and the auth-mode
+    // default.
+    let password_auth = resolved.config.auth.as_deref() == Some("password");
+    let (ttl, ttl_source) = ssh::ttl::resolve_with_ns(
+        args.ttl.as_deref(),
+        resolved.config.session_ttl.as_deref(),
+        Some(password_auth),
+    )?;
 
     let allow_interactive = !args.non_interactive;
     let passphrase_env = if args.interactive {
         None
     } else {
         resolved.config.key_passphrase_env.as_deref()
+    };
+    // L4 (v0.1.3): in password mode, --interactive forces the prompt
+    // path the same way it forces the passphrase prompt for keys.
+    let password_env = if args.interactive {
+        None
+    } else {
+        resolved.config.password_env.as_deref()
     };
 
     let outcome = ssh::start_master(
@@ -52,6 +68,8 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
             passphrase_env,
             allow_interactive,
             skip_existing_mux_check: args.no_existing_mux,
+            password_auth,
+            password_env,
         },
     )
     .with_context(|| format!("connect '{}'", resolved.name))?;
@@ -376,9 +394,15 @@ pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
     let resolved = resolver::resolve(namespace)?;
     resolved.config.validate(&resolved.name)?;
     let target = SshTarget::from_resolved(&resolved)?;
-    let (ttl, _ttl_source) = ssh::ttl::resolve(None)?;
+    let password_auth = resolved.config.auth.as_deref() == Some("password");
+    let (ttl, _ttl_source) = ssh::ttl::resolve_with_ns(
+        None,
+        resolved.config.session_ttl.as_deref(),
+        Some(password_auth),
+    )?;
     let allow_interactive = is_local_stdin_tty();
     let passphrase_env = resolved.config.key_passphrase_env.as_deref();
+    let password_env = resolved.config.password_env.as_deref();
     // Tear down whatever is left of the dead master so start_master
     // re-opens a fresh ControlPersist channel.
     let socket = ssh::socket_path(&resolved.name);
@@ -391,6 +415,8 @@ pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
             passphrase_env,
             allow_interactive,
             skip_existing_mux_check: false,
+            password_auth,
+            password_env,
         },
     )
     .map(|_| ())

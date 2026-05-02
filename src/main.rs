@@ -129,6 +129,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Disconnect(args) => commands::disconnect::run(args),
         Command::Connections(args) => commands::connections::run(args),
         Command::DisconnectAll(args) => commands::disconnect_all::run(args),
+        Command::Ssh(args) => commands::ssh::run(args),
         Command::Setup(args) | Command::Discover(args) => commands::setup::run(args),
         Command::Profile(args) => commands::profile::run(args),
         Command::Alias(args) => commands::alias::run(args),

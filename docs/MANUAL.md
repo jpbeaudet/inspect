@@ -1933,6 +1933,136 @@ envelope per `run`/`exec` invocation:
  "phase":"summary","ok":0,"failed":1,"failure_class":"transport_stale"}
 ```
 
+### 15.3 Password authentication and `inspect ssh add-key` (L4, v0.1.3)
+
+Some legacy or locked-down hosts only accept SSH password
+authentication. v0.1.3 promotes this from "shell out to plain ssh
+and lose the audit trail" to a first-class onboarding path with
+its own audited migration helper.
+
+**Configure the namespace.** In `~/.inspect/servers.toml`:
+
+```toml
+[namespaces.legacy-box]
+host = "legacy.internal"
+user = "admin"
+auth = "password"                # default is "key"; opt in here
+password_env = "LEGACY_BOX_PASS" # optional; falls back to interactive prompt
+session_ttl  = "12h"             # optional; default 12h for password auth, capped at 24h
+```
+
+`password_env` only applies when `auth = "password"`; configuring
+it under key auth is rejected at config-load time. `session_ttl`
+parses durations like `"30m"`, `"4h"`, `"12h"`, `"24h"`, `"3600s"`;
+anything above 24h is rejected so a forgotten session does not
+stay live indefinitely. Key auth is unchanged — only password
+mode picks up the longer default and the 24h cap.
+
+**Connect.** With `LEGACY_BOX_PASS` exported, `inspect connect
+legacy-box` consumes it once and opens a 12h `ControlPersist`
+master. Without the env var (or with `inspect connect --interactive`
+to bypass it), `inspect` prompts on the controlling tty up to three
+times before aborting with a chained `see: inspect help ssh` hint.
+Every `inspect <verb> legacy-box/...` for the rest of the TTL
+window rides the same master without re-prompting.
+
+`inspect` emits a one-time warning on the first password connect
+per namespace:
+
+```
+warning: password auth is less secure than key-based.
+Run 'inspect ssh add-key legacy-box' to migrate.
+```
+
+The marker `~/.inspect/.password_warned/<ns>` is touched after the
+warning fires so subsequent connects stay quiet. `inspect ssh
+add-key --apply` clears the marker when it flips a namespace off
+password auth, so re-onboarding the same namespace later re-warns.
+
+**Implementation note.** The password branch forces
+`PubkeyAuthentication=no`, `PreferredAuthentications=password`,
+and `NumberOfPasswordPrompts=1` at the ssh layer, so an
+agent-loaded key cannot pre-empt the operator's intent to
+authenticate by password and the per-call retry loop in
+`inspect connect` controls the total attempt count.
+
+**Migrate to keys.** Once the password session is open, run:
+
+```sh
+$ inspect ssh add-key legacy-box                 # dry-run preview
+DRY-RUN: inspect ssh add-key legacy-box would: would generate
+  ed25519 keypair at /home/op/.ssh/inspect_legacy-box_ed25519 and
+  install /home/op/.ssh/inspect_legacy-box_ed25519.pub; would prompt
+  to rewrite servers.toml: auth="key", drop password_env/session_ttl
+hint: re-run with --apply to perform.
+
+$ inspect ssh add-key legacy-box --apply         # do it
+Flip namespace 'legacy-box' to auth="key" with key_path="..."
+and drop password_env/session_ttl? [y/N] y
+note: servers.toml updated — auth="key", key_path="..."
+SUMMARY: ssh.add-key on 'legacy-box' — installed=true generated=true config_rewritten=true
+DATA:
+  key_path:   /home/op/.ssh/inspect_legacy-box_ed25519
+  pubkey:     /home/op/.ssh/inspect_legacy-box_ed25519.pub
+  audit_id:   1746...
+NEXT:    inspect connect legacy-box (now key auth)
+```
+
+The verb generates an ed25519 keypair (or accepts an existing one
+via `--key <path>`), installs the public half on the remote
+`~/.ssh/authorized_keys` over the open ssh master (idempotent —
+running twice does not duplicate the line), normalizes remote
+permissions, verifies the install by re-reading the file, and
+optionally rewrites the namespace's `servers.toml` entry to flip
+to key auth. Key flags:
+
+| Flag | Effect |
+|---|---|
+| `--apply` | required to perform the install + audit-log entry |
+| `--key <path>` | reuse an existing private key (refuses if `<path>.pub` is missing) |
+| `--no-rewrite-config` | install only; skip the auth-flip prompt |
+| `--reason <text>` | attached to the audit entry (≤240 chars) |
+
+The verb refuses `--apply` when no live ssh session is open — a
+fresh password prompt would defeat the "enter password once"
+value of the migration. The error points at `inspect connect <ns>`.
+On non-tty stdin, the auth-flip auto-declines (no config writes
+without explicit confirmation).
+
+**Audit shape.** Every `--apply` run produces one entry:
+
+```json
+{"verb":"ssh.add-key","selector":"legacy-box",
+ "args":"[key_path=/home/op/.ssh/inspect_legacy-box_ed25519] \
+[generated=true] [installed=true] [config_rewritten=true]",
+ "exit":0,"applied":true,
+ "revert":{"kind":"command_pair","preview":"inspect ssh add-key legacy-box --apply",
+           "command":"ssh legacy-box -- 'sed -i \"\\|<pubkey-line>|d\" ~/.ssh/authorized_keys'"}}
+```
+
+`revert.kind=command_pair` documents the manual `authorized_keys`
+remove. The verb does not attempt to revoke the public key
+automatically — that requires further operator intent (and is
+exactly the sort of "automatic key revocation as a side effect"
+that operators want to be explicit about).
+
+**Session state in `inspect connections`.** The session-state verb
+gains three columns to surface the L4 contract at a glance:
+
+```
+$ inspect connections
+SUMMARY: 2 connection(s)
+DATA:
+  NAMESPACE             HOST                              STATUS    AUTH      TTL    EXPIRES_IN SOCKET
+  arte                  deploy@arte.example.invalid:22    alive     key       30m    14m02s     /home/op/.inspect/sockets/arte.sock
+  legacy-box            admin@legacy.internal:22          alive     password  12h    11h47m     /home/op/.inspect/sockets/legacy-box.sock
+```
+
+`expires_in` is an upper bound: ControlPersist resets on every
+traffic, so the real lifetime is at least this long. `--json`
+output gains matching `auth` / `session_ttl` / `expires_in` keys
+on every connection record.
+
 ---
 
 ## 16. Configuration reference

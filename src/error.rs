@@ -77,6 +77,34 @@ pub enum ConfigError {
     )]
     InvalidEnvKey { namespace: String, key: String },
 
+    #[error(
+        "invalid auth mode '{value}' for namespace '{namespace}': expected \
+         \"key\" (default) or \"password\""
+    )]
+    InvalidAuthMode { namespace: String, value: String },
+
+    #[error(
+        "namespace '{namespace}': password_env is only meaningful with \
+         auth = \"password\"; either set auth = \"password\" or unset password_env"
+    )]
+    PasswordEnvWithoutPasswordAuth { namespace: String },
+
+    #[error(
+        "invalid session_ttl '{value}' for namespace '{namespace}': {reason} \
+         (use a duration like \"12h\", \"30m\", \"3600s\")"
+    )]
+    InvalidSessionTtl {
+        namespace: String,
+        value: String,
+        reason: String,
+    },
+
+    #[error(
+        "session_ttl '{value}' for namespace '{namespace}' exceeds the 24h cap; \
+         pick a shorter duration so a forgotten session does not stay live indefinitely"
+    )]
+    SessionTtlAboveCap { namespace: String, value: String },
+
     #[error("config IO error at '{path}': {source}")]
     Io {
         path: String,

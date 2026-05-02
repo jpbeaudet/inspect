@@ -57,6 +57,9 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
         key_path: Some(key_path),
         key_passphrase_env,
         key_inline: None,
+        auth: None,
+        password_env: None,
+        session_ttl: None,
     };
     cfg.validate(&args.namespace)?;
 
