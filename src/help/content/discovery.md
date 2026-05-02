@@ -35,6 +35,37 @@ DRIFT DETECTION
   appears on stderr (it never blocks the foreground command). Run
   `inspect setup <ns>` to refresh.
 
+  v0.1.2 (B4) introduced a structured `DriftDiff` carrying
+  containers added / removed / image-changed.
+
+  L10 (v0.1.3) extends `DriftDiff` with a `port_changes` array.
+  Four kinds:
+
+    added     — port present in live, absent in cached
+    removed   — port present in cached, absent in live
+    bind      — same (container_port, proto), different host bind
+                (e.g. 5432:5432 → 5433:5432 to dodge a collision)
+    proto     — same (host, container_port), different proto
+                (e.g. a DNS service flipped from /tcp to /udp)
+
+  The cheap probe captures `{{.Ports}}` per container in the same
+  ssh round-trip; the parser in `discovery::ports_parse` handles
+  IPv4 + IPv6 binds, ranges (`8000-8002->8000-8002/tcp` expands to
+  3 records), unbound exposed ports (`5432/tcp` records `host=0`),
+  and comma-separated lists. Container-level adds / removes do
+  NOT also fan their per-port deltas into `port_changes` — that
+  would double-count the operator's intent.
+
+  `inspect setup --check-drift` text output gains a port block:
+
+    ⚓2 port-level changes:
+      db   bind  (5432:5432/tcp → 5433:5432/tcp)
+      dns  proto (53:53/tcp → 53:53/udp)
+
+  `--json` envelope gains `port_changes: [{container, kind,
+  before, after}]` so agents branch on `kind` without re-parsing
+  the human form.
+
 REFRESH
   Full re-discovery only on explicit `inspect setup <ns>` or when
   the cache TTL expires (default 7 days). Local edits to the profile

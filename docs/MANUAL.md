@@ -171,6 +171,75 @@ cannot talk to the Docker socket. Re-run `inspect add arte` and adjust
 the `docker_socket` (or add the user to the `docker` group on the
 remote).
 
+### 3.6 Drift detection (B4 + L10, v0.1.3)
+
+`inspect setup --check-drift` compares the live host against the
+cached profile without re-discovering. Output is structured so
+agents can branch on it without parsing prose:
+
+- **Container-level (B4, v0.1.2)**: `added` / `removed` /
+  `changed` (image bumped in place, same container id).
+- **Port-level (L10, v0.1.3)**: `port_changes` array with four
+  `kind` values:
+
+  | kind | meaning | example |
+  |---|---|---|
+  | `added` | port present in live, absent in cached | new `:443/tcp` exposed |
+  | `removed` | port present in cached, absent in live | `:11211/tcp` closed |
+  | `bind` | same `(container_port, proto)`, different host | `5432:5432/tcp` → `5433:5432/tcp` (collision dodge) |
+  | `proto` | same `(host, container_port)`, different proto | DNS flipped from `:53/tcp` to `:53/udp` |
+
+Worked example:
+
+```sh
+$ inspect setup arte --check-drift
+SUMMARY: drifted (current=...  cached=...)
+DATA:
+  ~1 container changed:
+    api (img:1 → img:2)
+  ⚓2 port-level changes:
+    db   bind  (5432:5432/tcp → 5433:5432/tcp)
+    dns  proto (53:53/tcp → 53:53/udp)
+NEXT:    inspect setup arte    (refresh the cached profile)
+```
+
+`--json` emits the same structure as a stable envelope:
+
+```json
+{
+  "added": [], "removed": [],
+  "changed": [{"name":"api","from":"img:1","to":"img:2"}],
+  "port_changes": [
+    {"container":"db","kind":"bind",
+     "before":{"host":5432,"container":5432,"proto":"tcp"},
+     "after":{"host":5433,"container":5432,"proto":"tcp"}},
+    {"container":"dns","kind":"proto",
+     "before":{"host":53,"container":53,"proto":"tcp"},
+     "after":{"host":53,"container":53,"proto":"udp"}}
+  ]
+}
+```
+
+The cheap probe captures `{{.Ports}}` per container in the same
+ssh round-trip used for ids / names / images, so adding port-level
+diff costs zero extra round-trips. The parser handles every
+`docker ps` Ports shape collected from the field corpus: IPv4
+(`0.0.0.0:5432->5432/tcp`), bracketed IPv6 (`[::]:53->53/udp`),
+ranges (`0.0.0.0:8000-8002->8000-8002/tcp`, expanded to N records),
+unbound exposed ports (`5432/tcp`, recorded as `host: 0`), and
+comma-separated lists. Unrecognized tokens are silently dropped —
+better to under-report than to mis-report a port change that
+didn't happen.
+
+Container-level adds / removes do **not** also fan their per-port
+deltas into `port_changes` — the container-level entry implies
+its ports moved with it. Only containers present in **both**
+snapshots contribute to `port_changes`.
+
+UDP port changes flow through the same path as TCP (L9 made
+`proto: "udp"` first-class on the cached side; the parser already
+understood `/udp` tokens).
+
 ---
 
 ## 4. Selectors — addressing servers and services

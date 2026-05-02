@@ -221,18 +221,21 @@ mod tests {
     }
 
     #[test]
-    fn index_size_under_112kb() {
-        // Cap was raised 50 KB → 64 KB in v0.1.2 (bundle + watch topic
-        // prose), 64 KB → 80 KB in v0.1.3 (L7 redaction model
-        // documented across write / safety / why help), 80 KB →
-        // 96 KB in v0.1.3 (F18 transcript model added a 40-line
-        // SESSION TRANSCRIPTS section to safety.md), and 96 KB →
-        // 112 KB in v0.1.3 (L4 expanded ssh.md with the full
-        // password-auth + add-key migration walkthrough). Still
-        // small enough that the index loads instantly even on the
-        // smallest dev VMs.
+    fn index_size_under_128kb() {
+        // Cap raise history (only ever raised, never trimmed):
+        //   50 KB → 64 KB in v0.1.2 (bundle + watch topic prose)
+        //   64 KB → 80 KB in v0.1.3 (L7 redaction model)
+        //   80 KB → 96 KB in v0.1.3 (F18 transcript model)
+        //   96 KB → 112 KB in v0.1.3 (L4 ssh.md password-auth +
+        //                              add-key walkthrough)
+        //  112 KB → 128 KB in v0.1.3 (L9 UDP probe coverage in
+        //                              discovery.md, L10 drift
+        //                              port_changes contract +
+        //                              JSON envelope example)
+        // Still small enough that the index loads instantly even on
+        // the smallest dev VMs.
         let n = index_byte_size();
-        assert!(n <= 112 * 1024, "index is {n} bytes, exceeds 112 KB cap");
+        assert!(n <= 128 * 1024, "index is {n} bytes, exceeds 128 KB cap");
     }
 
     #[test]

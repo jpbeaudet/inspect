@@ -7,6 +7,7 @@
 
 pub mod drift;
 pub mod engine;
+pub mod ports_parse;
 pub mod probes;
 pub mod ssh_precheck;
 

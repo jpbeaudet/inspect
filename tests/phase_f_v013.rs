@@ -8352,3 +8352,62 @@ fn l9_help_search_finds_udp_probe() {
         "search for 'udp' must surface the L9 surface: {stdout}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// L10 — Port-level entries in DriftDiff.
+//
+// The parser (src/discovery/ports_parse.rs) and the diff layer
+// (src/discovery/drift.rs) carry their own comprehensive inline tests
+// (18 + 12). These acceptance tests cover the operator-visible surface:
+// help discoverability for the new `port_changes` contract.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn l10_help_topic_discovery_documents_port_changes() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["help", "discovery"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("port_changes"),
+        "discovery topic must surface the port_changes array: {stdout}"
+    );
+    // Each of the four kinds should be discoverable from one help-jump.
+    for kind in ["added", "removed", "bind", "proto"] {
+        assert!(
+            stdout.contains(kind),
+            "discovery topic must list kind={kind}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn l10_help_search_finds_drift_port_changes() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["help", "--search", "port_changes"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("port_changes"),
+        "search for 'port_changes' must surface the L10 surface: {stdout}"
+    );
+}
+
+#[test]
+fn l10_help_search_finds_bind_change_kind() {
+    // An operator who's looking at a `bind` kind in a JSON envelope
+    // should be able to find what it means via help search.
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["help", "--search", "bind"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("bind"),
+        "search for 'bind' must surface the L10 contract: {stdout}"
+    );
+}

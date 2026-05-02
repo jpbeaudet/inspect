@@ -14,6 +14,85 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L10 — Port-level entries in `DriftDiff` (`port_changes` array
+  with `Added` / `Removed` / `Bind` / `Proto` kinds).** The B4
+  drift differ surfaced container-level changes only — an operator
+  who reorganized a compose project from `5432:5432` to `5433:5432`
+  (dodging a port collision; a real-world common change) saw no
+  drift signal because every container was the same. v0.1.3 closes
+  the gap with structured port-level diffing in the same cheap
+  probe used for container ids.
+  - **`Ports` column parser.** New `src/discovery/ports_parse.rs`
+    handles every shape collected from the field corpus: IPv4 binds
+    (`0.0.0.0:5432->5432/tcp`), bracketed IPv6 binds
+    (`[::]:53->53/udp` and `[::1]:5353->5353/udp`), ranges
+    (`0.0.0.0:8000-8002->8000-8002/tcp` expands to 3 records),
+    unbound exposed ports (`5432/tcp` records `host: 0` to
+    distinguish from an actual `:0` bind), comma-separated lists,
+    and proto-less tokens (default `tcp`, matching docker's own
+    default). Each parsed token is sorted canonically by
+    `(container, proto, host)` so the diff layer compares
+    `Vec<Port>` by index without reorder. Unrecognized tokens
+    silently drop — better to under-report than mis-report (drift
+    detection is a "did anything change" surface; the worst class
+    of bug is "no, nothing changed" when something did).
+  - **Cheap probe extended.** `cheap_rows` now includes
+    `{{.Ports}}` in the `docker ps --format` template alongside the
+    existing `{{.ID}}\t{{.Names}}\t{{.Image}}`. Same ssh round-trip;
+    zero extra cost. Pre-L10 cached profiles deserialize unchanged
+    (the legacy 3-column case parses to `ports: vec![]`).
+  - **`DriftRow.fingerprint_line`** now folds the port set into the
+    SHA-256 fingerprint. A bind-only change (`5432:5432` →
+    `5433:5432`) flips the fingerprint and surfaces a drift signal —
+    pre-L10 it was silent because the fingerprint only saw
+    `id\tname\timage`.
+  - **`PortChangeKind` taxonomy.** Closed enum with four variants:
+    - `Added` — `before: None, after: Some(p)`
+    - `Removed` — `before: Some(p), after: None`
+    - `Bind` — same `(container_port, proto)`, different host
+    - `Proto` — same `(host, container_port)`, different proto
+    The naive set diff would surface a proto change as
+    `Removed(tcp) + Added(udp)`; a coalescing pass folds those into
+    one `Proto` entry when the host matches (the operator's intent
+    was "flip this port's transport", not "remove one and add
+    another").
+  - **Container-level vs port-level scope.** Containers entirely
+    added or removed surface in the existing `added` / `removed`
+    container-level lists and do NOT also fan their per-port deltas
+    into `port_changes` — that would double-count the operator's
+    intent. Only containers present in both snapshots contribute to
+    `port_changes`.
+  - **Output.** Human form gains a `⚓N port-level changes:` block
+    matching the existing `+N added` / `-N removed` / `~N changed`
+    shape; payloads render as `<host>:<container>/<proto>` (or
+    `exposed <container>/<proto>` when `host == 0`) so an
+    `inspect ports` confirmation requires no mental translation.
+    JSON envelope gains a `port_changes: [{container, kind, before,
+    after}]` array with `before` / `after` as either `null` or a
+    structured `{host, container, proto}` object.
+  - **Composes with L9.** UDP port changes flow through the same
+    path as TCP — L9 made `proto: "udp"` first-class on the cached
+    side, and the parser already understood `/udp` tokens. No
+    additional probe work needed.
+  - **Help surface.** `discovery.md` editorial topic gains a "DRIFT
+    DETECTION" expansion documenting the four `kind` values, the
+    container-level-vs-port-level scope rule, and the example
+    output. `MANUAL.md` §3.6 (new) walks the contract end-to-end
+    with the structured JSON envelope shape.
+  - **Tests.** 18 inline unit tests in
+    `src/discovery/ports_parse.rs::tests::l10_*` covering every
+    field-corpus shape (IPv4 / IPv6 / range / unbound / comma /
+    proto-less / mixed-proto / arity-mismatch / canonical sort /
+    legacy proto suffix / range with offset host:container). 12
+    inline tests in `src/discovery/drift.rs::tests::l10_*`
+    (port-added/removed/bind/proto each isolated; unchanged port
+    set yields empty `port_changes`; added-container does NOT
+    double-count; the spec's 5-container fixture produces exactly
+    4 entries; human form renders the port block; JSON envelope
+    includes the array; unbound port renders as `exposed N/proto`;
+    `DriftRow.fingerprint_line` includes ports). Full suite green:
+    28 suites, 618 unit + 256 acceptance, 0 failed.
+
 - **L9 — UDP listener probe in `discovery::probes` + `--proto` filter
   on `inspect ports`.** The host-listener probe pre-L9 scanned only
   TCP (`ss -tlnp` / `netstat -tlnp`), so UDP services on managed
