@@ -19,18 +19,22 @@
 //! The bounded scope keeps false positives below the threshold where
 //! they would obscure useful diagnostic output.
 
-use once_cell::sync::Lazy;
+use std::sync::OnceLock;
+
 use regex::Regex;
 
-static HEADER_RE: Lazy<Regex> = Lazy::new(|| {
-    // (?i)        — case-insensitive
-    // ($1)        — captured prefix: line start (empty) OR a single non-word char
-    // ($2)        — captured header name
-    // ($3)        — captured separator: `:` with optional surrounding tabs/spaces
-    // .*          — the value portion (greedy to end of line / next match)
-    Regex::new(r"(?i)(^|\W)(Authorization|X-API-Key|Cookie|Set-Cookie)([ \t]*:[ \t]*)[^\r\n]*")
-        .expect("redact::header HEADER_RE compiles")
-});
+fn header_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // (?i)        — case-insensitive
+        // ($1)        — captured prefix: line start (empty) OR a single non-word char
+        // ($2)        — captured header name
+        // ($3)        — captured separator: `:` with optional surrounding tabs/spaces
+        // .*          — the value portion (greedy to end of line / next match)
+        Regex::new(r"(?i)(^|\W)(Authorization|X-API-Key|Cookie|Set-Cookie)([ \t]*:[ \t]*)[^\r\n]*")
+            .expect("redact::header HEADER_RE compiles")
+    })
+}
 
 pub(super) struct HeaderMasker;
 
@@ -43,10 +47,11 @@ impl HeaderMasker {
     /// `None` so the composer can keep the original borrowed `&str`
     /// (no allocation in the no-fire case).
     pub(super) fn mask_line(&self, line: &str) -> Option<String> {
-        if !HEADER_RE.is_match(line) {
+        let re = header_re();
+        if !re.is_match(line) {
             return None;
         }
-        let masked = HEADER_RE
+        let masked = re
             .replace_all(line, |caps: &regex::Captures| {
                 format!("{}{}{}<redacted>", &caps[1], &caps[2], &caps[3])
             })

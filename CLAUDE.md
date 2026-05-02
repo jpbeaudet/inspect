@@ -179,6 +179,17 @@ v0.2.0. Until then:
   argument/usage error, `12-14` transport (F13), inner exit code
   passthrough on `run`/`exec`. Don't reuse a code for a new meaning.
 
+## Dependency Policy
+
+Prefer native Rust implementations over external crates. Only add a dependency when:
+1. The domain is genuinely unsafe to reimplement (SSH, cryptography)
+2. The crate has years of production use and active maintenance
+3. There is no reasonable way to implement it in under 500 lines of our own code
+
+Current approved dependencies exist for strong reasons (openssh, tokio, clap, serde, sha2, rpassword, zeroize, similar, comfy-table, crossterm, indicatif, ratatui). Everything else — parsers, formatters, pipeline stages, template engines, protocol handlers — we write ourselves.
+
+When in doubt, write it native. Open source implementations are reference material, not imports.
+
 ## Naming + scope
 
 - `F<n>` items are field-feedback (operator pain). `L<n>` items are

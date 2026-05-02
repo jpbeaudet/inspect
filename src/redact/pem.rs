@@ -20,8 +20,8 @@
 //! redacting them would obscure useful diagnostic output.
 
 use std::cell::Cell;
+use std::sync::OnceLock;
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 
 /// Decision returned by [`PemMasker::mask_line`].
@@ -44,14 +44,20 @@ pub(super) enum PemDecision {
 // `( BLOCK)?` covers PGP's `PRIVATE KEY BLOCK` armor. RFC 7468 fixes
 // the dash count at exactly five and uses uppercase for the labels;
 // we stay strict on both.
-static BEGIN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----\s*$")
-        .expect("redact::pem BEGIN_RE compiles")
-});
-static END_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*-----END ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----\s*$")
-        .expect("redact::pem END_RE compiles")
-});
+fn begin_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----\s*$")
+            .expect("redact::pem BEGIN_RE compiles")
+    })
+}
+fn end_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*-----END ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----\s*$")
+            .expect("redact::pem END_RE compiles")
+    })
+}
 
 pub(super) struct PemMasker {
     in_block: Cell<bool>,
@@ -69,17 +75,17 @@ impl PemMasker {
             // Defensive ordering: check END first so a malformed line
             // that matches both BEGIN and END (pathological) cleanly
             // exits the block instead of nesting.
-            if END_RE.is_match(line) {
+            if end_re().is_match(line) {
                 self.in_block.set(false);
             }
             return PemDecision::Suppress;
         }
-        if BEGIN_RE.is_match(line) {
+        if begin_re().is_match(line) {
             // Single-line BEGIN+END (impossible in practice for keys
             // but trivially possible if a tool emits both armor lines
             // back-to-back without a body): we still emit one marker
             // and stay out-of-block.
-            if !END_RE.is_match(line) {
+            if !end_re().is_match(line) {
                 self.in_block.set(true);
             }
             return PemDecision::Marker;

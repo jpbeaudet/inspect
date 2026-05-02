@@ -239,7 +239,7 @@ fn load_manifest(path: &str, is_yaml: bool) -> Result<(Manifest, String)> {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(body.as_bytes());
-        hex::encode(h.finalize())
+        crate::safety::snapshot::hex_encode(&h.finalize())
     };
     Ok((manifest, sha))
 }
@@ -439,7 +439,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 use sha2::{Digest, Sha256};
                 let mut h = Sha256::new();
                 h.update(&body);
-                hex::encode(h.finalize())
+                crate::safety::snapshot::hex_encode(&h.finalize())
             };
             script_bytes = Some(body.len() as u64);
             script_sha = Some(sha);

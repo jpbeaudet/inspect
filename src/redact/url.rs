@@ -12,17 +12,21 @@
 //! Lines without an embedded credential pattern pass through
 //! unchanged (no allocation).
 
-use once_cell::sync::Lazy;
+use std::sync::OnceLock;
+
 use regex::Regex;
 
-static URL_CRED_RE: Lazy<Regex> = Lazy::new(|| {
-    // scheme: alpha first, then alnum / + / - / .
-    // user:   any non-:/@/whitespace character
-    // pass:   any non-@/whitespace character
-    // (we don't capture host — it stays as-is via the literal `@`)
-    Regex::new(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+):([^\s@]+)@")
-        .expect("redact::url URL_CRED_RE compiles")
-});
+fn url_cred_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // scheme: alpha first, then alnum / + / - / .
+        // user:   any non-:/@/whitespace character
+        // pass:   any non-@/whitespace character
+        // (we don't capture host — it stays as-is via the literal `@`)
+        Regex::new(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+):([^\s@]+)@")
+            .expect("redact::url URL_CRED_RE compiles")
+    })
+}
 
 pub(super) struct UrlCredMasker;
 
@@ -34,10 +38,11 @@ impl UrlCredMasker {
     /// Returns `Some(masked_line)` when at least one credential
     /// pattern was rewritten. `None` for clean lines (no allocation).
     pub(super) fn mask_line(&self, line: &str) -> Option<String> {
-        if !URL_CRED_RE.is_match(line) {
+        let re = url_cred_re();
+        if !re.is_match(line) {
             return None;
         }
-        Some(URL_CRED_RE.replace_all(line, "$1:****@").into_owned())
+        Some(re.replace_all(line, "$1:****@").into_owned())
     }
 }
 

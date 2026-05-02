@@ -182,11 +182,12 @@ pub struct ResolvedNamespace {
 /// Validate namespace short names. Lowercase, digits, dash, underscore.
 /// Must start with a letter or digit. Max 63 chars.
 pub fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
-    use once_cell::sync::Lazy;
+    use std::sync::OnceLock;
+
     use regex::Regex;
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$").expect("valid regex"));
-    if !RE.is_match(name) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$").expect("valid regex"));
+    if !re.is_match(name) {
         return Err(ConfigError::InvalidNamespaceName(name.to_string()));
     }
     Ok(())

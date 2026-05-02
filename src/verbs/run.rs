@@ -295,7 +295,7 @@ pub(crate) fn resolve_script_source(
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(&body);
-            hex::encode(h.finalize())
+            crate::safety::snapshot::hex_encode(&h.finalize())
         };
         let interp = detect_interpreter(&body);
         let abs = std::fs::canonicalize(p)
@@ -327,7 +327,7 @@ pub(crate) fn resolve_script_source(
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(&body);
-            hex::encode(h.finalize())
+            crate::safety::snapshot::hex_encode(&h.finalize())
         };
         let interp = detect_interpreter(&body);
         return Ok(Some(ScriptSource {
@@ -476,7 +476,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(b);
-            hex::encode(h.finalize())
+            crate::safety::snapshot::hex_encode(&h.finalize())
         })
     } else {
         None

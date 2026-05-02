@@ -269,7 +269,7 @@ fn emit_json(name: &str, checks: &[Check], overall: CheckStatus) {
 
 fn expand_tilde(path: &str) -> String {
     if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::paths::home_dir() {
             return home.join(stripped).display().to_string();
         }
     }

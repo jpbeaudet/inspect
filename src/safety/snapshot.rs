@@ -35,9 +35,7 @@ impl SnapshotStore {
     /// Hash + write `data`. Returns the canonical sha256 hex (without
     /// the `sha256-` prefix) so callers can store it in audit entries.
     pub fn put(&self, data: &[u8]) -> Result<String> {
-        let mut h = Sha256::new();
-        h.update(data);
-        let hex = hex::encode(h.finalize());
+        let hex = sha256_hex(data);
         let path = self.dir.join(format!("sha256-{hex}"));
         if !path.exists() {
             // Atomic write: tmp → rename.
@@ -67,12 +65,39 @@ impl SnapshotStore {
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
-    hex::encode(h.finalize())
+    hex_encode(&h.finalize())
+}
+
+/// Lowercase hex encoding of `bytes`. Native replacement for
+/// `hex::encode` per the Dependency Policy in CLAUDE.md — SHA-256
+/// hex digests are the only hex consumer and a 64-char encoder is
+/// well under the 500-LOC threshold for "import vs write native".
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_encode_matches_classic_examples() {
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0x00]), "00");
+        assert_eq!(hex_encode(&[0xff]), "ff");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        // SHA-256 of "" — RFC 6234 well-known vector.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     #[test]
     fn dedups_identical_content() {

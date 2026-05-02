@@ -49,7 +49,7 @@
 //! Stateful PEM tracking must not leak across step boundaries because
 //! a step truncated mid-block would otherwise poison the next step's
 //! detection. The composer is cheap to construct (regex are compiled
-//! once globally via [`once_cell::sync::Lazy`]).
+//! once globally via [`std::sync::OnceLock`]).
 
 mod env;
 mod header;
