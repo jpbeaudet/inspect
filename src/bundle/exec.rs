@@ -551,6 +551,28 @@ fn render_step_body(
                 .ok_or_else(|| anyhow!("step `{}`: watch body missing", step.id))?;
             return Ok(format_watch_body(w));
         }
+        // L8 (v0.1.3): compose: bodies render their own command at
+        // execution time via `run_compose_branch` so it can resolve
+        // the project's working_dir from the cached profile and
+        // capture compose_file_hash. Returning the YAML-shaped
+        // descriptor here keeps the body visible in dry-run / plan
+        // output without claiming to be the executable command.
+        StepBodyKind::Compose => {
+            let spec = step
+                .compose
+                .as_ref()
+                .ok_or_else(|| anyhow!("step `{}`: compose body missing", step.id))?;
+            let svc = spec
+                .service
+                .as_deref()
+                .map(|s| format!(" service={s}"))
+                .unwrap_or_default();
+            return Ok(format!(
+                "compose {action} project={proj}{svc}",
+                action = spec.action.as_str(),
+                proj = spec.project,
+            ));
+        }
     };
     interpolate(raw, vars, matrix).map_err(|e: InterpError| anyhow!("step `{}`: {e}", step.id))
 }
@@ -600,8 +622,10 @@ fn run_step(
     let kind = step.body_kind().map_err(|e| anyhow!("{e}"))?;
 
     // `--apply` gate per step. Skipped if step opts out (`apply:
-    // false`) or if it's a read-only `run`/`watch` step.
-    let needs_apply = step.apply && matches!(kind, StepBodyKind::Exec);
+    // false`) or if it's a read-only `run`/`watch` step. L8 (v0.1.3):
+    // compose: bodies mutate state (up/down/pull/build/restart all do),
+    // so they go through the same gate as `exec:`.
+    let needs_apply = step.apply && matches!(kind, StepBodyKind::Exec | StepBodyKind::Compose);
     if needs_apply && !opts.apply {
         return Err(anyhow!(
             "step `{}` is destructive and `--apply` was not passed",
@@ -784,6 +808,324 @@ fn run_single_branch(
             }
             Ok(audit_id)
         }
+        StepBodyKind::Compose => run_compose_branch(
+            runner,
+            bundle,
+            step,
+            matrix,
+            bundle_id,
+            store,
+            target_ns,
+            reason.as_deref(),
+            timeout_secs,
+            started,
+        ),
+    }
+}
+
+/// L8 (v0.1.3): execute one branch of a `compose:` step. Renders
+/// the docker compose command, captures the live compose-file hash
+/// for the audit, runs the command, and stamps an audit entry that
+/// matches the standalone `inspect compose <action>` shape so
+/// post-mortem queries can join across both surfaces.
+#[allow(clippy::too_many_arguments)]
+fn run_compose_branch(
+    runner: &dyn RemoteRunner,
+    bundle: &Bundle,
+    step: &Step,
+    matrix: &BTreeMap<String, serde_yaml::Value>,
+    bundle_id: &str,
+    store: &AuditStore,
+    target_ns: &str,
+    reason: Option<&str>,
+    timeout_secs: u64,
+    started: Instant,
+) -> Result<Option<String>> {
+    use crate::profile::cache::load_profile;
+    use crate::verbs::compose::write_common::{
+        build_compose_cmd, build_compose_per_service_down_cmd, compose_file_sha_short, project_tags,
+    };
+
+    let spec = step
+        .compose
+        .as_ref()
+        .ok_or_else(|| anyhow!("step `{}`: compose body missing", step.id))?;
+
+    // Plan-time-style validation re-run at execution: project must
+    // exist on the resolved namespace's cached profile. We do this
+    // here (not just at plan) because matrix interpolation may
+    // produce per-branch project names that the static plan walker
+    // can't enumerate.
+    let project_name = super::vars::interpolate(&spec.project, &bundle.vars, matrix)
+        .map_err(|e| anyhow!("step `{}` compose project: {e}", step.id))?;
+    let service_rendered = match spec.service.as_deref() {
+        Some(s) => Some(
+            super::vars::interpolate(s, &bundle.vars, matrix)
+                .map_err(|e| anyhow!("step `{}` compose service: {e}", step.id))?,
+        ),
+        None => None,
+    };
+
+    // Resolve the namespace through the standard plan/iter pipeline
+    // so we get the same SshTarget the standalone compose verbs use.
+    let (_runner_unused, nses, targets) = resolve_plan(target_ns)
+        .map_err(|e| anyhow!("step `{}`: resolving target `{target_ns}`: {e}", step.id))?;
+    let resolved: Vec<_> = iter_steps(&nses, &targets).collect();
+    let rstep = resolved.first().ok_or_else(|| {
+        anyhow!(
+            "step `{}`: target `{target_ns}` matched no resources",
+            step.id
+        )
+    })?;
+    let ns = &rstep.ns.namespace;
+    let target = &rstep.ns.target;
+
+    // Look up the project on the cached profile.
+    let profile = load_profile(ns)?.ok_or_else(|| {
+        anyhow!(
+            "step `{}`: namespace `{ns}` has no cached profile (run `inspect setup {ns}` first)",
+            step.id
+        )
+    })?;
+    let project = profile
+        .compose_projects
+        .iter()
+        .find(|p| p.name == project_name)
+        .cloned()
+        .ok_or_else(|| {
+            let known: Vec<&str> = profile
+                .compose_projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            anyhow!(
+                "step `{}`: compose project `{project_name}` not found on namespace `{ns}` \
+                 (known: {})",
+                step.id,
+                if known.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )
+        })?;
+
+    // Validate flag set against the action's allowlist (already done
+    // at plan time, but re-check here so a mid-bundle re-render
+    // never executes an unrecognized flag silently).
+    for key in spec.flags.keys() {
+        if !spec.action.allowed_flags().contains(&key.as_str()) {
+            return Err(anyhow!(
+                "step `{}`: compose action `{}` does not accept flag `{}` \
+                 (allowed: {})",
+                step.id,
+                spec.action.as_str(),
+                key,
+                spec.action.allowed_flags().join(", "),
+            ));
+        }
+    }
+
+    // Per-service `down` rejects volumes / rmi (project-scoped ops).
+    if matches!(spec.action, super::schema::ComposeAction::Down) && service_rendered.is_some() {
+        if flag_is_true(&spec.flags, "volumes") {
+            return Err(anyhow!(
+                "step `{}`: compose down --volumes is not supported for per-service selectors \
+                 (project=`{project_name}`, service=`{}`); named volumes are project-scoped",
+                step.id,
+                service_rendered.as_deref().unwrap_or("")
+            ));
+        }
+        if flag_is_true(&spec.flags, "rmi") {
+            return Err(anyhow!(
+                "step `{}`: compose down --rmi is not supported for per-service selectors",
+                step.id
+            ));
+        }
+    }
+
+    // Render the docker compose command. `down` per-service uses the
+    // explicit `stop && rm -f` form; everything else is the standard
+    // `docker compose -p <p> <action> [flags] [<svc>]` shape.
+    let cmd = if matches!(spec.action, super::schema::ComposeAction::Down)
+        && service_rendered.is_some()
+    {
+        build_compose_per_service_down_cmd(&project, service_rendered.as_deref().unwrap())
+    } else {
+        let flag_strs: Vec<String> = compose_flag_strings(&spec.action, &spec.flags);
+        let flag_refs: Vec<&str> = flag_strs.iter().map(|s| s.as_str()).collect();
+        // up's default is `-d`; mirror the standalone verb's default.
+        let mut all_flags: Vec<&str> = Vec::with_capacity(flag_refs.len() + 1);
+        if matches!(spec.action, super::schema::ComposeAction::Up)
+            && !flag_is_true(&spec.flags, "no_detach")
+        {
+            all_flags.push("-d");
+        }
+        all_flags.extend(flag_refs);
+        build_compose_cmd(
+            &project,
+            spec.action.as_str(),
+            &all_flags,
+            service_rendered.as_deref(),
+        )
+    };
+
+    // Capture compose_file_hash before exec so the audit can be
+    // verified post-hoc. One extra ssh round-trip; same shape as the
+    // standalone compose verbs.
+    let compose_hash = compose_file_sha_short(runner, ns, target, &project);
+
+    // Stream so multi-minute pulls/builds show progress live.
+    let opts = RunOpts::with_timeout(timeout_secs);
+    let mut on_line = |line: &str| {
+        eprintln!("    {line}");
+    };
+    let out = runner.run_streaming_capturing(ns, target, &cmd, opts, &mut on_line)?;
+    let dur_ms = started.elapsed().as_millis() as u64;
+
+    // Audit. Verb mirrors the standalone compose sub-verbs so a
+    // post-mortem query like `inspect audit ls --verb compose.up`
+    // catches both bundle-driven and ad-hoc invocations.
+    let audit_selector = match service_rendered.as_deref() {
+        Some(svc) => format!("{ns}/{}/{svc}", project.name),
+        None => format!("{ns}/{}", project.name),
+    };
+    let audit_verb = format!("compose.{}", spec.action.as_str());
+    let mut e = AuditEntry::new(&audit_verb, &audit_selector);
+    e.exit = out.exit_code;
+    e.duration_ms = dur_ms;
+    e.reason = crate::safety::validate_reason(reason)?;
+    e.applied = Some(out.ok());
+    e.rendered_cmd = Some(cmd.clone());
+    e.bundle_id = Some(bundle_id.to_string());
+    e.bundle_step = Some(step.id.clone());
+    if let Some((mkey, mval)) = matrix.iter().next() {
+        let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+        e.bundle_branch = Some(format!("{mkey}={label}"));
+        e.bundle_branch_status = Some(if out.ok() { "ok" } else { "failed" }.to_string());
+    }
+    let mut extras: Vec<String> = Vec::new();
+    for (k, v) in &spec.flags {
+        if let Some(b) = v.as_bool() {
+            if b {
+                extras.push(format!("[{k}=true]"));
+            }
+        }
+    }
+    let extra_refs: Vec<&str> = extras.iter().map(|s| s.as_str()).collect();
+    e.args = project_tags(
+        &project.name,
+        service_rendered.as_deref(),
+        &compose_hash,
+        &extra_refs,
+    );
+    e.revert = Some(compose_revert_for_action(
+        spec.action,
+        ns,
+        &project.name,
+        service_rendered.as_deref(),
+    ));
+    let audit_id = Some(e.id.clone());
+    let _ = store.append(&e);
+
+    if !out.ok() {
+        return Err(anyhow!(
+            "compose.{} exit {}: {}",
+            spec.action.as_str(),
+            out.exit_code,
+            out.stderr.trim().lines().next().unwrap_or(""),
+        ));
+    }
+    Ok(audit_id)
+}
+
+/// L8 (v0.1.3): turn the compose-step `flags:` map into the docker
+/// compose CLI flags. Per-flag rendering is action-aware so an `up`
+/// step's `force_recreate: true` becomes `--force-recreate`, and a
+/// `down` step's `volumes: true` becomes `--volumes`. Unknown flags
+/// are caught by the allowlist check upstream.
+fn compose_flag_strings(
+    action: &super::schema::ComposeAction,
+    flags: &BTreeMap<String, serde_yaml::Value>,
+) -> Vec<String> {
+    use super::schema::ComposeAction;
+    let mut out: Vec<String> = Vec::new();
+    let truthy = |k: &str| flag_is_true(flags, k);
+    match action {
+        ComposeAction::Up => {
+            if truthy("force_recreate") {
+                out.push("--force-recreate".into());
+            }
+            // no_detach handled in caller (drops the implicit `-d`)
+        }
+        ComposeAction::Down => {
+            if truthy("volumes") {
+                out.push("--volumes".into());
+            }
+            if truthy("rmi") {
+                out.push("--rmi".into());
+                out.push("local".into());
+            }
+        }
+        ComposeAction::Pull => {
+            if truthy("ignore_pull_failures") {
+                out.push("--ignore-pull-failures".into());
+            }
+        }
+        ComposeAction::Build => {
+            if truthy("no_cache") {
+                out.push("--no-cache".into());
+            }
+            if truthy("pull") {
+                out.push("--pull".into());
+            }
+        }
+        ComposeAction::Restart => {}
+    }
+    out
+}
+
+fn flag_is_true(map: &BTreeMap<String, serde_yaml::Value>, key: &str) -> bool {
+    map.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// L8 (v0.1.3): revert taxonomy for compose actions. Mirrors the
+/// standalone verbs: up ↔ down, restart re-restart, pull is
+/// unsupported (you can't un-pull), build is roughly
+/// `down --rmi local`.
+fn compose_revert_for_action(
+    action: super::schema::ComposeAction,
+    ns: &str,
+    project: &str,
+    service: Option<&str>,
+) -> crate::safety::Revert {
+    use super::schema::ComposeAction;
+    use crate::safety::Revert;
+    let sel = match service {
+        Some(svc) => format!("{ns}/{project}/{svc}"),
+        None => format!("{ns}/{project}"),
+    };
+    match action {
+        ComposeAction::Up => Revert::command_pair(
+            format!("inspect compose up {sel} --apply"),
+            format!("inspect compose down {sel} --apply"),
+        ),
+        ComposeAction::Down => Revert::command_pair(
+            format!("inspect compose down {sel} --apply"),
+            format!("inspect compose up {sel} --apply"),
+        ),
+        ComposeAction::Restart => Revert::command_pair(
+            format!("inspect compose restart {sel} --apply"),
+            format!("inspect compose restart {sel} --apply"),
+        ),
+        ComposeAction::Pull => Revert::unsupported(
+            "compose pull has no inverse — pulled images stay in the local docker cache"
+                .to_string(),
+        ),
+        ComposeAction::Build => Revert::command_pair(
+            format!("inspect compose build {sel} --apply"),
+            format!("inspect compose down {sel} --apply"),
+        ),
     }
 }
 
@@ -1187,9 +1529,12 @@ fn do_rollback(
                     return;
                 }
             };
-            if !matches!(kind, StepBodyKind::Exec | StepBodyKind::Run) {
+            if !matches!(
+                kind,
+                StepBodyKind::Exec | StepBodyKind::Run | StepBodyKind::Compose
+            ) {
                 eprintln!(
-                    "[inspect] rollback `{}` body kind {:?} not supported (use exec/run)",
+                    "[inspect] rollback `{}` body kind {:?} not supported (use exec/run/compose)",
                     step.id, kind
                 );
                 return;
@@ -1334,6 +1679,7 @@ mod tests {
             exec: Some(format!("echo {id}")),
             run: None,
             watch: None,
+            compose: None,
             requires: vec![],
             parallel: false,
             matrix: BTreeMap::new(),

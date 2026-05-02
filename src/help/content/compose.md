@@ -16,11 +16,33 @@ READ SUB-VERBS
 
 WRITE SUB-VERBS (audited; require --apply)
 
-  up       Bring up a project. verb=compose.up.
-  down     Tear down a project. verb=compose.down. --volumes is destructive.
-  pull     Pull images for a project. verb=compose.pull. Streams progress.
-  build    Build images for a project. verb=compose.build. Streams progress.
-  restart  Restart a single service. verb=compose.restart.
+  up       Bring up a project (or one service). verb=compose.up.
+  down     Tear down a project (or stop+rm one service).
+           verb=compose.down. --volumes is destructive (project only).
+  pull     Pull images for a project (or one service).
+           verb=compose.pull. Streams progress.
+  build    Build images for a project (or one service).
+           verb=compose.build. Streams progress.
+  restart  Restart a project (or one service). verb=compose.restart.
+
+PER-SERVICE NARROWING (L8, v0.1.3)
+
+  Every write verb above accepts <ns>/<project>/<service> for
+  per-service narrowing. The "stop just this one service" idiom
+  for compose down has its own command shape:
+
+    docker compose -p <p> stop <svc> && docker compose -p <p> rm -f <svc>
+
+  Other services in the project keep running. The verb refuses
+  `--volumes` and `--rmi` when narrowing is in play — both are
+  project-scoped operations and silently honoring them against one
+  service would either no-op (confusing) or wipe data shared with
+  siblings (worse). Tear the whole project down for those flags.
+
+  up/pull/build per-service are straight passthroughs: the service
+  name is appended to the docker compose subcommand. Audit args
+  carry [service=<svc>] so post-mortem queries can distinguish
+  per-service from project-level invocations.
 
 EXEC (inspect-run-style; not audited)
 
@@ -61,6 +83,19 @@ JSON SCHEMAS (--json)
            redaction pipeline; data.secrets_masked = bool.
 
   logs:    streamed line-by-line to stdout (no envelope).
+           L8 (v0.1.3) flags:
+             --merged                   asserts a multi-service merged
+                                        stream (project-level only;
+                                        rejects per-service selectors).
+             --match <REGEX>            line-filter (repeatable, OR);
+                                        pushed down to remote `grep -E`.
+             --exclude <REGEX>          drop matching lines after --match
+                                        (repeatable, OR).
+             --cursor <PATH>            resume from the ISO-8601 timestamp
+                                        recorded in the cursor file. Forces
+                                        --timestamps; the latest seen
+                                        timestamp is written back atomically
+                                        on stream end. Mutex with --since.
 
   up/down/pull/build/restart:
            data = {namespace, project, audit_id, exit, duration_ms,
@@ -94,13 +129,27 @@ AUDIT TAGS
 
 REVERT KIND
 
-  All five compose write verbs record `revert.kind = unsupported`.
-  Compose state mutations have no clean inverse: `up` is countered
-  by `down` only on paper (down can wipe volumes); `pull` and
-  `build` change image cache state in non-reversible ways; `restart`
-  is fundamentally idempotent. `inspect revert <id>` on these
-  entries surfaces the chained hint with the exact "what to run if
-  you want to roll back" command rather than silently no-opping.
+  Standalone compose write verbs (the `inspect compose <action>`
+  surface) record `revert.kind = unsupported` because compose state
+  mutations have no clean inverse outside an explicit operator
+  policy: `up` is countered by `down` only on paper (down can wipe
+  volumes); `pull` and `build` change image cache state in
+  non-reversible ways; `restart` is fundamentally idempotent.
+  `inspect revert <id>` on these entries surfaces the chained hint
+  with the exact "what to run if you want to roll back" command
+  rather than silently no-opping.
+
+  L8 (v0.1.3) bundle compose: steps are different — bundles compose
+  multiple actions explicitly, so the inverse is well-defined
+  within the bundle's scope:
+
+    up       → revert.kind=command_pair (inverse: compose down <sel>)
+    down     → revert.kind=command_pair (inverse: compose up <sel>)
+    restart  → revert.kind=command_pair (inverse: compose restart <sel>)
+    build    → revert.kind=command_pair (inverse: compose down <sel>)
+    pull     → revert.kind=unsupported  (no un-pull)
+
+  See `inspect help bundle` for the structured `compose:` step kind.
 
 EXIT CODES
 
@@ -115,16 +164,45 @@ EXAMPLES
   $ inspect compose ps arte/luminary-onyx
   $ inspect compose config arte/luminary-onyx --json
   $ inspect compose logs arte/luminary-onyx --tail 200
+  $ inspect compose logs arte/luminary-onyx --merged --match ERROR --exclude healthcheck
+  $ inspect compose logs arte/luminary-onyx --cursor ./onyx.cursor --tail 200
   $ inspect compose logs arte/luminary-onyx/onyx-vault --follow
   $ inspect compose restart arte/luminary-onyx/onyx-vault --apply
   $ inspect compose up arte/luminary-onyx --apply
+  $ inspect compose up arte/luminary-onyx/onyx-vault --apply       # L8: per-service
   $ inspect compose down arte/luminary-onyx --apply --yes
+  $ inspect compose down arte/luminary-onyx/onyx-vault --apply     # L8: stop+rm one service
   $ inspect compose down arte/luminary-onyx --volumes --apply --yes-all
   $ inspect compose pull arte/luminary-onyx --apply
   $ inspect compose pull arte/luminary-onyx/onyx-vault --apply
   $ inspect compose build arte/luminary-onyx --no-cache --apply
+  $ inspect compose build arte/luminary-onyx/onyx-vault --no-cache --apply
   $ inspect compose exec arte/luminary-onyx/onyx-vault -- ps -ef
   $ inspect compose exec arte/luminary-onyx/onyx-vault -u root -- df -h
+
+BUNDLE compose: STEP KIND (L8, v0.1.3)
+
+  Bundle steps can drive compose actions structurally instead of
+  shelling out. Plan-time validation checks the project against
+  the namespace's cached profile and rejects unknown flag keys
+  per-action.
+
+    steps:
+      - id: stop-api
+        target: arte
+        compose:
+          project: luminary-onyx
+          action: down                # up|down|pull|build|restart
+          service: api                # optional; project-level when omitted
+          flags:
+            volumes: false            # only allowed at project level
+        rollback: |
+          true                        # operator-authored shell
+
+  The audit shape matches `inspect compose <action>` (verb=
+  compose.<action>, args="[project=…] [service=…]
+  [compose_file_hash=…]"). See `inspect help bundle` for the full
+  bundle YAML reference.
 
 DISCOVERY + STATUS INTEGRATION
 

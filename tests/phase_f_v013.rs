@@ -7741,3 +7741,388 @@ fn l2_save_password_alias_accepted_for_password_auth_namespaces() {
         "--save-password alias must be accepted: {stderr}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// L8 — Round out the v0.1.3 compose surface.
+//
+// 1. Per-service narrowing on every `compose` write verb. F6's pull/build
+//    already supported it; up/down are extended in L8. Per-service `down`
+//    rejects --volumes / --rmi (both project-scoped).
+// 2. `compose logs` gains --match / --exclude / --merged / --cursor so the
+//    triage surface matches `inspect logs`.
+// 3. New `inspect bundle` `compose:` step kind with action allowlist + audit
+//    shape mirroring the standalone compose verbs.
+//
+// These tests cover the user-visible surface that doesn't require a live
+// remote: dry-run preview shapes, --volumes/--rmi rejection contracts,
+// --merged + --cursor flag wiring, schema validation for the bundle step,
+// and help discoverability. The actual docker compose round-trip requires
+// a live host and is exercised by the field-validation gate.
+// -----------------------------------------------------------------------------
+
+fn write_profile_with_compose(
+    home: &std::path::Path,
+    ns: &str,
+    services: &[(&str, &str, &str)],
+    compose: &[(&str, &str, &str)], // (project_name, working_dir, services_csv)
+) {
+    let dir = home.join("profiles");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut svc_yaml = String::new();
+    for (name, image, hs) in services {
+        svc_yaml.push_str(&format!(
+            "  - name: {name}\n    container_name: {name}\n    container_id: cid-{name}\n    image: {image}\n    ports: []\n    mounts: []\n    health_status: {hs}\n    log_readable_directly: false\n    kind: container\n    depends_on: []\n"
+        ));
+    }
+    let mut comp_yaml = String::new();
+    for (proj, wd, _svcs) in compose {
+        comp_yaml.push_str(&format!(
+            "  - name: {proj}\n    status: running\n    compose_file: {wd}/docker-compose.yml\n    working_dir: {wd}\n    service_count: 2\n    running_count: 2\n"
+        ));
+    }
+    let compose_block = if comp_yaml.is_empty() {
+        String::new()
+    } else {
+        format!("compose_projects:\n{comp_yaml}")
+    };
+    // NOTE: do NOT use Rust string-literal line-continuation (`\<newline>`)
+    // here — it strips the leading whitespace YAML needs for indentation
+    // and produces a non-parsing profile. Build the YAML body via
+    // line-by-line concat so each row carries its exact leading spaces.
+    let mut body = String::new();
+    body.push_str(&format!("schema_version: 1\n"));
+    body.push_str(&format!("namespace: {ns}\n"));
+    body.push_str(&format!("host: {ns}.example.invalid\n"));
+    body.push_str("discovered_at: 2099-01-01T00:00:00+00:00\n");
+    body.push_str("remote_tooling:\n");
+    body.push_str("  rg: false\n  jq: false\n  journalctl: false\n  sed: false\n");
+    body.push_str("  grep: true\n  netstat: false\n  ss: true\n  systemctl: false\n");
+    body.push_str("  docker: true\n");
+    body.push_str("services:\n");
+    body.push_str(&svc_yaml);
+    body.push_str("volumes: []\nimages: []\nnetworks: []\n");
+    body.push_str(&compose_block);
+    let path = dir.join(format!("{ns}.yaml"));
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn l8_compose_up_per_service_dry_run_shape() {
+    // L8 (v0.1.3): `compose up <ns>/<p>/<svc>` (no --apply) must
+    // dry-run-render with a "service <svc>" scope label so an
+    // operator can confirm the narrowing before applying.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api,onyx-vault")],
+    );
+    let assert = sb
+        .cmd()
+        .args(["compose", "up", "arte/luminary-onyx/onyx-vault"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("DRY RUN"),
+        "expected dry-run preamble: {stdout}"
+    );
+    assert!(
+        stdout.contains("service onyx-vault"),
+        "expected service-scope label: {stdout}"
+    );
+    assert!(
+        stdout.contains("docker compose -p ") && stdout.contains("'onyx-vault'"),
+        "expected service token in rendered cmd: {stdout}"
+    );
+}
+
+#[test]
+fn l8_compose_down_per_service_uses_stop_and_rm() {
+    // L8: per-service `compose down` renders `stop && rm -f` (the
+    // explicit two-step form), not `docker compose down <svc>`.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    let assert = sb
+        .cmd()
+        .args(["compose", "down", "arte/luminary-onyx/api"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("stop 'api'") && stdout.contains("rm -f 'api'"),
+        "expected stop && rm shape: {stdout}"
+    );
+}
+
+#[test]
+fn l8_compose_down_per_service_rejects_volumes() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    sb.cmd()
+        .args([
+            "compose",
+            "down",
+            "arte/luminary-onyx/api",
+            "--volumes",
+            "--apply",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--volumes is not supported for per-service"))
+        .stderr(contains("project-scoped"));
+}
+
+#[test]
+fn l8_compose_down_per_service_rejects_rmi() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    sb.cmd()
+        .args([
+            "compose",
+            "down",
+            "arte/luminary-onyx/api",
+            "--rmi",
+            "--apply",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--rmi is not supported for per-service"));
+}
+
+#[test]
+fn l8_compose_logs_merged_rejects_per_service_selector() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    sb.cmd()
+        .args([
+            "compose",
+            "logs",
+            "arte/luminary-onyx/api",
+            "--merged",
+            "--tail",
+            "10",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--merged is incompatible with the per-service"));
+}
+
+#[test]
+fn l8_compose_logs_cursor_and_since_are_mutually_exclusive() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    let cur = sb.home().join("onyx.cursor");
+    sb.cmd()
+        .args([
+            "compose",
+            "logs",
+            "arte/luminary-onyx",
+            "--cursor",
+            cur.to_str().unwrap(),
+            "--since",
+            "5m",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            contains("cannot be used with")
+                .or(contains("conflicts"))
+                .or(contains("argument")),
+        );
+}
+
+#[test]
+fn l8_compose_logs_match_and_exclude_flags_accepted() {
+    // Smoke: clap accepts both flags repeated. We don't run the
+    // mock far enough to exercise the grep pipeline build (the
+    // pipeline assembly is unit-tested in line_filter::tests).
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "compose",
+            "logs",
+            "arte/luminary-onyx",
+            "--tail",
+            "10",
+            "--match",
+            "ERROR",
+            "--exclude",
+            "healthcheck",
+            "--match",
+            "WARN",
+        ])
+        .assert();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("unknown argument"),
+        "every L8 logs flag must be a recognized clap arg: {stderr}"
+    );
+}
+
+#[test]
+fn l8_compose_help_documents_per_service_and_logs_triage() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["compose", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("<ns>/<project>/<service>"),
+        "compose --help must document per-service selector: {stdout}"
+    );
+    assert!(
+        stdout.contains("--merged") && stdout.contains("--cursor"),
+        "compose --help must document the L8 logs flags: {stdout}"
+    );
+}
+
+#[test]
+fn l8_help_topic_compose_documents_bundle_step_and_per_service() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["help", "compose"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("PER-SERVICE NARROWING"),
+        "compose topic must document per-service narrowing: {stdout}"
+    );
+    assert!(
+        stdout.contains("BUNDLE compose: STEP KIND"),
+        "compose topic must document the bundle compose step: {stdout}"
+    );
+    assert!(
+        stdout.contains("revert.kind"),
+        "compose topic must document the revert taxonomy: {stdout}"
+    );
+}
+
+#[test]
+fn l8_help_search_finds_per_service_compose_down() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["help", "--search", "per-service"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("compose"),
+        "search for 'per-service' must surface the compose topic: {stdout}"
+    );
+}
+
+#[test]
+fn l8_bundle_compose_step_rejects_unknown_action_at_parse() {
+    // The bundle YAML parser uses a closed `ComposeAction` enum;
+    // any unknown action surfaces as a deserialization error at
+    // `bundle plan` time.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    let bundle = sb.home().join("bad.yaml");
+    std::fs::write(
+        &bundle,
+        "name: bad\nhost: arte\nsteps:\n  - id: s1\n    compose:\n      project: luminary-onyx\n      action: nuke\n",
+    )
+    .unwrap();
+    sb.cmd()
+        .args(["bundle", "plan", bundle.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn l8_bundle_compose_step_rejects_unknown_flag_per_action() {
+    // ComposeAction::Up's allowlist is { force_recreate, no_detach };
+    // a step that passes `volumes: true` should fail at execution
+    // (we surface the error from validation before dispatch).
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile_with_compose(
+        sb.home(),
+        "arte",
+        &[("api", "img/api:1", "ok")],
+        &[("luminary-onyx", "/opt/luminary-onyx", "api")],
+    );
+    let bundle = sb.home().join("bad-flag.yaml");
+    std::fs::write(
+        &bundle,
+        "name: bad\nhost: arte\nsteps:\n  - id: s1\n    compose:\n      project: luminary-onyx\n      action: up\n      flags:\n        volumes: true\n",
+    )
+    .unwrap();
+    let assert = sb
+        .cmd()
+        .args(["bundle", "apply", bundle.to_str().unwrap(), "--apply"])
+        .assert();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("does not accept flag")
+            || stderr.contains("volumes")
+            || stderr.contains("allowed"),
+        "bundle compose:up with flags.volumes must reject: {stderr}"
+    );
+}
+
+#[test]
+fn l8_bundle_compose_step_rejects_multiple_bodies() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    let bundle = sb.home().join("multi.yaml");
+    std::fs::write(
+        &bundle,
+        "name: multi\nhost: arte\nsteps:\n  - id: s1\n    exec: \"true\"\n    compose:\n      project: p\n      action: up\n",
+    )
+    .unwrap();
+    sb.cmd()
+        .args(["bundle", "plan", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("multiple bodies").or(contains("exactly one")));
+}

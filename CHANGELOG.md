@@ -14,6 +14,115 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L8 — Round out the v0.1.3 compose surface (per-service narrowing,
+  `compose logs` triage flags, bundle `compose:` step kind).** F6
+  shipped the first-class `inspect compose` verb cluster but with
+  three deliberate scope cuts that operators kept hitting:
+  `compose up`/`down` were project-level only; `compose logs` lacked
+  the cursor / match / exclude / merged surface that `inspect logs`
+  carries; and `inspect bundle` had no compose-aware step kind, so
+  bundles drove compose via `exec:` shell strings and lost the
+  structured audit shape. L8 closes all three.
+  - **Per-service narrowing on every compose write verb.** F6's
+    `pull` and `build` already accepted `<ns>/<project>/<service>`;
+    L8 extends `up` (straight passthrough — appends the service
+    token) and `down` to match. Per-service `down` uses the explicit
+    `docker compose -p <p> stop <svc> && docker compose -p <p>
+    rm -f <svc>` shape (compose's `down <svc>` form is undocumented
+    and behaves inconsistently across versions; the explicit
+    two-step is what every operator's runbook uses). Other services
+    in the project remain running.
+  - **Per-service `--volumes` and `--rmi` rejected loudly.** Both
+    are project-scoped operations — silently honoring them against
+    one service would either no-op (confusing) or wipe data shared
+    with siblings (worse). The rejection error chains to a hint
+    pointing at the project-level invocation as the next operator
+    action.
+  - **Audit `[service=<svc>]` tag.** Every per-service write entry
+    stamps the service portion alongside the existing
+    `[project=<p>] [compose_file_hash=<sha-12>]` so post-mortem
+    queries can filter for the per-service slice without re-parsing
+    the rendered command. The audit entry's `selector` field is
+    also extended to `<ns>/<project>/<service>` (was
+    `<ns>/<project>` before L8) so a `--bundle <id>` query joins
+    cleanly across project- and service-level entries.
+  - **`compose logs` triage surface (matches `inspect logs`).** New
+    `--match <REGEX>` / `--exclude <REGEX>` flags (repeatable;
+    multiple OR within each, AND across the two) reuse
+    `verbs::line_filter::build_suffix` so the filter compiles to a
+    remote `grep -E` pipeline — the SSH transport never carries
+    lines we are about to drop. New `--merged` flag is an
+    assertion: this is a multi-service interleaved stream (compose
+    already does this by default at the project level, but
+    `--merged` makes the contract explicit and rejects per-service
+    selectors). New `--cursor <PATH>` flag resumes from the
+    ISO-8601 timestamp recorded in the cursor file: forces
+    `--timestamps` on `docker compose logs`, reads the stored
+    timestamp as `--since`, and writes the latest seen timestamp
+    back atomically (`<file>.tmp.<pid>` → rename(2), mode 0600).
+    `--cursor` is mutex with `--since` (both pin the start). The
+    timestamp parser is a hand-rolled byte-walk (no regex —
+    streaming hot path) handling the
+    `service_name  | YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]` shape
+    with and without service prefix.
+  - **Bundle `compose:` step kind.** New `StepBodyKind::Compose`
+    variant + `ComposeStepSpec { project, action, service?, flags
+    }` schema. `ComposeAction { Up, Down, Pull, Build, Restart }`
+    with a per-action `allowed_flags()` allowlist (up:
+    `force_recreate, no_detach`; down: `volumes, rmi`; pull:
+    `ignore_pull_failures`; build: `no_cache, pull`; restart:
+    `<none>`). Plan-time validation: project must exist on the
+    namespace's cached profile; every key in `flags:` must match
+    the action's allowlist (typo'd flags are caught at plan time,
+    never silently no-op'd at execution). New `run_compose_branch`
+    in `src/bundle/exec.rs` resolves project from the cached
+    profile, captures `compose_file_hash` via the same
+    `compose_file_sha_short` helper as the standalone verbs,
+    renders the command (per-service `down` uses
+    `build_compose_per_service_down_cmd`; everything else uses
+    `build_compose_cmd`), runs via `runner.run_streaming_capturing`
+    for live progress, and stamps an audit entry with
+    `verb=compose.<action>` so `inspect audit grep` joins
+    bundle-driven and ad-hoc invocations on the same query.
+    `revert.kind` taxonomy mirrors operator intent within bundle
+    scope: `command_pair` for up/down/restart/build (the inverse
+    points at the matching `inspect compose <action>`),
+    `unsupported` for pull (no un-pull). Bundle rollback path
+    extended to recognize `Compose` step bodies (the rollback shell
+    block remains operator-authored — same as exec/run).
+  - **Help surface.** `compose.md` editorial topic gains
+    "PER-SERVICE NARROWING", a "BUNDLE compose: STEP KIND" section
+    with a worked example, and `--match` / `--exclude` / `--merged`
+    / `--cursor` notes under JSON SCHEMAS. `LONG_COMPOSE` updated
+    with the new flag set + per-service selector grammar.
+    `LONG_BUNDLE` documents the new step kind with the per-action
+    allowlist and the revert taxonomy. `MANUAL.md` §7.10 gains
+    sub-sections on per-service narrowing, the logs triage
+    surface, and the bundle `compose:` step shape with a YAML
+    example.
+  - **Tests.** 7 inline unit tests in
+    `src/verbs/compose/logs.rs::tests::l8_*` covering the ISO-8601
+    prefix parser (with/without service prefix, with offset, no
+    fractional seconds, no timestamp at all, empty line) plus the
+    cursor read/write round-trip (atomic write + read, trailing
+    newline trim, empty file = None). 12 acceptance tests in
+    `tests/phase_f_v013.rs::l8_*` covering: dry-run shape per-
+    service for up/down/pull/build (--apply omitted, expects "would
+    on <ns>/<p>/<svc>" + audit `[service=<svc>]` not yet stamped);
+    per-service `compose down --volumes` chained-hint rejection;
+    per-service `compose down --rmi` chained-hint rejection;
+    `--merged` rejects per-service selector with chained hint;
+    `--match` + `--exclude` flag presence on the rendered command;
+    `--cursor` round-trip via mock (writes atomic, reads non-empty
+    on next call); `--cursor` mutex with `--since`; bundle
+    `compose:` schema rejects unknown flags per-action; bundle
+    `compose:` schema rejects multiple bodies; bundle `compose:`
+    plan validates project against cached profile; help-topic +
+    help-search discoverability for per-service + bundle compose
+    step.
+
+  Full suite green: 28 suites, 0 failed.
+
 - **L2 — OS keychain integration for opt-in cross-session credential
   persistence.** v0.1.2 onboarding feedback (and the L4 password-auth
   retrospective): operators on legacy hosts wanted "enter the

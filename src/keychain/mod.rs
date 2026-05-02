@@ -357,8 +357,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("reserved")
-                || err.contains("invalid namespace name"),
+            err.contains("reserved") || err.contains("invalid namespace name"),
             "expected rejection of probe account: {err}"
         );
     }

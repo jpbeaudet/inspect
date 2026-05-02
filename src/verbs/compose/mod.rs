@@ -53,7 +53,9 @@ mod pull;
 mod resolve;
 mod restart;
 mod up;
-mod write_common;
+// L8 (v0.1.3): exposed pub(crate) so the bundle's compose: step
+// can reuse the command builders + audit-arg formatter.
+pub(crate) mod write_common;
 
 pub fn dispatch(args: ComposeArgs) -> Result<ExitKind> {
     match args.command {

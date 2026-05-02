@@ -1250,6 +1250,76 @@ re-binding.
 **JSON schemas.** See `inspect help compose` for the full
 per-sub-verb JSON schema reference.
 
+**Per-service narrowing (L8, v0.1.3).** `compose up`/`down`/
+`pull`/`build` now accept `<ns>/<project>/<service>` for one-service
+operations:
+
+```sh
+inspect compose up arte/luminary-onyx/onyx-vault --apply       # bring up just one service
+inspect compose down arte/luminary-onyx/onyx-vault --apply     # stop + rm just one service
+inspect compose pull arte/luminary-onyx/onyx-vault --apply     # pull just one image
+inspect compose build arte/luminary-onyx/onyx-vault --no-cache --apply
+```
+
+Per-service `compose down` uses the explicit
+`docker compose -p <p> stop <svc> && rm -f <svc>` shape rather than
+`compose down <svc>` (which behaves inconsistently across compose
+versions). Other services in the project remain running. The verb
+refuses `--volumes` and `--rmi` on per-service selectors — both are
+project-scoped and silently honoring them against one service would
+either no-op (confusing) or wipe data shared with siblings (worse).
+
+Audit args carry `[service=<svc>]` alongside the existing
+`[project=<p>] [compose_file_hash=<sha>]` so post-mortem queries
+can filter for the per-service slice.
+
+**`compose logs` triage surface (L8, v0.1.3).** The verb now
+matches `inspect logs`'s F8 contract:
+
+```sh
+inspect compose logs arte/luminary-onyx --tail 200 --match ERROR --exclude healthcheck
+inspect compose logs arte/luminary-onyx --merged --follow         # explicit multi-service stream
+inspect compose logs arte/luminary-onyx --cursor ./onyx.cursor --tail 200
+```
+
+`--match` / `--exclude` push down to a remote `grep -E` pipeline so
+the SSH transport never carries lines we are about to drop.
+`--merged` is an assertion flag — project-level form is already
+interleaved with `[<service>]` prefixes (compose's default); the
+flag rejects per-service selectors so the contract is unambiguous.
+`--cursor <PATH>` resumes from the ISO-8601 timestamp recorded in
+the cursor file, forces `--timestamps` on docker compose logs, and
+writes the latest seen timestamp back atomically on stream end.
+Mutex with `--since`.
+
+**Bundle `compose:` step kind (L8, v0.1.3).** Bundle steps can
+drive compose actions structurally:
+
+```yaml
+steps:
+  - id: stop-api
+    target: arte
+    compose:
+      project: luminary-onyx
+      action: down                # up|down|pull|build|restart
+      service: api                # optional
+      flags:
+        volumes: false
+    rollback: |
+      true
+```
+
+Plan-time validates the project against the namespace's cached
+profile (project must exist) and rejects unknown flag keys per
+action. Per-service `down` rejects `flags.volumes` / `flags.rmi`
+(both project-scoped). Audit shape mirrors the standalone
+`inspect compose <action>` verbs: `verb=compose.<action>`,
+`args="[project=…] [service=…] [compose_file_hash=…]"`,
+`revert.kind=command_pair` for up/down/restart/build (the inverse
+points at the matching compose verb), `revert.kind=unsupported`
+for pull. Bundle steps are still single-target — the bundle's
+`host:` (or step's `target:`) supplies the namespace.
+
 ---
 
 ## 8. Audit and revert

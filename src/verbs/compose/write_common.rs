@@ -26,7 +26,7 @@ use crate::verbs::runtime::RemoteRunner;
 /// hex chars of its SHA-256. Returns `String::new()` on any
 /// failure — the audit entry still records project + service so a
 /// best-effort hash is enough.
-pub(super) fn compose_file_sha_short(
+pub(crate) fn compose_file_sha_short(
     runner: &dyn RemoteRunner,
     ns: &str,
     target: &SshTarget,
@@ -48,7 +48,7 @@ pub(super) fn compose_file_sha_short(
 /// compose write. The optional service portion is included only
 /// when present (per-service pull / build / restart). The hash is
 /// elided when the cat probe failed so we don't stamp an empty tag.
-pub(super) fn project_tags(
+pub(crate) fn project_tags(
     project: &str,
     service: Option<&str>,
     compose_hash: &str,
@@ -72,7 +72,7 @@ pub(super) fn project_tags(
 /// [args] [service]` command for the compose write verbs. `extra`
 /// is the per-verb flag set already shquoted; `service` narrows the
 /// invocation when set.
-pub(super) fn build_compose_cmd(
+pub(crate) fn build_compose_cmd(
     project: &ComposeProject,
     sub: &str,
     extra_flags: &[&str],
@@ -89,4 +89,21 @@ pub(super) fn build_compose_cmd(
         parts.push(shquote(svc));
     }
     parts.join(" ")
+}
+
+/// L8 (v0.1.3): per-service teardown command shape. `docker compose
+/// down <svc>` is not a documented form and behaves inconsistently
+/// across compose versions; the explicit two-step (`stop <svc> && rm
+/// -f <svc>`) is what every operator's runbook uses and what
+/// docker-compose-down's per-service semantics actually mean. Other
+/// services in the project remain running. `--volumes` and `--rmi`
+/// are rejected at the verb layer (see `compose down`'s caller).
+pub(crate) fn build_compose_per_service_down_cmd(
+    project: &ComposeProject,
+    service: &str,
+) -> String {
+    let wd = shquote(&project.working_dir);
+    let p = shquote(&project.name);
+    let svc = shquote(service);
+    format!("cd {wd} && docker compose -p {p} stop {svc} && docker compose -p {p} rm -f {svc}",)
 }

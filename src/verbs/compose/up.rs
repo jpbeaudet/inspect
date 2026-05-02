@@ -1,5 +1,6 @@
-//! F6 (v0.1.3): `inspect compose up <ns>/<project>` — bring up a
-//! compose project. Audited (`verb=compose.up`).
+//! F6 (v0.1.3) + L8 (v0.1.3): `inspect compose up <ns>/<project>[/<service>]`
+//! — bring up a compose project, or one service inside it. Audited
+//! (`verb=compose.up`).
 //!
 //! Default invocation is `docker compose -p <p> up -d` (detached);
 //! `--no-detach` switches to foreground (rare under inspect because
@@ -7,11 +8,20 @@
 //! stdout). `--force-recreate` is a passthrough for the standard
 //! compose flag.
 //!
+//! L8 (v0.1.3): when the selector includes a service portion, the
+//! invocation narrows to that one service (`docker compose -p <p>
+//! up -d <svc>`). Other services in the project are unaffected. The
+//! audit args carry an additional `[service=<svc>]` tag so a
+//! post-mortem can distinguish "brought the whole project up" from
+//! "brought one service up".
+//!
 //! Revert: compose up has no clean inverse (the only honest answer
 //! is `compose down`, but down has its own destructive side-effects
 //! around volumes and networks). Recorded as `revert.kind =
 //! unsupported` with a preview pointing the operator at
-//! `inspect compose down` if they want to roll back.
+//! `inspect compose down` (project-level) or
+//! `inspect compose down <ns>/<p>/<svc>` (per-service) if they want
+//! to roll back.
 
 use std::time::Instant;
 
@@ -43,7 +53,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
         None => {
             crate::error::emit(format!(
                 "selector '{}' is missing the project portion — \
-                 expected '<ns>/<project>'",
+                 expected '<ns>/<project>[/<service>]'",
                 args.selector
             ));
             return Ok(ExitKind::Error);
@@ -58,7 +68,9 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     };
 
     // Build flag set: `-d` unless --no-detach; --force-recreate is
-    // passthrough.
+    // passthrough. L8 (v0.1.3): per-service narrowing comes through
+    // `parsed.service` and is appended to the command by
+    // `build_compose_cmd`.
     let mut flags: Vec<&str> = Vec::new();
     if !args.no_detach {
         flags.push("-d");
@@ -66,7 +78,12 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     if args.force_recreate {
         flags.push("--force-recreate");
     }
-    let cmd = build_compose_cmd(&project, "up", &flags, None);
+    let cmd = build_compose_cmd(&project, "up", &flags, parsed.service.as_deref());
+    let scope = parsed
+        .service
+        .as_deref()
+        .map(|s| format!("service {s}"))
+        .unwrap_or_else(|| "every service".to_string());
 
     let runner = current_runner();
     let (_resolved, target) = resolve_target(&parsed.namespace)?;
@@ -75,13 +92,14 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     if !gate.should_apply() {
         let doc = OutputDoc::new(
             format!(
-                "DRY RUN. Would `compose up` on {ns}/{p}",
+                "DRY RUN. Would `compose up` ({scope}) on {ns}/{p}",
                 ns = parsed.namespace,
                 p = project.name
             ),
             json!({
                 "namespace": parsed.namespace,
                 "project": project.name,
+                "service": parsed.service,
                 "rendered_cmd": cmd,
                 "would_apply": false,
             }),
@@ -112,10 +130,14 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     let out = runner.run(&parsed.namespace, &target, &cmd, RunOpts::with_timeout(300))?;
     let dur = started.elapsed().as_millis() as u64;
 
-    let mut entry = AuditEntry::new(
-        "compose.up",
-        &format!("{}/{}", parsed.namespace, project.name),
-    );
+    // L8: audit selector includes the service portion when narrowed
+    // so post-mortem queries can distinguish per-service from
+    // project-level invocations without re-parsing the args text.
+    let audit_selector = match parsed.service.as_deref() {
+        Some(svc) => format!("{}/{}/{}", parsed.namespace, project.name, svc),
+        None => format!("{}/{}", parsed.namespace, project.name),
+    };
+    let mut entry = AuditEntry::new("compose.up", &audit_selector);
     entry.exit = out.exit_code;
     entry.duration_ms = dur;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
@@ -128,12 +150,26 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     if args.force_recreate {
         extras.push("[force_recreate=true]");
     }
-    entry.args = project_tags(&project.name, None, &compose_hash, &extras);
+    entry.args = project_tags(
+        &project.name,
+        parsed.service.as_deref(),
+        &compose_hash,
+        &extras,
+    );
+    let revert_target = match parsed.service.as_deref() {
+        Some(svc) => format!(
+            "inspect compose down {ns}/{p}/{svc} --apply",
+            ns = parsed.namespace,
+            p = project.name,
+        ),
+        None => format!(
+            "inspect compose down {ns}/{p} --apply",
+            ns = parsed.namespace,
+            p = project.name,
+        ),
+    };
     entry.revert = Some(Revert::unsupported(format!(
-        "compose up has no clean inverse; \
-         run `inspect compose down {ns}/{p} --apply` to roll back",
-        ns = parsed.namespace,
-        p = project.name
+        "compose up has no clean inverse; run `{revert_target}` to roll back"
     )));
     let store = AuditStore::open()?;
     store.append(&entry)?;
@@ -152,19 +188,16 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
         }
     }
 
+    let label = audit_selector.as_str();
     let summary = if out.ok() {
         format!(
-            "compose up {ns}/{p} ok (audit_id={id}, {dur}ms)",
-            ns = parsed.namespace,
-            p = project.name,
+            "compose up {label} ok (audit_id={id}, {dur}ms)",
             id = entry.id,
             dur = dur
         )
     } else {
         format!(
-            "compose up {ns}/{p} FAILED (exit {code}, audit_id={id}): {err}",
-            ns = parsed.namespace,
-            p = project.name,
+            "compose up {label} FAILED (exit {code}, audit_id={id}): {err}",
             code = out.exit_code,
             id = entry.id,
             err = out.stderr.trim()
@@ -176,6 +209,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
         json!({
             "namespace": parsed.namespace,
             "project": project.name,
+            "service": parsed.service,
             "audit_id": entry.id,
             "exit": out.exit_code,
             "duration_ms": dur,
@@ -194,12 +228,23 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
             "verify the per-service state",
         ));
     } else {
-        doc.push_next(NextStep::new(
-            format!(
+        // L8: failure NextStep narrows to the service when one was
+        // specified, so the operator's eye lands on the right log
+        // tail without re-typing the selector.
+        let logs_target = match parsed.service.as_deref() {
+            Some(svc) => format!(
+                "inspect compose logs {ns}/{p}/{svc} --tail 200",
+                ns = parsed.namespace,
+                p = project.name,
+            ),
+            None => format!(
                 "inspect compose logs {ns}/{p} --tail 200",
                 ns = parsed.namespace,
-                p = project.name
+                p = project.name,
             ),
+        };
+        doc.push_next(NextStep::new(
+            logs_target,
             "look at recent logs to triage the failure",
         ));
     }

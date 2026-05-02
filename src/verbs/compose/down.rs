@@ -1,10 +1,24 @@
-//! F6 (v0.1.3): `inspect compose down <ns>/<project>` — tear down a
-//! compose project. Audited (`verb=compose.down`).
+//! F6 (v0.1.3) + L8 (v0.1.3): `inspect compose down
+//! <ns>/<project>[/<service>]` — tear down a compose project, or
+//! stop + remove a single service. Audited (`verb=compose.down`).
 //!
 //! `--volumes` is destructive (matches docker's `--volumes` semantics
 //! for named volumes); the audit args carry an explicit
 //! `[volumes=true]` tag so post-mortem readers see at a glance that
 //! data may have been wiped.
+//!
+//! L8 (v0.1.3): when the selector includes a service portion, the
+//! shape changes to a compound command:
+//! `docker compose -p <p> stop <svc> && docker compose -p <p> rm -f
+//! <svc>`. This stops and removes only that service's container,
+//! preserving every other service in the project. Per-service
+//! `--volumes` is rejected loudly — compose's named-volume removal
+//! is project-scoped (volumes are referenced by *every* service
+//! that mounts them), and silently honoring `--volumes` against a
+//! single-service tear-down would either no-op (confusing) or wipe
+//! data shared with other services (worse). Per-service `--rmi` is
+//! also rejected for the same reason: `--rmi local` operates on
+//! the project's image set as a whole.
 //!
 //! Revert: `revert.kind = unsupported`. The honest counterpart is
 //! `inspect compose up`, but a `--volumes` down obliterates state
@@ -26,7 +40,9 @@ use crate::verbs::output::{NextStep, OutputDoc};
 use crate::verbs::runtime::{current_runner, resolve_target};
 
 use super::resolve::{project_in_profile, Parsed};
-use super::write_common::{build_compose_cmd, compose_file_sha_short, project_tags};
+use super::write_common::{
+    build_compose_cmd, build_compose_per_service_down_cmd, compose_file_sha_short, project_tags,
+};
 
 pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;
@@ -42,7 +58,7 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         None => {
             crate::error::emit(format!(
                 "selector '{}' is missing the project portion — \
-                 expected '<ns>/<project>'",
+                 expected '<ns>/<project>[/<service>]'",
                 args.selector
             ));
             return Ok(ExitKind::Error);
@@ -56,6 +72,39 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         }
     };
 
+    // L8 (v0.1.3): per-service narrowing has different semantics than
+    // project-level down — `--volumes` and `--rmi` are project-scoped
+    // operations and silently honoring them against one service would
+    // either no-op or wipe data the operator did not intend to touch.
+    if let Some(svc) = parsed.service.as_deref() {
+        if args.volumes {
+            crate::error::emit(format!(
+                "compose down --volumes is not supported for per-service selectors \
+                 ('{ns}/{p}/{svc}'). Named volumes are project-scoped, often shared \
+                 across services; removing them while only one service is being \
+                 torn down would silently affect other services. \
+                 hint: tear the whole project down with `inspect compose down {ns}/{p} \
+                 --volumes --apply`, or stop just this service with `inspect compose \
+                 down {ns}/{p}/{svc} --apply` (no --volumes).",
+                ns = parsed.namespace,
+                p = project.name,
+            ));
+            return Ok(ExitKind::Error);
+        }
+        if args.rmi {
+            crate::error::emit(format!(
+                "compose down --rmi is not supported for per-service selectors \
+                 ('{ns}/{p}/{svc}'). `--rmi local` operates on the project's image \
+                 set as a whole. \
+                 hint: drop --rmi to stop + remove just this service, or run \
+                 `inspect compose down {ns}/{p} --rmi --apply` against the project.",
+                ns = parsed.namespace,
+                p = project.name,
+            ));
+            return Ok(ExitKind::Error);
+        }
+    }
+
     let mut flags: Vec<&str> = Vec::new();
     if args.volumes {
         flags.push("--volumes");
@@ -64,7 +113,19 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         flags.push("--rmi");
         flags.push("local");
     }
-    let cmd = build_compose_cmd(&project, "down", &flags, None);
+    // L8: per-service form is `stop <svc> && rm -f <svc>` rather than
+    // `down <svc>` — `docker compose down <svc>` is not a documented
+    // shape and behaves inconsistently across compose versions. The
+    // explicit two-step is what every operator's runbook says.
+    let cmd = match parsed.service.as_deref() {
+        Some(svc) => build_compose_per_service_down_cmd(&project, svc),
+        None => build_compose_cmd(&project, "down", &flags, None),
+    };
+    let scope = parsed
+        .service
+        .as_deref()
+        .map(|s| format!("service {s}"))
+        .unwrap_or_else(|| "project".to_string());
 
     let runner = current_runner();
     let (_resolved, target) = resolve_target(&parsed.namespace)?;
@@ -78,13 +139,14 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         };
         let doc = OutputDoc::new(
             format!(
-                "DRY RUN. Would `compose down` on {ns}/{p}{warning}",
+                "DRY RUN. Would `compose down` ({scope}) on {ns}/{p}{warning}",
                 ns = parsed.namespace,
                 p = project.name
             ),
             json!({
                 "namespace": parsed.namespace,
                 "project": project.name,
+                "service": parsed.service,
                 "rendered_cmd": cmd,
                 "destructive": args.volumes,
                 "would_apply": false,
@@ -114,10 +176,11 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
     let out = runner.run(&parsed.namespace, &target, &cmd, RunOpts::with_timeout(300))?;
     let dur = started.elapsed().as_millis() as u64;
 
-    let mut entry = AuditEntry::new(
-        "compose.down",
-        &format!("{}/{}", parsed.namespace, project.name),
-    );
+    let audit_selector = match parsed.service.as_deref() {
+        Some(svc) => format!("{}/{}/{}", parsed.namespace, project.name, svc),
+        None => format!("{}/{}", parsed.namespace, project.name),
+    };
+    let mut entry = AuditEntry::new("compose.down", &audit_selector);
     entry.exit = out.exit_code;
     entry.duration_ms = dur;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
@@ -130,18 +193,33 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
     if args.rmi {
         extras.push("[rmi=local]");
     }
-    entry.args = project_tags(&project.name, None, &compose_hash, &extras);
+    entry.args = project_tags(
+        &project.name,
+        parsed.service.as_deref(),
+        &compose_hash,
+        &extras,
+    );
+    let revert_target = match parsed.service.as_deref() {
+        Some(svc) => format!(
+            "inspect compose up {ns}/{p}/{svc} --apply",
+            ns = parsed.namespace,
+            p = project.name,
+        ),
+        None => format!(
+            "inspect compose up {ns}/{p} --apply",
+            ns = parsed.namespace,
+            p = project.name,
+        ),
+    };
     entry.revert = Some(Revert::unsupported(format!(
         "compose down has no clean inverse{volumes_note}; \
-         run `inspect compose up {ns}/{p} --apply` to bring services back, \
+         run `{revert_target}` to bring services back, \
          but state in removed volumes is gone",
         volumes_note = if args.volumes {
             " (--volumes obliterates named volumes)"
         } else {
             ""
-        },
-        ns = parsed.namespace,
-        p = project.name
+        }
     )));
     let store = AuditStore::open()?;
     store.append(&entry)?;
@@ -156,19 +234,16 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         data_lines.push(line.to_string());
     }
 
+    let label = audit_selector.as_str();
     let summary = if out.ok() {
         format!(
-            "compose down {ns}/{p} ok (audit_id={id}, {dur}ms)",
-            ns = parsed.namespace,
-            p = project.name,
+            "compose down {label} ok (audit_id={id}, {dur}ms)",
             id = entry.id,
             dur = dur
         )
     } else {
         format!(
-            "compose down {ns}/{p} FAILED (exit {code}, audit_id={id}): {err}",
-            ns = parsed.namespace,
-            p = project.name,
+            "compose down {label} FAILED (exit {code}, audit_id={id}): {err}",
             code = out.exit_code,
             id = entry.id,
             err = out.stderr.trim()
@@ -180,6 +255,7 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         json!({
             "namespace": parsed.namespace,
             "project": project.name,
+            "service": parsed.service,
             "audit_id": entry.id,
             "exit": out.exit_code,
             "duration_ms": dur,
@@ -189,10 +265,25 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
     )
     .with_meta("selector", args.selector.clone())
     .with_quiet(args.format.quiet);
-    doc.push_next(NextStep::new(
-        format!("inspect compose ls {ns}", ns = parsed.namespace),
-        "confirm the project no longer appears as running",
-    ));
+    // L8: per-service teardown points the operator at `compose ps` so
+    // they can confirm the rest of the project is still healthy.
+    // Project-level teardown points at `compose ls` because the
+    // project itself should now be gone.
+    let next_target = match parsed.service.as_deref() {
+        Some(_) => (
+            format!(
+                "inspect compose ps {ns}/{p}",
+                ns = parsed.namespace,
+                p = project.name,
+            ),
+            "confirm the rest of the project is still healthy",
+        ),
+        None => (
+            format!("inspect compose ls {ns}", ns = parsed.namespace),
+            "confirm the project no longer appears as running",
+        ),
+    };
+    doc.push_next(NextStep::new(next_target.0, next_target.1));
     crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
 
     Ok(if out.ok() {

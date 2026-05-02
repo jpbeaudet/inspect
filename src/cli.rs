@@ -487,11 +487,14 @@ READ SUBCOMMANDS
   logs     Aggregated logs for a project, or one service inside it.
 
 WRITE SUBCOMMANDS (audited; require --apply)
-  up       Bring up a project. verb=compose.up.
-  down     Tear down a project. verb=compose.down. --volumes is destructive.
-  pull     Pull images for a project. verb=compose.pull. Streams progress.
-  build    Build images for a project. verb=compose.build. Streams progress.
-  restart  Restart a single service. verb=compose.restart.
+  up       Bring up a project (or one service). verb=compose.up.
+  down     Tear down a project (or stop+rm one service). verb=compose.down.
+           --volumes is destructive (project-level only).
+  pull     Pull images for a project (or one service). verb=compose.pull.
+           Streams progress.
+  build    Build images for a project (or one service). verb=compose.build.
+           Streams progress.
+  restart  Restart a project or one service. verb=compose.restart.
 
 EXEC (inspect-run-style; not audited)
   exec     Run a command inside a compose service container. Mirrors
@@ -501,41 +504,59 @@ EXEC (inspect-run-style; not audited)
 SELECTORS
   <ns>                       — for `compose ls`
   <ns>/<project>             — for `compose ps`, `compose config`,
-                               aggregated `compose logs`, and
-                               `compose restart --all`
-  <ns>/<project>/<service>   — for narrowed `compose logs` and
-                               for `compose restart` (the safe default)
+                               aggregated `compose logs`, and project-
+                               level `up`/`down`/`pull`/`build`
+                               (and `compose restart --all`)
+  <ns>/<project>/<service>   — narrowed form. L8 (v0.1.3): every write
+                               verb above honors per-service narrowing.
+                               `compose down <ns>/<p>/<svc>` stops + rm's
+                               only that service (project's other services
+                               keep running). Per-service `compose down`
+                               rejects `--volumes` and `--rmi` (both are
+                               project-scoped).
 
   The existing `<ns>/<service>` form continues to work for the
   generic read/write verbs (`inspect logs`, `inspect restart`) because
   F5's resolver tries the compose service label first.
 
 JSON SCHEMAS (--json)
-  ls:      data.compose_projects = [{name, status, working_dir,
-           compose_file, service_count, running_count}, ...]
-  ps:      data.services = [{service, state, ports, image, uptime}, ...]
-  restart: audit entry with verb=compose.restart, plus per-service rows
-           in DATA. Each audit entry records project, service, and
-           compose_file_hash so the post-mortem can verify the file
-           didn't change between the audit and a re-run.
+  ls:       data.compose_projects = [{name, status, working_dir,
+            compose_file, service_count, running_count}, ...]
+  ps:       data.services = [{service, state, ports, image, uptime}, ...]
+  up/down/pull/build/restart:
+            audit entry with verb=compose.<sub>, with `service` non-null
+            on per-service invocations. Each audit entry records
+            project, service (when narrowed), and compose_file_hash so
+            the post-mortem can verify the file didn't change between
+            the audit and a re-run.
+  logs (L8, v0.1.3):
+            --merged interleaves every service's stream with `[<service>]`
+            prefixes; --cursor <PATH> resumes from the last byte position
+            recorded for that selector; --match <PAT> / --exclude <PAT>
+            line-filter the stream.
 
 EXIT CODES
   0   ok
   1   no matching compose project / service
   2   usage error (missing service portion without --all, malformed selector,
-      or one of the deferred sub-verbs)
+      per-service `--volumes` or `--rmi`)
 
 EXAMPLES
   $ inspect compose ls arte
   $ inspect compose ps arte/luminary-onyx
   $ inspect compose config arte/luminary-onyx --json
   $ inspect compose logs arte/luminary-onyx --tail 200
+  $ inspect compose logs arte/luminary-onyx --merged --tail 200
+  $ inspect compose logs arte/luminary-onyx --merged --match ERROR --exclude healthcheck
+  $ inspect compose logs arte/luminary-onyx --cursor ./onyx.cursor --tail 200
   $ inspect compose logs arte/luminary-onyx/onyx-vault --follow
   $ inspect compose restart arte/luminary-onyx/onyx-vault --apply
   $ inspect compose up arte/luminary-onyx --apply
+  $ inspect compose up arte/luminary-onyx/onyx-vault --apply
   $ inspect compose down arte/luminary-onyx --apply --yes
-  $ inspect compose pull arte/luminary-onyx --apply
-  $ inspect compose build arte/luminary-onyx --no-cache --apply
+  $ inspect compose down arte/luminary-onyx/onyx-vault --apply
+  $ inspect compose pull arte/luminary-onyx/onyx-vault --apply
+  $ inspect compose build arte/luminary-onyx/onyx-vault --no-cache --apply
   $ inspect compose exec arte/luminary-onyx/onyx-vault -- ps -ef";
 
 const LONG_EXEC: &str = "\
@@ -922,9 +943,9 @@ EXAMPLES
 
 const LONG_BUNDLE: &str = "\
 YAML-driven multi-step orchestration. A bundle declares preflight \
-checks, an ordered list of steps (exec / run / watch), per-step \
-rollback actions, an optional bundle-level rollback block, and \
-postflight checks.
+checks, an ordered list of steps (exec / run / watch / compose), \
+per-step rollback actions, an optional bundle-level rollback block, \
+and postflight checks.
 
 Subcommands:
   plan    Validate the bundle, interpolate {{ vars.* }} / {{ matrix.* }},
@@ -956,6 +977,34 @@ Per-branch rollback (L6, v0.1.3):
   bug is fixed). `inspect bundle status <id>` renders the per-branch
   table with ✓ (ok) / ✗ (failed) / · (skipped) / ↶ (rollback ok)
   markers.
+
+Compose step kind (L8, v0.1.3):
+  Bundle steps can drive compose actions structurally instead of
+  shelling out. The body is:
+
+    - id: stop-api
+      target: arte
+      compose:
+        project: luminary-onyx
+        action: down                # up|down|pull|build|restart
+        service: api                # optional; project-level when omitted
+        flags:                      # passthrough; action-aware allowlist
+          volumes: false            #   down: volumes, rmi
+          # other allowed: up: force_recreate, no_detach
+          # pull: ignore_pull_failures; build: no_cache, pull
+      rollback: |
+        # operator-authored shell; runs against the same target.
+        true
+
+  Plan time validates the project against the namespace's cached
+  profile (project must exist) and that every key in `flags:` is
+  recognized by the action. Per-service `down` rejects
+  `volumes: true` / `rmi: true` (both project-scoped). Audit shape
+  matches the standalone `inspect compose <action>` verbs:
+  `verb=compose.<action>`, `args=\"[project=…] [service=…]
+  [compose_file_hash=…]\"`, with `revert.kind=command_pair` for
+  up/down/restart/build (the inverse points at the matching compose
+  verb) and `revert.kind=unsupported` for pull.
 
 EXAMPLES
   $ inspect bundle plan deploy.yaml
@@ -3431,7 +3480,8 @@ pub struct ComposeLogsArgs {
     pub selector: String,
     /// Show logs since duration (e.g. `30s`, `5m`, `1h`, `2d`).
     /// Forwarded as `docker compose logs --since <duration>`.
-    #[arg(long)]
+    /// Mutex with `--cursor`.
+    #[arg(long, conflicts_with = "cursor")]
     pub since: Option<String>,
     /// Number of lines from the tail. Forwarded as `--tail N`.
     #[arg(long)]
@@ -3442,6 +3492,32 @@ pub struct ComposeLogsArgs {
     /// L7 (v0.1.3): print secret-shaped values verbatim.
     #[arg(long)]
     pub show_secrets: bool,
+    /// L8 (v0.1.3): regex line-filter applied AFTER docker compose
+    /// emits each line (compose itself has no built-in filter).
+    /// Repeatable; multiple patterns OR together. Composes with
+    /// `--exclude`. Mirrors `inspect logs --match`.
+    #[arg(long, value_name = "REGEX")]
+    pub r#match: Vec<String>,
+    /// L8 (v0.1.3): regex line-filter that drops matching lines after
+    /// `--match`. Repeatable; multiple patterns OR together. Mirrors
+    /// `inspect logs --exclude`.
+    #[arg(long, value_name = "REGEX")]
+    pub exclude: Vec<String>,
+    /// L8 (v0.1.3): assert this is a multi-service merged stream.
+    /// Project-level form is already interleaved (compose's default);
+    /// `--merged` makes the contract explicit and rejects per-service
+    /// selectors. JSON output gains an explicit `mode: "merged"`.
+    #[arg(long)]
+    pub merged: bool,
+    /// L8 (v0.1.3): resume from the timestamp recorded in the cursor
+    /// file. The verb forces `--timestamps` on docker compose logs so
+    /// each line carries an ISO-8601 prefix; after the stream
+    /// finishes, the latest timestamp is written back to the cursor
+    /// for next time. Atomic write via tempfile + rename. The cursor
+    /// file holds a single line — no secrets. `--cursor` and
+    /// `--since` are mutually exclusive (both pin the start).
+    #[arg(long, value_name = "PATH")]
+    pub cursor: Option<std::path::PathBuf>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -3487,7 +3563,9 @@ pub struct ComposeRestartArgs {
 
 #[derive(Debug, Args)]
 pub struct ComposeUpArgs {
-    /// Project selector: `<ns>/<project>`.
+    /// Project or service selector: `<ns>/<project>[/<service>]`.
+    /// With a service portion (L8, v0.1.3), only that one service is
+    /// brought up; other services in the project are unaffected.
     pub selector: String,
     /// Run the project in the foreground (drops the default `-d`).
     /// Useful only when piping to a TUI; rare in inspect's audited
@@ -3516,15 +3594,26 @@ pub struct ComposeUpArgs {
 
 #[derive(Debug, Args)]
 pub struct ComposeDownArgs {
-    /// Project selector: `<ns>/<project>`.
+    /// Project or service selector: `<ns>/<project>[/<service>]`.
+    /// With a service portion (L8, v0.1.3), the verb stops + removes
+    /// only that service's container (`docker compose -p <p> stop
+    /// <svc> && rm -f <svc>`); other services in the project remain
+    /// running. Per-service `--volumes` and `--rmi` are rejected
+    /// loudly because both are project-scoped operations.
     pub selector: String,
     /// Also remove named volumes declared in the compose file.
     /// **DESTRUCTIVE.** Confirms via the standard apply gate; pair
     /// with `--apply --yes-all` only after you've manually verified
-    /// the volume contents are recoverable.
+    /// the volume contents are recoverable. Rejected with a chained
+    /// hint when paired with a per-service selector — named volumes
+    /// are project-scoped (often shared across services), so removing
+    /// them while only one service is being torn down would silently
+    /// affect siblings.
     #[arg(long)]
     pub volumes: bool,
     /// Also remove all images used by the project (`--rmi local`).
+    /// Rejected with a chained hint on per-service selectors — `--rmi
+    /// local` operates on the project's image set as a whole.
     #[arg(long)]
     pub rmi: bool,
     /// Actually perform the down. Without this flag, the verb is a
