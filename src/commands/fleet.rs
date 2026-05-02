@@ -604,6 +604,10 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
                     skip_existing_mux_check: false,
                     password_auth,
                     password_env: resolved.config.password_env.as_deref(),
+                    // Fleet prewarm never saves to keychain — that
+                    // is an explicit operator opt-in via
+                    // `inspect connect <ns> --save-passphrase`.
+                    save_to_keychain: false,
                 };
                 let ttl = crate::ssh::ttl::resolve_with_ns(
                     None,

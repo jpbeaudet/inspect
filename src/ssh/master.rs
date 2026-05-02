@@ -44,6 +44,14 @@ pub enum AuthMode {
     /// L4 (v0.1.3): inspect started a master; password came from an
     /// interactive prompt (one-shot per attempt; up to 3 attempts).
     InteractivePassword,
+    /// L2 (v0.1.3): inspect started a master; key passphrase came
+    /// from the OS keychain (previously saved with
+    /// `--save-passphrase`).
+    KeychainPassphrase,
+    /// L2 (v0.1.3): inspect started a master; password came from
+    /// the OS keychain (previously saved with `--save-passphrase`
+    /// against a `auth = "password"` namespace).
+    KeychainPassword,
     /// We didn't open a master because one was already running for this ns.
     AlreadyOpen,
 }
@@ -57,6 +65,8 @@ impl AuthMode {
             AuthMode::InteractivePrompt => "interactive",
             AuthMode::EnvPassword => "env-password",
             AuthMode::InteractivePassword => "interactive-password",
+            AuthMode::KeychainPassphrase => "keychain-passphrase",
+            AuthMode::KeychainPassword => "keychain-password",
             AuthMode::AlreadyOpen => "already-open",
         }
     }
@@ -222,6 +232,12 @@ pub struct AuthSelection<'a> {
     /// Falls back to interactive prompt when `None` (and
     /// `allow_interactive` is true).
     pub password_env: Option<&'a str>,
+    /// L2 (v0.1.3): when `true`, save the prompted credential to
+    /// the OS keychain after a successful master start so future
+    /// connects in fresh shell sessions don't re-prompt. Set by
+    /// `inspect connect --save-passphrase`. Backend unavailable →
+    /// warns once and continues without saving.
+    pub save_to_keychain: bool,
 }
 
 /// Start (or reuse) a ControlMaster for `target`.
@@ -316,6 +332,39 @@ pub fn start_master(
         });
     }
 
+    // (4.5) L2 (v0.1.3): consult the OS keychain. This step fires only
+    // when an entry was previously saved for `namespace`; missing
+    // entries (or backend errors) silently fall through to the
+    // interactive prompt below — we never spam stderr on every connect
+    // because the keychain is uninitialized.
+    if let Ok(Some(stored)) = crate::keychain::get(namespace) {
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &stored);
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE)?;
+        let result = run_master(
+            target,
+            ttl,
+            &socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+        );
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        // Wipe the local copy regardless of success.
+        let mut wipe = stored;
+        zeroize_string(&mut wipe);
+        result.with_context(|| {
+            format!(
+                "ssh master failed using stored keychain entry for '{namespace}'. \
+             hint: if the credential rotated, run 'inspect keychain remove {namespace}' \
+             and reconnect to re-save"
+            )
+        })?;
+        return Ok(ConnectOutcome {
+            auth_mode: AuthMode::KeychainPassphrase,
+            socket: Some(socket),
+            ttl: ttl.to_string(),
+        });
+    }
+
     // (5) Interactive.
     if auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let prompt = format!(
@@ -329,7 +378,6 @@ pub fn start_master(
         // Place the secret into a private env var that the askpass helper
         // reads, then immediately wipe our local copy.
         std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &secret);
-        zeroize_string(&mut secret);
         let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE)?;
         let result = run_master(
             target,
@@ -340,6 +388,15 @@ pub fn start_master(
         );
         // Always remove the env var afterward, success or failure.
         std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        // L2 (v0.1.3): if --save-passphrase was set AND the master
+        // came up, persist the secret to the OS keychain BEFORE
+        // wiping it. Backend errors are warnings, not hard failures —
+        // the master is already running so the connect verb has
+        // succeeded.
+        if result.is_ok() && auth.save_to_keychain {
+            save_credential_to_keychain(namespace, &secret, "key passphrase");
+        }
+        zeroize_string(&mut secret);
         result.context("ssh master failed using interactive passphrase")?;
         return Ok(ConnectOutcome {
             auth_mode: AuthMode::InteractivePrompt,
@@ -350,7 +407,7 @@ pub fn start_master(
 
     Err(anyhow!(
         "could not authenticate to '{}@{}:{}': no agent identity, \
-         no key_passphrase_env configured, and stdin is not a TTY",
+         no key_passphrase_env configured, no keychain entry, and stdin is not a TTY",
         target.user,
         target.host,
         target.port
@@ -527,11 +584,51 @@ fn start_master_password(
         });
     }
 
+    // L2 (v0.1.3): consult the OS keychain before prompting. Mirrors
+    // the key-auth path; missing entry / backend error → silent fall
+    // through to the prompt loop. A keychain hit costs no attempts
+    // against the PASSWORD_MAX_ATTEMPTS counter (the operator's stored
+    // credential is presumed correct; if it isn't we surface a
+    // pointed error rather than burning all 3 prompts on it).
+    if let Ok(Some(stored)) = crate::keychain::get(namespace) {
+        std::env::set_var(ENV_INTERACTIVE_PASSWORD, &stored);
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSWORD)?;
+        let result = run_master_with_opts(
+            target,
+            ttl,
+            socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+            PASSWORD_AUTH_SSH_OPTS,
+        );
+        std::env::remove_var(ENV_INTERACTIVE_PASSWORD);
+        let mut wipe = stored;
+        zeroize_string(&mut wipe);
+        match result {
+            Ok(()) => {
+                maybe_warn_password_auth(namespace);
+                return Ok(ConnectOutcome {
+                    auth_mode: AuthMode::KeychainPassword,
+                    socket: Some(socket.to_path_buf()),
+                    ttl: ttl.to_string(),
+                });
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "ssh master failed using stored keychain password for '{namespace}': {e}. \
+                     hint: if the password rotated, run \
+                     'inspect keychain remove {namespace}' and reconnect to re-save"
+                ));
+            }
+        }
+    }
+
     // Path B: interactive prompt with up to PASSWORD_MAX_ATTEMPTS retries.
     if !(auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin())) {
         return Err(anyhow!(
             "namespace '{namespace}' uses password auth but no \
-             password_env is set and stdin is not a TTY (no way to prompt). \
+             password_env is set, no keychain entry exists, and stdin is not a TTY \
+             (no way to prompt). \
              hint: export the password into an env var and add \
              `password_env = \"VAR_NAME\"` to ~/.inspect/servers.toml, or \
              rerun interactively. see: inspect help ssh"
@@ -552,7 +649,6 @@ fn start_master_password(
             return Err(anyhow!("empty password; aborting. see: inspect help ssh"));
         }
         std::env::set_var(ENV_INTERACTIVE_PASSWORD, &secret);
-        zeroize_string(&mut secret);
         let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSWORD)?;
         let result = run_master_with_opts(
             target,
@@ -563,6 +659,12 @@ fn start_master_password(
             PASSWORD_AUTH_SSH_OPTS,
         );
         std::env::remove_var(ENV_INTERACTIVE_PASSWORD);
+        // L2 (v0.1.3): save to keychain BEFORE wiping if requested
+        // AND the master came up. Mirrors the key-auth path.
+        if result.is_ok() && auth.save_to_keychain {
+            save_credential_to_keychain(namespace, &secret, "SSH password");
+        }
+        zeroize_string(&mut secret);
         match result {
             Ok(()) => {
                 maybe_warn_password_auth(namespace);
@@ -604,6 +706,34 @@ pub fn password_warned_path(namespace: &str) -> PathBuf {
     paths::inspect_home()
         .join(".password_warned")
         .join(namespace)
+}
+
+/// L2 (v0.1.3): save a credential to the OS keychain after a
+/// successful interactive master start when the operator passed
+/// `--save-passphrase`. Backend errors are warnings, not hard
+/// failures — the master is already up, so the connect verb has
+/// succeeded; the operator just won't get cross-session reuse.
+fn save_credential_to_keychain(namespace: &str, secret: &str, kind: &str) {
+    match crate::keychain::save(namespace, secret) {
+        Ok(crate::keychain::SaveOutcome::Saved) => {
+            eprintln!(
+                "note: saved {kind} to OS keychain for '{namespace}' (cross-session reuse enabled). \
+                 Use 'inspect keychain remove {namespace}' to undo."
+            );
+        }
+        Ok(crate::keychain::SaveOutcome::AlreadyPresent) => {
+            // Idempotent re-save — silent. The operator passed
+            // --save-passphrase but the keychain already had this
+            // exact secret. No action needed.
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: keychain save for '{namespace}' failed: {e}. \
+                 hint: 'inspect keychain test' to diagnose backend reachability. \
+                 The master came up; subsequent connects will prompt again."
+            );
+        }
+    }
 }
 
 /// L4 (v0.1.3): emit the one-time warning on first successful

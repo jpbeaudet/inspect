@@ -2063,6 +2063,109 @@ traffic, so the real lifetime is at least this long. `--json`
 output gains matching `auth` / `session_ttl` / `expires_in` keys
 on every connection record.
 
+### 15.4 Credential lifetime: ssh-agent vs OS keychain vs env var (L2, v0.1.3)
+
+inspect supports three different lifetimes for SSH credentials.
+Pick the one that matches how long you want the secret to
+survive. The default is recommended for almost everyone; the
+keychain is the explicit opt-in for operators who want
+cross-reboot persistence without leaving secrets in env vars or
+shell history.
+
+**Option 1 — default (ssh-agent + ControlMaster, one prompt per
+shell session).** The first `inspect connect <ns>` prompts (or
+reads `key_passphrase_env` / `password_env` if configured).
+Subsequent verbs ride the master socket without re-prompting
+until the configured TTL expires or you run
+`inspect disconnect <ns>`. Logout / reboot clears the agent; the
+next session prompts once again. **Most operators want this.**
+
+**Option 2 — `--save-passphrase` (OS keychain, persists across
+sessions and reboots).** L2 (v0.1.3). Opt in with:
+
+```sh
+$ inspect connect arte --save-passphrase           # key auth
+$ inspect connect legacy-box --save-password       # password auth (alias)
+```
+
+`inspect` prompts once, opens the master, and saves the
+credential to the OS keychain under service `inspect-cli`,
+account `<ns>`. Subsequent `inspect connect <ns>` invocations in
+fresh shell sessions auto-retrieve from the keychain — but only
+for namespaces previously saved (no implicit cross-namespace
+lookup). Manage stored entries with:
+
+```sh
+$ inspect keychain list                # which namespaces are saved
+$ inspect keychain remove legacy-box   # delete one entry (audited)
+$ inspect keychain test                # probe backend reachability
+```
+
+Backends:
+
+| Platform | Store | Notes |
+|---|---|---|
+| macOS | Keychain Services | accessed via `security` framework |
+| Windows | Credential Manager | also reachable from WSL2 |
+| Linux | Secret Service (DBus) | covers GNOME Keyring + KDE Wallet |
+
+When the OS keychain backend is unavailable (no keyring daemon,
+no session bus, container without a desktop):
+
+- `inspect connect --save-passphrase` warns once on stderr and
+  falls back to per-session prompt. The master still comes up.
+- Auto-retrieval during normal connects silently treats backend
+  errors as "not stored" (no stderr line per call).
+- `inspect keychain test` exits non-zero with a chained hint
+  pointing at which dependency is missing.
+
+**Option 3 — env var (CI / scripted use).** Configure the
+namespace's `key_passphrase_env` (key auth) or `password_env`
+(password auth) field in `~/.inspect/servers.toml`:
+
+```toml
+[namespaces.legacy-box]
+host = "legacy.internal"
+user = "admin"
+auth = "password"
+password_env = "LEGACY_BOX_PASS"
+```
+
+Export the variable in your shell / CI environment; `inspect
+connect` consumes it once at master start. The value is never
+copied to inspect's own files.
+
+**Resolution order** (per namespace, per auth mode):
+
+| Step | Key auth | Password auth (L4) |
+|---|---|---|
+| 1 | live socket reuse | live socket reuse |
+| 2 | user `~/.ssh/config` mux | user mux |
+| 3 | ssh-agent identity | (skip — `PubkeyAuthentication=no`) |
+| 4 | `key_passphrase_env` | `password_env` |
+| 5 | **OS keychain (L2)** | **OS keychain (L2)** |
+| 6 | interactive prompt | interactive prompt (3 attempts) |
+
+**Index file.** `~/.inspect/keychain-index` (mode 0600) lists the
+namespaces with stored entries. Holds **no** secret material —
+only namespace names. Self-healing: `inspect keychain list`
+prunes any index entry the backend no longer recognizes (e.g.,
+operator deleted via `Keychain Access.app` directly).
+
+**Audit shape.** `inspect keychain remove` writes one entry:
+
+```json
+{"verb":"keychain.remove","selector":"<ns>",
+ "args":"[was_present=true|false]","exit":0,
+ "revert":{"kind":"unsupported",
+   "reason":"keychain.remove has no inverse — re-save with
+             'inspect connect <ns> --save-passphrase'"}}
+```
+
+`save` is implicit in `inspect connect --save-passphrase` and is
+audited by the connect entry; the keychain module emits no
+separate row.
+
 ---
 
 ## 16. Configuration reference

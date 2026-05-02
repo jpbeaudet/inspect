@@ -14,6 +14,108 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L2 — OS keychain integration for opt-in cross-session credential
+  persistence.** v0.1.2 onboarding feedback (and the L4 password-auth
+  retrospective): operators on legacy hosts wanted "enter the
+  passphrase / password once, survive a reboot" without leaving
+  secrets in env vars, `.envrc` files, or shell history. ssh-agent +
+  ControlMaster covers within-session reuse already (and remains
+  the recommended default); L2 fills the cross-session gap with an
+  explicit opt-in, never an automatic side-effect.
+  - **Default behavior unchanged.** Without `--save-passphrase`, every
+    code path is byte-identical to v0.1.2: ssh-agent / per-session
+    prompt; nothing written to the keychain. Operators who don't opt
+    in see no change.
+  - **Opt-in flag.** New `--save-passphrase` on `inspect connect`
+    (with `--save-password` alias for the password-auth case).
+    Prompts once, opens the master, saves the credential to the OS
+    keychain under service `inspect-cli`, account `<ns>`. Idempotent
+    re-saves are silent. Backend unavailable → warns once and
+    continues without saving (the master still comes up).
+  - **Auto-retrieval in the credential chain.** New step in
+    `start_master` (key auth) and `start_master_password` (L4 password
+    auth): after the env-var check and before the interactive prompt,
+    `crate::keychain::get(namespace)` is consulted. A hit feeds
+    through the existing SSH_ASKPASS pipeline (same path as the
+    interactive prompt; the keyring secret never lands on disk).
+    Misses and backend errors silently fall through — we never spam
+    stderr on every connect because the keychain happens to be
+    uninitialized. Two new `AuthMode` variants for observability:
+    `keychain-passphrase` and `keychain-password`. F13 reauth and
+    fleet prewarm explicitly do NOT save (an interactive
+    `--save-passphrase` is the only path to persistence; reauth /
+    prewarm shouldn't quietly persist on the operator's behalf).
+  - **`inspect keychain ...` verb cluster.** New `Keychain(KeychainArgs)`
+    enum variant + `commands::keychain` module.
+    - `inspect keychain list` — show stored namespaces (no values).
+      Self-healing: index entries the backend no longer recognizes
+      are pruned silently. JSON envelope:
+      `{"schema_version":1, "namespaces":[...], "backend_status":"available|unavailable", "reason":"..." (optional)}`.
+    - `inspect keychain remove <ns>` — delete one entry. Audited
+      with `verb=keychain.remove, args="[was_present=...]"`,
+      `revert.kind=unsupported` (we don't store the secret;
+      can't replay). Idempotent — removing an absent entry exits 0.
+    - `inspect keychain test` — write/read/delete round-trip probe.
+      Exits 0 on success, 1 with a chained hint when the backend
+      is unreachable. Hint taxonomy matches the keyring crate's
+      common failure modes (no DBus session bus, locked vault,
+      missing keyring daemon).
+  - **Backends.** macOS Keychain Services (`apple-native`), Windows
+    Credential Manager (`windows-native`; reachable from WSL2),
+    Linux Secret Service via DBus (`sync-secret-service`); covers
+    GNOME Keyring and KDE Wallet. Pure-Rust crypto (`crypto-rust`)
+    so we don't depend on system OpenSSL. `vendored` builds libdbus
+    from source so the binary works on systems without dev headers.
+  - **Index file.** `~/.inspect/keychain-index` (mode 0600, atomic
+    writes via `<file>.tmp.<pid>` → rename). Lists namespace names
+    only; no secret material. Exists because `keyring` v3.6's
+    enumeration support is platform-spotty (Linux Secret Service
+    has it; macOS / Windows expose it less cleanly). Self-healing
+    via `keychain::list_namespaces()` which probes each entry's
+    existence on every list call.
+  - **Audit shape.** `keychain.remove` records `args=[was_present=true|false]`
+    plus `revert.kind=unsupported` (we deliberately do NOT store the
+    secret in the audit, so there is no replay path). Save is
+    implicit in `connect --save-passphrase` and audited by the
+    existing connect entry.
+  - **Help surface (load-bearing for agentic callers).** New
+    `LONG_KEYCHAIN` cluster help + `LONG_KEYCHAIN_LIST` /
+    `LONG_KEYCHAIN_REMOVE` / `LONG_KEYCHAIN_TEST` per-sub help in
+    `src/cli.rs`. `src/help/content/ssh.md` gains a "Credential
+    lifetime (L2, v0.1.3)" section enumerating the three options
+    (default ssh-agent / `--save-passphrase` / env var) with
+    resolution-order tables for both auth modes.
+    `("keychain", &["ssh", "safety"])` row added to `VERB_TOPICS`.
+  - **Dependency.** New `keyring = "3.6"` dep with feature combo
+    `apple-native + windows-native + sync-secret-service +
+    crypto-rust + vendored` (default features off). Pre-approved by
+    the L2 spec (the keychain space is the canonical example of the
+    Dependency Policy's "genuinely unsafe to reimplement" exception:
+    Secret Service DBus, Keychain Services API, and Windows
+    Credential Manager each require platform-specific FFI that we
+    are not in the business of writing).
+  - **Tests.** 3 inline unit tests in
+    `src/keychain/mod.rs::tests::l2_*` (`SaveOutcome` variant
+    discriminator; namespace validation rejects internal-prefix and
+    invalid names). 6 in `src/keychain/index.rs::tests::l2_*`
+    (round-trip preserves sort + dedup; empty handling; missing
+    file reads as empty; whitespace stripping; mode 0600 on unix).
+    13 acceptance tests in `tests/phase_f_v013.rs::l2_*` (verb
+    discoverability via help-topic + help-search; `--save-passphrase`
+    flag presence on connect; keychain list empty-state; remove
+    idempotent; test backend unreachable in sandbox; resolution-
+    order per CLAUDE.md). Full suite green: 28 suites, 0 failed.
+    The actual keychain backend round-trip requires a live OS
+    keychain and is exercised by the field-validation gate (the
+    same release-time smoke that L7 PEM streaming and L4 interactive
+    password prompts rely on).
+  - **Composes.** L2 layers cleanly on L4 (password auth) — both
+    auth modes share the same keychain code path; the namespace's
+    `auth` field implicitly disambiguates whether the stored secret
+    is a passphrase or a password. The on-disk shape is one entry
+    per namespace; the keychain itself does not need to know which
+    kind of credential it stores.
+
 - **L4 — Password authentication, extended session TTL, and audited
   `inspect ssh add-key` migration helper.** v0.1.2 onboarding
   feedback: legacy boxes and locked-down bastions that only accept

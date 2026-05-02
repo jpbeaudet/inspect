@@ -267,6 +267,82 @@ EXIT CODES
   1   no matching namespace / install verification failed
   2   argument/usage error (e.g. `--key` path does not exist)";
 
+const LONG_KEYCHAIN: &str = "\
+OS keychain management — opt-in, cross-session passphrase / password \
+persistence (L2, v0.1.3).
+
+WHAT THIS IS FOR
+  Most operators want exactly the v0.1.2 behavior: ssh-agent (or \
+inspect's own ControlMaster) holds the credential for the life of \
+the shell session; logout / reboot clears it; the next session \
+prompts once again. That is the secure default and remains the \
+recommended path. The keychain is for the smaller group of \
+operators who want passphrases (or passwords, after L4) to survive \
+a reboot without leaving them in env vars, .envrc files, or shell \
+history.
+
+OPT-IN FLOW
+  $ inspect connect <ns> --save-passphrase     # also: --save-password
+        Prompts once, opens the master, saves the credential to the
+        OS keychain under service 'inspect-cli', account '<ns>'.
+        Subsequent 'inspect connect <ns>' in fresh shell sessions
+        consult the keychain automatically — but only for namespaces
+        that were previously saved. There is no implicit
+        cross-namespace lookup.
+
+SUBCOMMANDS
+  list      Show stored namespaces (no values).
+  remove    Delete the entry for one namespace.
+  test      Round-trip probe (write/read/delete a known dummy entry).
+
+CREDENTIAL RESOLUTION ORDER
+  Key auth: socket → user mux → ssh-agent → key_passphrase_env → \
+**OS keychain** → interactive prompt.
+  Password auth (L4): socket → user mux → password_env → **OS \
+keychain** → interactive prompt.
+  The keychain is consulted only for namespaces previously saved \
+with --save-passphrase. Missing entry ⇒ silent fall-through to \
+the next step; never an error on the auto-retrieval path.
+
+BACKENDS
+  macOS    Keychain Services
+  Windows  Credential Manager (also reachable from WSL2)
+  Linux    Secret Service via DBus (GNOME Keyring / KDE Wallet)
+
+  Pure-Rust crypto; no system OpenSSL dependency. libdbus is \
+vendored (built from source) so the binary works on systems \
+without dev headers.
+
+HEADLESS / CI
+  When the OS backend is unreachable (no keyring daemon, no \
+session bus, container without a desktop):
+  - --save-passphrase warns once and falls back to per-session
+    prompt; the master still comes up.
+  - Auto-retrieval during normal connects silently treats backend
+    errors as 'not stored' (no stderr line per call).
+  - 'inspect keychain test' is the explicit probe — exits non-zero
+    with a chained hint when the backend is unreachable.
+
+INDEX
+  inspect keeps a small `~/.inspect/keychain-index` (mode 0600, \
+one namespace per line). The index holds NO secret material — \
+only namespace names — and exists because the keyring crate's \
+enumeration support is platform-spotty. 'inspect keychain list' \
+is self-healing: entries the backend no longer recognizes are \
+pruned silently on the next call.
+
+AUDIT
+  inspect keychain remove   verb=keychain.remove, target=<ns>, \
+revert.kind=unsupported (we don't store the secret; can't replay).
+  Save is implicit in 'inspect connect --save-passphrase' and \
+audited by the connect entry; the keychain module emits no \
+separate audit row for the save itself.
+
+EXIT CODES
+  0   ok
+  1   no matching namespace / backend unavailable on 'test'
+  2   argument/usage error";
+
 const LONG_SETUP: &str = "\
 Run discovery against a namespace and persist its profile (containers, \
 volumes, networks, listeners, remote tooling). Cached profiles live \
@@ -952,6 +1028,9 @@ pub enum Command {
     /// L4 (v0.1.3): SSH-related management subcommands (`add-key`).
     #[command(long_about = LONG_SSH)]
     Ssh(SshArgs),
+    /// L2 (v0.1.3): OS keychain management (opt-in, cross-session).
+    #[command(long_about = LONG_KEYCHAIN)]
+    Keychain(KeychainArgs),
 
     // ---- Phase 2 discovery ---------------------------------------------------
     /// Run discovery against a namespace and persist its profile.
@@ -1491,6 +1570,17 @@ pub struct ConnectArgs {
     /// without confirmation).
     #[arg(long)]
     pub detect_path: bool,
+    /// L2 (v0.1.3): save the prompted credential to the OS keychain
+    /// after a successful master start so subsequent connects in
+    /// fresh shell sessions don't re-prompt. Idempotent re-saves
+    /// are silent. The flag works for both auth modes — for
+    /// `auth = "key"` it saves the key passphrase, for
+    /// `auth = "password"` it saves the password. Backend
+    /// unavailable → warns once and continues without saving;
+    /// the master still comes up. Pair with `inspect keychain
+    /// remove <ns>` to undo.
+    #[arg(long, alias = "save-password")]
+    pub save_passphrase: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
@@ -1646,6 +1736,140 @@ EXIT CODES
   0   ok
   1   no matching namespace / install verification failed
   2   argument/usage error (e.g. `--key` path does not exist)";
+
+// L2 (v0.1.3): inspect keychain ... — OS keychain management.
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct KeychainArgs {
+    #[command(subcommand)]
+    pub command: KeychainSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeychainSubcommand {
+    /// Show namespaces with stored keychain entries (no values).
+    #[command(long_about = LONG_KEYCHAIN_LIST)]
+    List(KeychainListArgs),
+    /// Delete the keychain entry for one namespace.
+    #[command(long_about = LONG_KEYCHAIN_REMOVE)]
+    Remove(KeychainRemoveArgs),
+    /// Probe the OS keychain backend with a write/read/delete round-trip.
+    #[command(long_about = LONG_KEYCHAIN_TEST)]
+    Test(KeychainTestArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct KeychainListArgs {
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct KeychainRemoveArgs {
+    /// Namespace whose keychain entry should be deleted.
+    pub namespace: String,
+    /// Free-form note attached to the audit entry. Limited to 240
+    /// characters.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = SEE_ALSO_SSH)]
+pub struct KeychainTestArgs {
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+const LONG_KEYCHAIN_LIST: &str = "\
+List namespaces with stored OS keychain entries (L2, v0.1.3).
+
+OUTPUT
+  Each row is one namespace with a saved entry. The entries are \
+sorted alphabetically. No secret material is shown — only the \
+namespace names.
+
+  Self-healing: any index entry the OS backend no longer recognizes \
+(e.g., the operator deleted it externally via Keychain Access.app \
+or `secret-tool clear ...`) is pruned on this call. Subsequent \
+calls reflect reality.
+
+JSON
+  $ inspect keychain list --json
+  {\"schema_version\":1,\"namespaces\":[\"arte\",\"legacy-box\"],\"backend_status\":\"available\"}
+
+  When the OS backend is unreachable the schema still parses; \
+the names array reflects the on-disk index without backend probing \
+and `backend_status` is \"unavailable\" with a `reason` field.
+
+EXIT CODES
+  0   ok (including the empty case — no namespaces stored)
+  1   backend unavailable AND the on-disk index is also empty
+      (operator never opted into keychain on this machine)";
+
+const LONG_KEYCHAIN_REMOVE: &str = "\
+Delete the OS keychain entry for one namespace (L2, v0.1.3).
+
+USAGE
+  $ inspect keychain remove arte
+  $ inspect keychain remove legacy-box --reason 'rotated key'
+  $ inspect keychain remove arte --json
+
+WHAT IT DOES
+  Removes the `(service=inspect-cli, account=<ns>)` entry from \
+the OS keychain and prunes the namespace from \
+`~/.inspect/keychain-index`. Idempotent — removing an absent \
+entry exits 0 with a `was_present: false` note.
+
+AUDIT
+  Writes one entry per invocation:
+    verb=keychain.remove, target=<ns>,
+    args=\"[was_present=true|false]\",
+    revert.kind=unsupported  (the secret was not stored on the
+    inspect side, so the only re-save path is `inspect connect
+    --save-passphrase`, which prompts for the secret again).
+
+EXIT CODES
+  0   ok (whether or not an entry was actually present)
+  1   keychain backend unavailable
+  2   argument/usage error (e.g., invalid namespace name)";
+
+const LONG_KEYCHAIN_TEST: &str = "\
+Probe the OS keychain backend (L2, v0.1.3).
+
+WHAT IT DOES
+  Writes a known dummy entry under \
+`(service=inspect-cli, account=__inspect_keychain_test__)`, reads \
+it back, and deletes it. If every step succeeds, the backend is \
+reachable and `--save-passphrase` will work on this host. If any \
+step fails, the failure mode is reported with a chained hint at \
+which dependency is missing (no keyring daemon, no session bus, \
+DBus not running, etc.).
+
+USAGE
+  $ inspect keychain test
+  $ inspect keychain test --json
+
+OUTPUT
+  Human form:
+    SUMMARY: keychain backend reachable
+    DATA:
+      backend: keychain (Linux Secret Service / GNOME Keyring)
+      probe:   write + read + delete OK
+
+  JSON form:
+    {\"schema_version\":1,\"status\":\"available\",\"backend\":\"...\"}
+    or
+    {\"schema_version\":1,\"status\":\"unavailable\",\"reason\":\"...\",\"hint\":\"...\"}
+
+EXIT CODES
+  0   backend reachable
+  1   backend unreachable (no keyring daemon, no session bus, etc.)
+      → see the `hint:` line for the next operator action";
 
 #[derive(Debug, Args)]
 #[command(

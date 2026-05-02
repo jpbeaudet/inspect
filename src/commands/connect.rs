@@ -70,6 +70,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
             skip_existing_mux_check: args.no_existing_mux,
             password_auth,
             password_env,
+            save_to_keychain: args.save_passphrase,
         },
     )
     .with_context(|| format!("connect '{}'", resolved.name))?;
@@ -417,6 +418,10 @@ pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
             skip_existing_mux_check: false,
             password_auth,
             password_env,
+            // F13 reauth never saves: the original `inspect connect`
+            // already chose whether to save (or not), and silently
+            // re-saving on every reauth would be surprising.
+            save_to_keychain: false,
         },
     )
     .map(|_| ())

@@ -103,9 +103,53 @@ INSPECT SSH ADD-KEY (L4, v0.1.3)
     [config_rewritten=true|false]"
     revert.kind=command_pair (manual remove from authorized_keys)
 
+CREDENTIAL LIFETIME (L2, v0.1.3)
+  Three options for how long a credential survives. The default
+  is recommended for almost everyone; the keychain path is the
+  explicit opt-in for operators who want survival across reboots.
+
+  (1) DEFAULT — ssh-agent + ControlMaster (one prompt per shell session)
+      The first `inspect connect <ns>` prompts; subsequent verbs
+      ride the ControlMaster socket without re-prompting until
+      the configured TTL expires or the operator runs `inspect
+      disconnect <ns>`. Logout / reboot clears the agent; the
+      next session prompts once again. Most operators want this.
+
+  (2) `--save-passphrase` (or `--save-password`) — OS KEYCHAIN
+      `inspect connect <ns> --save-passphrase` prompts once,
+      opens the master, AND saves the credential to the OS
+      keychain under service `inspect-cli`, account `<ns>`.
+      Subsequent `inspect connect <ns>` in fresh shell sessions
+      auto-retrieve from the keychain — but only for namespaces
+      previously saved (no implicit cross-namespace lookup).
+      Survives reboots. Backed by macOS Keychain Services /
+      Windows Credential Manager / Linux Secret Service (GNOME
+      Keyring / KDE Wallet).
+
+      Headless / CI hosts where the keychain backend is
+      unavailable warn once and fall back to per-session prompt;
+      `inspect keychain test` is the explicit probe.
+
+      Manage with: `inspect keychain list / remove <ns> / test`.
+
+  (3) `key_passphrase_env` / `password_env` — ENV VAR
+      For CI / scripted use: configure the namespace's
+      `key_passphrase_env` (key auth) or `password_env`
+      (password auth) in `~/.inspect/servers.toml` and export
+      the variable. The credential is read at connect time.
+      Inspect never copies the value or writes it to disk.
+
+  RESOLUTION ORDER per credential type:
+    Key auth:      socket → user mux → ssh-agent → key_passphrase_env
+                   → OS keychain → interactive prompt
+    Password auth: socket → user mux → password_env → OS keychain
+                   → interactive prompt (3 attempts)
+
 SECURITY
-  Passwords and passphrases are never written to disk. Keys are
-  never inlined on disk (env only). No auto-trust of unknown host
+  Passwords and passphrases are never written to inspect's own
+  files; the only persistent path is the OS keychain (option 2
+  above), and only when explicitly opted into. Keys are never
+  inlined on disk (env only). No auto-trust of unknown host
   keys. Socket mode 600. Sockets are never shared across users.
   Password auth uses the same SSH_ASKPASS pipeline as passphrase
   delivery — the secret stays in process memory and is wiped

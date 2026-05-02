@@ -216,6 +216,11 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     // the ssh editorial topic (which gained the password-auth +
     // add-key sections in L4) and safety (audit-log shape).
     ("ssh", &["ssh", "safety"]),
+    // L2 (v0.1.3): the `inspect keychain ...` family. Cross-links
+    // into the ssh editorial topic (which gained the credential-
+    // lifetime section in L2) and safety (audit-log shape for the
+    // remove sub-verb).
+    ("keychain", &["ssh", "safety"]),
     // Aliases.
     ("alias", &["aliases", "selectors", "search"]),
     // F6 (v0.1.3): the compose verb cluster cross-links into the

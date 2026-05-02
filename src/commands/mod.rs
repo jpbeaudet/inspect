@@ -13,6 +13,7 @@ pub mod disconnect_all;
 pub mod fleet;
 pub mod help;
 pub mod history;
+pub mod keychain;
 pub mod list;
 pub mod profile;
 pub mod recipe;

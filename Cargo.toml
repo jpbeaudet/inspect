@@ -35,6 +35,13 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 similar = "2"
 unicode-width = "0.1"
 flate2 = "1"
+# L2 (v0.1.3): OS keychain for opt-in cross-session passphrase / password
+# persistence. Pre-approved in INSPECT_v0.1.3_BACKLOG.md (L2 spec). Feature
+# selection picks the native backend on each platform: macOS Keychain,
+# Windows Credential Manager (also reachable from WSL2), Linux Secret
+# Service (GNOME Keyring / KDE Wallet) with pure-Rust crypto so we don't
+# depend on system OpenSSL.
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
