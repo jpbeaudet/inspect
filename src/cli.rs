@@ -731,23 +731,42 @@ rollback actions, an optional bundle-level rollback block, and \
 postflight checks.
 
 Subcommands:
-  plan   Validate the bundle, interpolate {{ vars.* }} / {{ matrix.* }},
-         and print the rendered step list. Never touches a remote.
-  apply  Run preflight, then steps in order. On failure, route via the
-         step's `on_failure:` (abort | continue | rollback | rollback_to:<id>).
-         Postflight runs on success and is reported but does NOT trigger
-         rollback.
+  plan    Validate the bundle, interpolate {{ vars.* }} / {{ matrix.* }},
+          and print the rendered step list. Never touches a remote.
+  apply   Run preflight, then steps in order. On failure, route via the
+          step's `on_failure:` (abort | continue | rollback | rollback_to:<id>).
+          Postflight runs on success and is reported but does NOT trigger
+          rollback.
+  status  L6 (v0.1.3): show per-step + per-branch outcomes for a past
+          `apply` invocation. Reads the local audit log; no remote work.
+          Accepts a `bundle_id` prefix. `--json` emits the structured
+          per-branch outcomes for agent consumption.
 
 Audit:
   Every exec step (and bundle.rollback / bundle.watch action) writes one
   audit entry tagged with bundle_id (a fresh ULID-shaped id per apply
-  invocation) and bundle_step (the step's `id:`). `inspect audit ls
-  --bundle <id>` filters to a single run.
+  invocation) and bundle_step (the step's `id:`). L6 (v0.1.3) adds
+  `bundle_branch` (`<matrix-key>=<value>`) and `bundle_branch_status`
+  (`ok` | `failed` | `skipped`) on per-branch entries from `parallel:
+  true` + `matrix:` steps. `inspect audit grep <bundle_id>` matches
+  every entry tagged with this bundle.
+
+Per-branch rollback (L6, v0.1.3):
+  When a `parallel: true` + `matrix:` step fails partway, on_failure:
+  rollback inverts ONLY the succeeded branches. Failed branches log a
+  `bundle.rollback.skip` audit entry explaining why no inverse fired.
+  The `{{ matrix.<key> }}` reference inside a `rollback:` block now
+  resolves to each succeeded branch's value (the v0.1.2 empty-matrix
+  bug is fixed). `inspect bundle status <id>` renders the per-branch
+  table with ✓ (ok) / ✗ (failed) / · (skipped) / ↶ (rollback ok)
+  markers.
 
 EXAMPLES
   $ inspect bundle plan deploy.yaml
   $ inspect bundle apply deploy.yaml --apply --reason 'INC-1234'
-  $ inspect bundle apply deploy.yaml --apply --no-prompt    # CI-safe";
+  $ inspect bundle apply deploy.yaml --apply --no-prompt    # CI-safe
+  $ inspect bundle status <bundle-id>
+  $ inspect bundle status <bundle-id> --json";
 
 const LONG_HELP: &str = "\
 Show in-binary documentation. Run with no topic to see the topic + \
@@ -2334,6 +2353,11 @@ pub enum BundleMode {
     /// Run preflight + steps + postflight. Destructive steps require
     /// `--apply` unless they opt out (`apply: false`).
     Apply(BundleApplyArgs),
+    /// L6 (v0.1.3): show per-step + per-branch outcomes for a past
+    /// bundle invocation by `bundle_id`. Reads the local audit log;
+    /// no remote work. `--json` returns the structured per-branch
+    /// outcomes for agent consumption.
+    Status(BundleStatusArgs),
 }
 
 #[derive(Debug, Args)]
@@ -2361,6 +2385,17 @@ pub struct BundleApplyArgs {
     /// produces. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BundleStatusArgs {
+    /// `bundle_id` from a past `inspect bundle apply` invocation.
+    /// Accepts a prefix (matched against the leading characters of
+    /// every audit entry's `bundle_id`); ambiguous prefixes are
+    /// reported and exit non-zero.
+    pub bundle_id: String,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]

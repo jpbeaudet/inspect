@@ -58,6 +58,27 @@ pub struct AuditEntry {
     /// see which YAML step produced this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_step: Option<String>,
+    /// L6 (v0.1.3): which matrix branch this entry corresponds to,
+    /// stamped only on per-branch entries from a `parallel: true` +
+    /// `matrix:` step. Format is `<matrix-key>=<value>` (e.g.
+    /// `volume=atlas_milvus`). `None` for non-matrix steps and
+    /// pre-L6 entries — they elide the field via
+    /// `skip_serializing_if`. `inspect audit ls --bundle <id>`
+    /// groups by `bundle_step` and inspects this field to lay out
+    /// per-branch outcomes; `inspect bundle status <id>` consumes
+    /// it the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_branch: Option<String>,
+    /// L6 (v0.1.3): final outcome of this matrix branch. Set in
+    /// lockstep with `bundle_branch` only on per-branch entries.
+    /// Values: `"ok"` | `"failed"` | `"skipped"`. `None` for
+    /// non-matrix steps. Lets `inspect bundle status` render the
+    /// per-branch result table without re-deriving status from
+    /// `exit` (a branch can have `exit=0` but be marked
+    /// `skipped` if a peer branch failed first under the
+    /// stop-on-first-error matrix policy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_branch_status: Option<String>,
     /// F9 (v0.1.3): byte count of local stdin forwarded to the remote
     /// command. `0` (or absent on read) means stdin was not forwarded
     /// (tty input, `--no-stdin`, or no piped input). Recorded so a
@@ -374,6 +395,8 @@ impl AuditEntry {
             reason: None,
             bundle_id: None,
             bundle_step: None,
+            bundle_branch: None,
+            bundle_branch_status: None,
             stdin_bytes: 0,
             stdin_sha256: None,
             revert: None,

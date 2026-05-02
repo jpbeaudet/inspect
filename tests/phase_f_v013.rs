@@ -6764,6 +6764,371 @@ fn f18_help_documents_history_subcommands() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// L6 — per-branch rollback tracking in bundle matrix steps. v0.1.2 limitation:
+// `parallel: true` + `matrix:` rolled back on the WHOLE matrix when any branch
+// failed, including succeeded branches whose downstream effects may already be
+// in use. v0.1.3 fix: track per-branch BranchResult in the executor; on
+// rollback, invert ONLY the succeeded branches with `{{ matrix.<key> }}`
+// resolving to that branch's value. New `inspect bundle status <id>` reads
+// the audit log and renders per-branch outcomes.
+// -----------------------------------------------------------------------------
+
+fn l6_audit_lines(home: &std::path::Path) -> Vec<serde_json::Value> {
+    let dir = home.join("audit");
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|x| x == "jsonl") {
+            for line in std::fs::read_to_string(&p).unwrap_or_default().lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn l6_matrix_failure_rollback_targets_only_succeeded_branches() {
+    // 4-branch matrix; branch `c` fails. Rollback must fire for a/b/d
+    // (the succeeded branches) with `{{ matrix.svc }}` resolved per
+    // branch, and MUST NOT fire for c.
+    let mock = json!([
+        // forward bodies — `c` fails, others succeed.
+        { "match": "forward svc-a", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-b", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-c", "stdout": "boom\n", "exit": 1 },
+        { "match": "forward svc-d", "stdout": "ok\n", "exit": 0 },
+        // rollback bodies — must run for a/b/d only.
+        { "match": "rollback svc-a", "stdout": "rb-a\n", "exit": 0 },
+        { "match": "rollback svc-b", "stdout": "rb-b\n", "exit": 0 },
+        { "match": "rollback svc-c", "stdout": "rb-c\n", "exit": 0 },
+        { "match": "rollback svc-d", "stdout": "rb-d\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let yaml = "\
+name: l6-matrix
+host: arte/atlas
+steps:
+  - id: fanout
+    parallel: true
+    max_parallel: 1
+    matrix:
+      svc: [a, b, c, d]
+    exec: forward svc-{{ matrix.svc }}
+    rollback: rollback svc-{{ matrix.svc }}
+    on_failure: rollback
+";
+    let bundle_path = sb.home().join("matrix.yaml");
+    std::fs::write(&bundle_path, yaml).unwrap();
+    sb.cmd()
+        .args(["bundle", "apply", bundle_path.to_str().unwrap()])
+        .arg("--apply")
+        .arg("--no-prompt")
+        .assert()
+        .failure();
+
+    let lines = l6_audit_lines(sb.home());
+    // Forward exec entries: branch labels stamped.
+    let forward_branches: std::collections::BTreeSet<(String, String)> = lines
+        .iter()
+        .filter(|e| e.get("verb").and_then(|v| v.as_str()) == Some("exec"))
+        .filter_map(|e| {
+            let b = e.get("bundle_branch")?.as_str()?.to_string();
+            let s = e.get("bundle_branch_status")?.as_str()?.to_string();
+            Some((b, s))
+        })
+        .collect();
+    // The stop-on-first-error policy means c failing aborts the rest.
+    // With max_parallel=1 the order is deterministic: a, b, c (fail) →
+    // d skipped. Forward audit entries land for a/b (ok) and c (failed).
+    assert!(
+        forward_branches.contains(&("svc=a".into(), "ok".into())),
+        "expected svc=a ok forward audit: {forward_branches:?}"
+    );
+    assert!(
+        forward_branches.contains(&("svc=b".into(), "ok".into())),
+        "expected svc=b ok forward audit: {forward_branches:?}"
+    );
+    assert!(
+        forward_branches.contains(&("svc=c".into(), "failed".into())),
+        "expected svc=c failed forward audit: {forward_branches:?}"
+    );
+
+    // Rollback must fire for a and b only (c failed, d skipped).
+    let rollback_branches: std::collections::BTreeSet<String> = lines
+        .iter()
+        .filter(|e| e.get("verb").and_then(|v| v.as_str()) == Some("bundle.rollback"))
+        .filter_map(|e| e.get("bundle_branch")?.as_str().map(String::from))
+        .collect();
+    assert!(
+        rollback_branches.contains("svc=a"),
+        "rollback should fire for succeeded branch svc=a: {rollback_branches:?}"
+    );
+    assert!(
+        rollback_branches.contains("svc=b"),
+        "rollback should fire for succeeded branch svc=b: {rollback_branches:?}"
+    );
+    assert!(
+        !rollback_branches.contains("svc=c"),
+        "rollback MUST NOT fire for failed branch svc=c: {rollback_branches:?}"
+    );
+    assert!(
+        !rollback_branches.contains("svc=d"),
+        "rollback MUST NOT fire for skipped branch svc=d: {rollback_branches:?}"
+    );
+
+    // `bundle.rollback.skip` audit entries explain why c and d were
+    // not inverted.
+    let skip_branches: std::collections::BTreeSet<String> = lines
+        .iter()
+        .filter(|e| e.get("verb").and_then(|v| v.as_str()) == Some("bundle.rollback.skip"))
+        .filter_map(|e| e.get("bundle_branch")?.as_str().map(String::from))
+        .collect();
+    assert!(
+        skip_branches.contains("svc=c") && skip_branches.contains("svc=d"),
+        "skipped branches should have an audit explanation: {skip_branches:?}"
+    );
+}
+
+#[test]
+fn l6_matrix_rollback_template_resolves_per_succeeded_branch() {
+    // Forward `forward svc-a`, `forward svc-b`. Step c fails.
+    // Rollback body `rollback svc-{{ matrix.svc }}` MUST be rendered
+    // with the per-branch value so the audit-args field contains the
+    // exact rendered command. Asserts that the args are NOT
+    // `rollback svc-` (empty matrix interpolation) — the v0.1.2 bug.
+    let mock = json!([
+        { "match": "forward svc-a", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-b", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-z", "stdout": "boom\n", "exit": 1 },
+        { "match": "rollback svc-a", "stdout": "rb-a\n", "exit": 0 },
+        { "match": "rollback svc-b", "stdout": "rb-b\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let yaml = "\
+name: l6-template
+host: arte/atlas
+steps:
+  - id: fan
+    parallel: true
+    max_parallel: 1
+    matrix:
+      svc: [a, b, z]
+    exec: forward svc-{{ matrix.svc }}
+    rollback: rollback svc-{{ matrix.svc }}
+    on_failure: rollback
+";
+    let bundle_path = sb.home().join("template.yaml");
+    std::fs::write(&bundle_path, yaml).unwrap();
+    sb.cmd()
+        .args(["bundle", "apply", bundle_path.to_str().unwrap()])
+        .arg("--apply")
+        .arg("--no-prompt")
+        .assert()
+        .failure();
+
+    let lines = l6_audit_lines(sb.home());
+    let rollback_args: std::collections::BTreeSet<String> = lines
+        .iter()
+        .filter(|e| e.get("verb").and_then(|v| v.as_str()) == Some("bundle.rollback"))
+        .filter_map(|e| e.get("args")?.as_str().map(String::from))
+        .collect();
+    assert!(
+        rollback_args.contains("rollback svc-a"),
+        "rollback body for branch a should expand `{{ matrix.svc }}` → `a`: {rollback_args:?}"
+    );
+    assert!(
+        rollback_args.contains("rollback svc-b"),
+        "rollback body for branch b should expand `{{ matrix.svc }}` → `b`: {rollback_args:?}"
+    );
+    // The v0.1.2 bug: an empty matrix produced `rollback svc-` (empty
+    // expansion). Guard against regression.
+    assert!(
+        !rollback_args.iter().any(|s| s == "rollback svc-"),
+        "rollback should never render with an empty matrix expansion: {rollback_args:?}"
+    );
+}
+
+#[test]
+fn l6_bundle_status_renders_per_branch_outcomes() {
+    let mock = json!([
+        { "match": "forward svc-a", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-b", "stdout": "ok\n", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let yaml = "\
+name: l6-status
+host: arte/atlas
+steps:
+  - id: fan
+    parallel: true
+    max_parallel: 2
+    matrix:
+      svc: [a, b]
+    exec: forward svc-{{ matrix.svc }}
+";
+    let bundle_path = sb.home().join("status.yaml");
+    std::fs::write(&bundle_path, yaml).unwrap();
+    sb.cmd()
+        .args(["bundle", "apply", bundle_path.to_str().unwrap()])
+        .arg("--apply")
+        .arg("--no-prompt")
+        .assert()
+        .success();
+
+    // Pick the bundle id from any audit entry.
+    let lines = l6_audit_lines(sb.home());
+    let bundle_id = lines
+        .iter()
+        .find_map(|e| e.get("bundle_id")?.as_str())
+        .expect("at least one audit entry should carry bundle_id")
+        .to_string();
+
+    // Human form: per-branch ✓ markers for both branches.
+    let assert = sb
+        .cmd()
+        .args(["bundle", "status", &bundle_id])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("✓ svc=a") && stdout.contains("✓ svc=b"),
+        "status should render per-branch ✓ markers for both succeeded branches: {stdout}"
+    );
+    assert!(
+        stdout.contains("step `fan` (matrix):"),
+        "status should label the step as a matrix: {stdout}"
+    );
+
+    // JSON form: structured per-branch outcomes.
+    let assert = sb
+        .cmd()
+        .args(["bundle", "status", &bundle_id, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["bundle_id"], bundle_id);
+    let steps = v["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["step"], "fan");
+    assert_eq!(steps[0]["kind"], "matrix");
+    let branches = steps[0]["branches"].as_array().unwrap();
+    let labels: std::collections::BTreeSet<String> = branches
+        .iter()
+        .filter_map(|b| b["branch"].as_str().map(String::from))
+        .collect();
+    assert!(labels.contains("svc=a") && labels.contains("svc=b"));
+    let statuses: std::collections::BTreeSet<String> = branches
+        .iter()
+        .filter_map(|b| b["status"].as_str().map(String::from))
+        .collect();
+    assert_eq!(
+        statuses,
+        std::collections::BTreeSet::from(["ok".to_string()]),
+        "every succeeded branch should report status=ok"
+    );
+}
+
+#[test]
+fn l6_bundle_status_unknown_id_exits_no_matches_with_hint() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["bundle", "status", "nope-doesnt-exist"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("no bundle invocation matches"),
+        "unknown bundle id should chain a hint: {stderr}"
+    );
+}
+
+#[test]
+fn l6_full_matrix_success_then_later_step_fails_rolls_back_all_branches() {
+    // Regression guard for the existing rollback path: matrix step
+    // succeeds entirely, then a LATER step fails with on_failure:
+    // rollback. The matrix step's rollback must fire for every branch
+    // (since they all succeeded).
+    let mock = json!([
+        { "match": "forward svc-a", "stdout": "ok\n", "exit": 0 },
+        { "match": "forward svc-b", "stdout": "ok\n", "exit": 0 },
+        { "match": "second-step", "stdout": "boom\n", "exit": 1 },
+        { "match": "rollback svc-a", "stdout": "", "exit": 0 },
+        { "match": "rollback svc-b", "stdout": "", "exit": 0 },
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let yaml = "\
+name: l6-regression
+host: arte/atlas
+steps:
+  - id: fan
+    parallel: true
+    max_parallel: 2
+    matrix:
+      svc: [a, b]
+    exec: forward svc-{{ matrix.svc }}
+    rollback: rollback svc-{{ matrix.svc }}
+  - id: gate
+    exec: second-step
+    on_failure: rollback
+";
+    let bundle_path = sb.home().join("regression.yaml");
+    std::fs::write(&bundle_path, yaml).unwrap();
+    sb.cmd()
+        .args(["bundle", "apply", bundle_path.to_str().unwrap()])
+        .arg("--apply")
+        .arg("--no-prompt")
+        .assert()
+        .failure();
+
+    let lines = l6_audit_lines(sb.home());
+    let rollback_branches: std::collections::BTreeSet<String> = lines
+        .iter()
+        .filter(|e| e.get("verb").and_then(|v| v.as_str()) == Some("bundle.rollback"))
+        .filter_map(|e| e.get("bundle_branch")?.as_str().map(String::from))
+        .collect();
+    assert!(
+        rollback_branches.contains("svc=a") && rollback_branches.contains("svc=b"),
+        "all-succeeded matrix should fully rollback when later step fails: {rollback_branches:?}"
+    );
+}
+
+#[test]
+fn l6_bundle_status_help_documents_subcommand() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["bundle", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("status"),
+        "bundle --help should list the status subcommand: {stdout}"
+    );
+    let assert = sb
+        .cmd()
+        .args(["bundle", "status", "--help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("bundle_id"),
+        "bundle status --help should describe the bundle_id arg: {stdout}"
+    );
+}
+
 #[test]
 fn f18_argv_password_is_redacted_in_transcript_header() {
     // The verb itself rejects with an unknown-flag error since

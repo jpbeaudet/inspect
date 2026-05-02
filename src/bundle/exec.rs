@@ -56,6 +56,54 @@ use super::vars::{interpolate, InterpError};
 /// Default per-step timeout when the YAML doesn't override.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
 
+/// L6 (v0.1.3): per-branch execution outcome inside a `parallel:
+/// true` + `matrix:` step. Recorded once per matrix value at the
+/// time the branch finishes (whether ok, failed, or skipped under
+/// stop-on-first-error). Used by [`do_rollback`] to invert ONLY
+/// succeeded branches and by `inspect bundle status <id>` to render
+/// the per-branch table.
+#[derive(Debug, Clone)]
+pub(crate) struct BranchResult {
+    /// Display label for the branch — `<matrix-key>=<value>`. Stable
+    /// across reruns of the same bundle so post-mortem queries can
+    /// pivot on it.
+    pub branch_id: String,
+    /// Final status. `Ok` ⇒ inverse runs on rollback; `Failed` and
+    /// `Skipped` ⇒ no inverse fires.
+    pub status: BranchStatus,
+    /// The matrix value as the operator wrote it. Threaded into
+    /// rollback-block interpolation so `{{ matrix.<key> }}`
+    /// resolves to this branch's value (not the full matrix).
+    pub matrix_value: serde_yaml::Value,
+    /// The matrix key (the YAML map's only key, given the v0.1.2
+    /// validator caps `matrix:` at one entry). Same for every
+    /// branch in the same step; carried per-branch so the rollback
+    /// path doesn't need to thread the step pointer.
+    pub matrix_key: String,
+    // Note: the per-branch audit_id and duration_ms are recorded
+    // directly on the audit entry (see `bundle_branch` /
+    // `bundle_branch_status` in `AuditEntry`), so we don't need to
+    // mirror them here. `inspect bundle status` reads them straight
+    // from the audit log.
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchStatus {
+    Ok,
+    Failed,
+    Skipped,
+}
+
+impl BranchStatus {
+    fn as_audit_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 /// Knobs passed to [`apply`] from the CLI layer.
 pub struct ApplyOpts {
     /// Operator passed `--apply`. Without it, every `exec`/`watch`/
@@ -223,6 +271,12 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
     // Track which steps completed successfully, in declaration order,
     // so rollback can walk them in reverse.
     let mut completed: Vec<usize> = Vec::new();
+    // L6 (v0.1.3): per-step matrix branch ledger. Indexed by step
+    // declaration index. Populated only for `parallel: true` +
+    // `matrix:` steps (whether they completed cleanly or failed
+    // partway). [`do_rollback`] consults this map to invert ONLY the
+    // succeeded branches with per-branch matrix interpolation.
+    let mut step_branches: BTreeMap<usize, Vec<BranchResult>> = BTreeMap::new();
     let store = AuditStore::open().context("opening audit store")?;
 
     for (idx, step) in bundle.steps.iter().enumerate() {
@@ -234,6 +288,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                 &bundle_id,
                 &store,
                 &completed,
+                &step_branches,
                 None,
                 opts.no_prompt,
             );
@@ -258,7 +313,11 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
         let outcome = run_step(&*runner, bundle, step, &bundle_id, &store, &opts);
 
         match outcome {
-            Ok(()) => {
+            Ok(StepOutcome::Single) => {
+                completed.push(idx);
+            }
+            Ok(StepOutcome::Matrix(branches)) => {
+                step_branches.insert(idx, branches);
                 completed.push(idx);
             }
             Err(e) => {
@@ -266,6 +325,12 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                     "[inspect] step {step_label} `{id}` FAILED: {e}",
                     id = step.id
                 );
+                // L6 (v0.1.3): if the failure came from a parallel
+                // matrix step, drain the per-branch ledger so
+                // do_rollback can target succeeded branches only.
+                if let Some(partial) = BranchFailureCarrier::drain() {
+                    step_branches.insert(idx, partial);
+                }
                 match &step.on_failure {
                     OnFailure::Abort => {
                         eprintln!(
@@ -285,6 +350,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                             &bundle_id,
                             &store,
                             &completed,
+                            &step_branches,
                             None,
                             opts.no_prompt,
                         );
@@ -297,6 +363,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                             &bundle_id,
                             &store,
                             &completed,
+                            &step_branches,
                             Some(target_id.as_str()),
                             opts.no_prompt,
                         );
@@ -512,6 +579,16 @@ fn format_watch_body(w: &super::schema::WatchStep) -> String {
 }
 
 /// Run a single step (with fan-out for `parallel: true` matrix steps).
+/// L6 (v0.1.3): outcome of one step. `Single` is a normal
+/// (non-matrix) step — the apply loop tracks it in `completed` but
+/// has no per-branch records to rollback against. `Matrix` carries
+/// the per-branch results so [`do_rollback`] can iterate ONLY the
+/// succeeded branches with per-branch matrix interpolation.
+pub(crate) enum StepOutcome {
+    Single,
+    Matrix(Vec<BranchResult>),
+}
+
 fn run_step(
     runner: &dyn RemoteRunner,
     bundle: &Bundle,
@@ -519,7 +596,7 @@ fn run_step(
     bundle_id: &str,
     store: &AuditStore,
     opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<StepOutcome> {
     let kind = step.body_kind().map_err(|e| anyhow!("{e}"))?;
 
     // `--apply` gate per step. Skipped if step opts out (`apply:
@@ -533,11 +610,12 @@ fn run_step(
     }
 
     if step.parallel && !step.matrix.is_empty() {
-        return run_parallel_matrix(runner, bundle, step, kind, bundle_id, store, opts);
+        let branches = run_parallel_matrix(runner, bundle, step, kind, bundle_id, store, opts)?;
+        return Ok(StepOutcome::Matrix(branches));
     }
 
     let empty_matrix = BTreeMap::new();
-    run_single_branch(
+    let _audit_id = run_single_branch(
         runner,
         bundle,
         step,
@@ -546,9 +624,18 @@ fn run_step(
         bundle_id,
         store,
         opts,
-    )
+    )?;
+    Ok(StepOutcome::Single)
 }
 
+/// Run one (possibly matrix-branch) step body. Returns the audit
+/// entry id minted for this branch when the body wrote one (every
+/// `exec` and `watch` step does; `run` is intentionally unaudited).
+/// L6 (v0.1.3): `matrix` is non-empty only for branches dispatched
+/// from `run_parallel_matrix`; when non-empty, the audit entry is
+/// stamped with `bundle_branch` + `bundle_branch_status` so
+/// `inspect bundle status <id>` can render per-branch outcomes
+/// without re-deriving them from `args` text.
 #[allow(clippy::too_many_arguments)]
 fn run_single_branch(
     runner: &dyn RemoteRunner,
@@ -559,7 +646,7 @@ fn run_single_branch(
     bundle_id: &str,
     store: &AuditStore,
     _opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let target_ns = step
         .target
         .as_deref()
@@ -628,6 +715,7 @@ fn run_single_branch(
             // Audit only `exec` (per Run-vs-Exec contract). Record the
             // user-authored body, not the docker-exec wrapper, so the
             // audit log matches what the operator wrote in YAML.
+            let mut audit_id: Option<String> = None;
             if matches!(kind, StepBodyKind::Exec) {
                 let mut e = AuditEntry::new("exec", target_ns);
                 e.args = body.clone();
@@ -636,6 +724,16 @@ fn run_single_branch(
                 e.reason = crate::safety::validate_reason(reason.as_deref())?;
                 e.bundle_id = Some(bundle_id.to_string());
                 e.bundle_step = Some(step.id.clone());
+                // L6 (v0.1.3): stamp matrix-branch metadata when this
+                // single-branch run is the per-branch leg of a
+                // `parallel: true` + `matrix:` step.
+                if let Some((mkey, mval)) = matrix.iter().next() {
+                    let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+                    e.bundle_branch = Some(format!("{mkey}={label}"));
+                    e.bundle_branch_status =
+                        Some(if out.ok() { "ok" } else { "failed" }.to_string());
+                }
+                audit_id = Some(e.id.clone());
                 let _ = store.append(&e);
             }
 
@@ -646,7 +744,7 @@ fn run_single_branch(
                     out.stderr.trim().lines().next().unwrap_or("")
                 ));
             }
-            Ok(())
+            Ok(audit_id)
         }
         StepBodyKind::Watch => {
             let watch_step = step
@@ -671,11 +769,20 @@ fn run_single_branch(
             e.reason = crate::safety::validate_reason(reason.as_deref())?;
             e.bundle_id = Some(bundle_id.to_string());
             e.bundle_step = Some(step.id.clone());
+            // L6 (v0.1.3): mirror the matrix-branch metadata for
+            // watch-step branches so `inspect bundle status` can
+            // group them alongside the exec-step branches.
+            if let Some((mkey, mval)) = matrix.iter().next() {
+                let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+                e.bundle_branch = Some(format!("{mkey}={label}"));
+                e.bundle_branch_status = Some(if code == 0 { "ok" } else { "failed" }.to_string());
+            }
+            let audit_id = Some(e.id.clone());
             let _ = store.append(&e);
             if code != 0 {
                 return Err(anyhow!("watch exit {code}"));
             }
-            Ok(())
+            Ok(audit_id)
         }
     }
 }
@@ -689,7 +796,7 @@ fn run_parallel_matrix(
     bundle_id: &str,
     store: &AuditStore,
     opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<Vec<BranchResult>> {
     // Single-key matrix only (validated earlier). Build the per-branch
     // matrix maps and run them with bounded concurrency.
     let (mkey, mvals) = step
@@ -713,12 +820,17 @@ fn run_parallel_matrix(
     let queue: Arc<Mutex<Vec<serde_yaml::Value>>> = Arc::new(Mutex::new(mvals.clone()));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stop_flag = Arc::new(AtomicBool::new(false));
+    // L6 (v0.1.3): per-branch outcome ledger. Workers append to it as
+    // they complete; the parent reads it back after the scope joins
+    // and forwards it to the apply loop for rollback consumption.
+    let branches: Arc<Mutex<Vec<BranchResult>>> = Arc::new(Mutex::new(Vec::new()));
 
     std::thread::scope(|scope| {
         for _ in 0..cap {
             let queue = Arc::clone(&queue);
             let first_err = Arc::clone(&first_err);
             let stop_flag = Arc::clone(&stop_flag);
+            let branches = Arc::clone(&branches);
             let mkey = mkey.clone();
             // Captures of &-references are fine inside scoped threads.
             scope.spawn(move || loop {
@@ -756,15 +868,28 @@ fn run_parallel_matrix(
                         Err(anyhow!("panic: {msg}"))
                     }
                 };
+                let branch_id = format!("{mkey}={label}");
                 match res {
-                    Ok(()) => {
-                        eprintln!("    ├─ {mkey}={label} ok");
+                    Ok(_audit_id) => {
+                        eprintln!("    ├─ {branch_id} ok");
+                        branches.lock().unwrap().push(BranchResult {
+                            branch_id,
+                            status: BranchStatus::Ok,
+                            matrix_value: v.clone(),
+                            matrix_key: mkey.clone(),
+                        });
                     }
                     Err(e) => {
-                        eprintln!("    ├─ {mkey}={label} FAILED: {e}");
+                        eprintln!("    ├─ {branch_id} FAILED: {e}");
+                        branches.lock().unwrap().push(BranchResult {
+                            branch_id: branch_id.clone(),
+                            status: BranchStatus::Failed,
+                            matrix_value: v.clone(),
+                            matrix_key: mkey.clone(),
+                        });
                         let mut slot = first_err.lock().unwrap();
                         if slot.is_none() {
-                            *slot = Some(format!("{mkey}={label}: {e}"));
+                            *slot = Some(format!("{branch_id}: {e}"));
                             // First failure aborts the rest of the
                             // matrix — avoids burning compute on a
                             // run we're going to roll back anyway.
@@ -776,10 +901,68 @@ fn run_parallel_matrix(
         }
     });
 
-    if let Some(msg) = first_err.lock().unwrap().clone() {
-        return Err(anyhow!(msg));
+    // L6 (v0.1.3): branches that the stop_flag short-circuited never
+    // actually started. Synthesize Skipped records so
+    // `inspect bundle status` can render the full matrix table and
+    // the rollback path can prove it didn't try to invert them.
+    let mut branches_vec = std::mem::take(&mut *branches.lock().unwrap());
+    let executed: BTreeSet<String> = branches_vec.iter().map(|b| b.branch_id.clone()).collect();
+    let leftover: Vec<serde_yaml::Value> = std::mem::take(&mut *queue.lock().unwrap());
+    for v in leftover {
+        let label = super::vars::yaml_to_str(&v).unwrap_or_default();
+        let branch_id = format!("{mkey}={label}");
+        if !executed.contains(&branch_id) {
+            branches_vec.push(BranchResult {
+                branch_id,
+                status: BranchStatus::Skipped,
+                matrix_value: v,
+                matrix_key: mkey.clone(),
+            });
+        }
     }
-    Ok(())
+    // Sort by branch_id so the rollback path and post-mortem queries
+    // see the same deterministic order regardless of worker
+    // scheduling.
+    branches_vec.sort_by(|a, b| a.branch_id.cmp(&b.branch_id));
+
+    if let Some(msg) = first_err.lock().unwrap().clone() {
+        // L6: even on failure we return the per-branch ledger via Err
+        // so the apply loop can stash it for rollback. Encode the
+        // branches alongside the error message via a side channel —
+        // simplest is to thread it through a thread-local-like
+        // sidecar. We use a `BranchFailure` shape that the apply
+        // loop unpacks.
+        return Err(BranchFailureCarrier::wrap(branches_vec, msg));
+    }
+    Ok(branches_vec)
+}
+
+/// L6 (v0.1.3): when a `parallel` matrix step fails partway, we need
+/// to thread the per-branch ledger back to the apply loop alongside
+/// the error message so [`do_rollback`] can invert only the
+/// succeeded branches. anyhow's [`anyhow::Error`] is a single-value
+/// container; we attach the ledger via a thread-local sidecar
+/// keyed by the error's pointer identity. This avoids touching
+/// `Result<T, E>`'s shape.
+struct BranchFailureCarrier;
+
+impl BranchFailureCarrier {
+    fn wrap(branches: Vec<BranchResult>, msg: String) -> anyhow::Error {
+        BRANCH_LEDGER_SIDECAR.with(|cell| {
+            *cell.borrow_mut() = Some(branches);
+        });
+        anyhow!(msg)
+    }
+    /// Drain the most recently stashed ledger. Returns `None` if the
+    /// caller's failure didn't come from a matrix step.
+    fn drain() -> Option<Vec<BranchResult>> {
+        BRANCH_LEDGER_SIDECAR.with(|cell| cell.borrow_mut().take())
+    }
+}
+
+thread_local! {
+    static BRANCH_LEDGER_SIDECAR: std::cell::RefCell<Option<Vec<BranchResult>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn build_watch_args(
@@ -825,16 +1008,34 @@ fn build_watch_args(
 // Rollback
 // -----------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn do_rollback(
     runner: &dyn RemoteRunner,
     bundle: &Bundle,
     bundle_id: &str,
     store: &AuditStore,
     completed: &[usize],
+    step_branches: &BTreeMap<usize, Vec<BranchResult>>,
     rollback_to: Option<&str>,
     no_prompt: bool,
 ) {
-    if completed.is_empty() && bundle.rollback.is_empty() {
+    // L6 (v0.1.3): even when no top-level step `completed`, a
+    // parallel-matrix step that failed mid-way may have produced
+    // succeeded branches that DO need inverting. Walk both the
+    // `completed` set and any partially-failed matrix steps.
+    let mut to_visit: Vec<usize> = completed.to_vec();
+    for &idx in step_branches.keys() {
+        if !to_visit.contains(&idx) {
+            to_visit.push(idx);
+        }
+    }
+    to_visit.sort();
+
+    let any_branch_to_invert = step_branches
+        .values()
+        .any(|brs| brs.iter().any(|b| b.status == BranchStatus::Ok));
+
+    if to_visit.is_empty() && bundle.rollback.is_empty() && !any_branch_to_invert {
         eprintln!("[inspect] nothing to rollback");
         return;
     }
@@ -848,7 +1049,7 @@ fn do_rollback(
 
     eprintln!("[inspect] rolling back...");
 
-    // Per-step rollbacks: walk completed steps in reverse, run each
+    // Per-step rollbacks: walk visited steps in reverse, run each
     // step's `rollback:` field if set and the step is reversible.
     // Stop at `rollback_to` if specified.
     let stop_idx = match rollback_to {
@@ -857,7 +1058,7 @@ fn do_rollback(
     };
 
     let empty = BTreeMap::new();
-    for &idx in completed.iter().rev() {
+    for &idx in to_visit.iter().rev() {
         if let Some(stop) = stop_idx {
             if idx <= stop {
                 eprintln!(
@@ -878,6 +1079,77 @@ fn do_rollback(
         let Some(rb_cmd) = &step.rollback else {
             continue;
         };
+
+        // L6 (v0.1.3): branch-aware rollback. For matrix steps we
+        // run the rollback block once per SUCCEEDED branch, with
+        // `{{ matrix.<key> }}` resolving to that branch's value.
+        // Failed/skipped branches log an audit note explaining why
+        // no inverse fired (the step never produced an effect on
+        // them).
+        if let Some(branches) = step_branches.get(&idx) {
+            for br in branches {
+                match br.status {
+                    BranchStatus::Ok => {
+                        let mut mtx = BTreeMap::new();
+                        mtx.insert(br.matrix_key.clone(), br.matrix_value.clone());
+                        let rb_rendered = match interpolate(rb_cmd, &bundle.vars, &mtx) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!(
+                                    "[inspect] rollback FAILED on `{}` branch {}: render error: {e}",
+                                    step.id, br.branch_id
+                                );
+                                eprintln!(
+                                    "[inspect] STOPPING rollback — bundle is in mixed state."
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = run_rollback_action(
+                            runner,
+                            bundle,
+                            &step.id,
+                            &rb_rendered,
+                            bundle_id,
+                            store,
+                            Some(&br.branch_id),
+                        ) {
+                            eprintln!(
+                                "[inspect] rollback FAILED on `{}` branch {}: {e}",
+                                step.id, br.branch_id
+                            );
+                            eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
+                            return;
+                        }
+                    }
+                    BranchStatus::Failed | BranchStatus::Skipped => {
+                        let why = if br.status == BranchStatus::Failed {
+                            "branch failed mid-execution"
+                        } else {
+                            "branch skipped (peer branch failed first)"
+                        };
+                        eprintln!(
+                            "[inspect] skip rollback of `{}` branch {} — {why}",
+                            step.id, br.branch_id
+                        );
+                        // Audit note so the bundle status report can
+                        // show "no inverse fired, branch never
+                        // applied an effect" for forensic clarity.
+                        let mut e = AuditEntry::new("bundle.rollback.skip", &step.id);
+                        e.is_revert = true;
+                        e.bundle_id = Some(bundle_id.to_string());
+                        e.bundle_step = Some(step.id.clone());
+                        e.bundle_branch = Some(br.branch_id.clone());
+                        e.bundle_branch_status = Some(br.status.as_audit_str().to_string());
+                        e.diff_summary = format!("rollback skipped: {why}");
+                        let _ = store.append(&e);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Non-matrix step: legacy single-rollback path.
         let rb_rendered = match interpolate(rb_cmd, &bundle.vars, &empty) {
             Ok(r) => r,
             Err(e) => {
@@ -889,9 +1161,15 @@ fn do_rollback(
                 return;
             }
         };
-        if let Err(e) =
-            run_rollback_action(runner, bundle, &step.id, &rb_rendered, bundle_id, store)
-        {
+        if let Err(e) = run_rollback_action(
+            runner,
+            bundle,
+            &step.id,
+            &rb_rendered,
+            bundle_id,
+            store,
+            None,
+        ) {
             eprintln!("[inspect] rollback FAILED on `{}`: {e}", step.id);
             eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
             return;
@@ -923,7 +1201,9 @@ fn do_rollback(
                     return;
                 }
             };
-            if let Err(e) = run_rollback_action(runner, bundle, &step.id, &body, bundle_id, store) {
+            if let Err(e) =
+                run_rollback_action(runner, bundle, &step.id, &body, bundle_id, store, None)
+            {
                 eprintln!("[inspect] rollback step `{}` FAILED: {e}", step.id);
                 eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
                 return;
@@ -941,8 +1221,13 @@ fn run_rollback_action(
     body: &str,
     bundle_id: &str,
     store: &AuditStore,
+    branch_label: Option<&str>,
 ) -> Result<()> {
-    eprintln!("[inspect] rollback `{step_id}`: {}", short(body));
+    let prefix = match branch_label {
+        Some(b) => format!("[inspect] rollback `{step_id}` branch {b}: "),
+        None => format!("[inspect] rollback `{step_id}`: "),
+    };
+    eprintln!("{prefix}{}", short(body));
     let target_ns = bundle
         .host
         .as_deref()
@@ -974,8 +1259,16 @@ fn run_rollback_action(
     e.args = body.to_string();
     e.exit = out.exit_code;
     e.duration_ms = dur_ms;
+    e.is_revert = true;
     e.bundle_id = Some(bundle_id.to_string());
     e.bundle_step = Some(step_id.to_string());
+    // L6 (v0.1.3): when this rollback is for a specific matrix
+    // branch (per-branch invert), stamp the branch label so audit
+    // queries can group by it.
+    if let Some(b) = branch_label {
+        e.bundle_branch = Some(b.to_string());
+        e.bundle_branch_status = Some(if out.ok() { "ok" } else { "failed" }.to_string());
+    }
     let _ = store.append(&e);
     if !out.ok() {
         return Err(anyhow!(

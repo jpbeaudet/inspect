@@ -1197,11 +1197,146 @@ Three rules:
 
 ---
 
+## 17. Per-branch rollback in bundle matrix steps (v0.1.3, L6)
+
+The bundle executor in `src/bundle/exec.rs` was extended in v0.1.3
+to track per-branch outcomes for `parallel: true` + `matrix:` steps
+so rollback inverts only the branches that actually applied an
+effect. Pre-L6, a 4-of-6 partial failure rolled back all 6
+branches — including the 4 that succeeded — and the rollback body
+was rendered with an empty matrix map so any `{{ matrix.<key> }}`
+reference silently expanded to nothing.
+
+### 17.1 Data model
+
+```rust
+pub(crate) struct BranchResult {
+    pub branch_id: String,           // "<key>=<value>", e.g. "svc=atlas"
+    pub status: BranchStatus,        // Ok | Failed | Skipped
+    pub matrix_value: serde_yaml::Value,
+    pub matrix_key: String,
+}
+
+pub(crate) enum StepOutcome {
+    Single,
+    Matrix(Vec<BranchResult>),
+}
+```
+
+The `apply` loop carries `step_branches: BTreeMap<usize,
+Vec<BranchResult>>` alongside the existing `completed: Vec<usize>`.
+Single-branch steps are recorded only in `completed`; matrix steps
+are recorded in both (so the iteration order in `do_rollback` stays
+declaration-order-reverse).
+
+### 17.2 The lifecycle of a matrix branch
+
+1. `run_step` dispatches `parallel: true` + `matrix:` steps to
+   `run_parallel_matrix`.
+2. `run_parallel_matrix` spawns scoped threads (cap = `max_parallel`,
+   default = number of matrix entries, hard-capped at 8) that pull
+   from a shared queue and call `run_single_branch` per branch.
+3. Each `run_single_branch` invocation builds a `{matrix_key →
+   matrix_value}` map, dispatches the body via the existing
+   selector pipeline, appends one audit entry per `exec`/`watch`
+   step, and stamps `bundle_branch = "<key>=<value>"` +
+   `bundle_branch_status = "ok"|"failed"` on the entry.
+4. On worker completion, the parent thread appends a `BranchResult`
+   to a shared `Vec<BranchResult>` (via `Mutex<>`).
+5. On first failure, the worker sets `stop_flag = true`. Other
+   workers check this flag at the top of their loop and exit
+   without pulling more entries — the leftover queue items are
+   then synthesized as `Skipped` BranchResults so the post-mortem
+   table is complete.
+6. Branches are sorted by `branch_id` before return so the rollback
+   walk and post-mortem queries see a deterministic order
+   regardless of worker scheduling.
+
+### 17.3 Threading the partial-failure ledger to apply
+
+Bare `Result<T, E>` can't carry a payload alongside an `Err`. We
+use a `BranchFailureCarrier` thread-local sidecar:
+
+```rust
+thread_local! {
+    static BRANCH_LEDGER_SIDECAR: RefCell<Option<Vec<BranchResult>>> =
+        const { RefCell::new(None) };
+}
+```
+
+When `run_parallel_matrix` returns `Err(...)`, it stashes the
+partial branch ledger into the cell. The apply loop's `Err(e)` arm
+calls `BranchFailureCarrier::drain()` immediately and stores the
+result in `step_branches[idx]`. This avoids widening every error-
+bearing helper's signature and keeps the matrix-failure path
+locally reasonable.
+
+### 17.4 Branch-aware rollback
+
+`do_rollback` was rewritten to consult `step_branches`:
+
+- For each step in `to_visit.iter().rev()` (the union of
+  `completed` and `step_branches.keys()` — partial-failure steps
+  that didn't make it into `completed` still need their succeeded
+  branches inverted):
+  - If the step has an entry in `step_branches`:
+    - For each `Ok` branch: build `{matrix_key → matrix_value}`,
+      run `interpolate(rb_cmd, &bundle.vars, &mtx)`, dispatch the
+      rollback body, append a `bundle.rollback` audit entry with
+      `bundle_branch` + `bundle_branch_status` stamped.
+    - For each `Failed` / `Skipped` branch: emit a
+      `bundle.rollback.skip` audit entry whose
+      `diff_summary` carries the why-skipped explanation. No
+      remote dispatch.
+  - Otherwise (single-branch step): the legacy single-rollback
+    path runs unchanged with an empty matrix map.
+
+The composition with `on_failure: rollback_to: <id>` is
+unchanged: the existing checkpoint loop walks until it hits the
+target step. A fully-succeeded matrix step before the checkpoint
+stays in place; a partially-failed matrix step's succeeded
+branches get inverted because the failed step itself triggered
+the rollback.
+
+### 17.5 The `inspect bundle status <id>` verb
+
+`src/commands/bundle.rs::status` reads every audit entry, prefix-
+matches the bundle id (ambiguous → exit 2 with the match list;
+unknown → exit 1 with chained hint), groups entries by
+`bundle_step`, and renders the per-branch table. It treats a step
+as "matrix" when at least one of its entries has
+`bundle_branch.is_some()`, otherwise "single". `--json` returns
+the full structure for agent consumption — see §14.1 of MANUAL for
+the schema.
+
+The audit log is the source of truth — a bundle that ran a year ago
+is queryable as long as its entries haven't aged out per L5
+retention. No per-bundle on-disk state is added; if you `inspect
+audit gc --keep 30d` and a bundle's entries fall outside the
+window, `bundle status` will report no-match.
+
+### 17.6 Schema hygiene
+
+Two new optional `AuditEntry` fields:
+
+- `bundle_branch: Option<String>` — `<matrix-key>=<value>` (e.g.
+  `volume=atlas_milvus`).
+- `bundle_branch_status: Option<String>` — `"ok"` | `"failed"` |
+  `"skipped"`.
+
+Both `Option<T>` with `skip_serializing_if`, so pre-L6 entries
+deserialize unchanged. The pre-existing `is_revert: bool` is now
+explicitly set on `bundle.rollback` audit entries (a v0.1.2 omission
+that meant `inspect audit grep --revert` missed bundle-level
+inversions).
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
 mode); §12 in F15 (file transfer); §13 in F16 (streaming executor);
 §14 in F17 (multi-step runner); §15 in L5 (audit gc + lazy trigger);
-§16 in F18 (session transcripts). Any deviation between this runbook
-and the bible is a runbook bug.*
+§16 in F18 (session transcripts); §17 in L6 (per-branch rollback).
+Any deviation between this runbook and the bible is a runbook bug.*

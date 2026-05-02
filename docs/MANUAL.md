@@ -1586,15 +1586,57 @@ Key mechanics:
 - **`matrix`** on a step expands one step into N parallel branches,
   capped by `INSPECT_MAX_PARALLEL` (hard cap 8).
 - **`on_failure`** routes the step's exit:
-  `abort` (default), `continue`, or `{ rollback_to: <step-id> }`.
+  `abort` (default), `continue`, `rollback`, or
+  `{ rollback_to: <step-id> }`.
+- **Per-branch rollback (L6, v0.1.3).** When a `parallel: true` +
+  `matrix:` step fails partway, rollback inverts ONLY the
+  succeeded branches; failed and skipped branches log a
+  `bundle.rollback.skip` audit entry with a why-skipped
+  explanation. The `{{ matrix.<key> }}` reference in a
+  `rollback:` block resolves to **each succeeded branch's
+  value** — distinct from the forward `exec:` body which still
+  receives the full per-branch matrix.
 - **Rollback** walks completed reversible steps in reverse order.
   If a rollback action itself fails, the bundle exits with a clear
   "mixed state" warning naming the step.
 - **`--apply` is mandatory** for any mutation. Without it, every
   mutating step is a dry-run, regardless of bundle contents.
 - **Audit correlation:** every step writes an audit entry tagged
-  with `bundle_id` and `bundle_step`. Retrieve with
-  `inspect audit ls --bundle <bundle-id>`.
+  with `bundle_id` and `bundle_step`. Per-branch entries from a
+  matrix step also carry `bundle_branch` (`<key>=<value>`) and
+  `bundle_branch_status` (`ok` | `failed` | `skipped`). Retrieve
+  with `inspect audit grep <bundle-id>` or visualize with
+  `inspect bundle status <bundle-id>` (see below).
+
+### 14.1 Per-branch outcome reports: `inspect bundle status` (L6, v0.1.3)
+
+After a bundle apply, `inspect bundle status <bundle-id>` reads the
+audit log and renders a human-friendly per-step + per-branch table:
+
+```text
+SUMMARY: bundle status: id=01HXR9...  2 step(s), 6 audit entries
+DATA:
+  step `tar-volumes` (matrix):
+    ✓ volume=atlas_milvus  (12300ms)
+    ✓ volume=atlas_etcd     (4100ms)
+    ✗ volume=aware_milvus   (1500ms)
+  step `restart`: ✓ exec arte/atlas (840ms)
+NEXT:
+  inspect audit show <id>          # zoom into a specific entry
+  inspect audit grep '<bundle-id>' # match every entry tagged with this bundle
+```
+
+Markers: ✓ ok forward, ✗ failed, · skipped (peer branch failed
+first), ↶ rollback ok. `--json` returns
+`{bundle_id, entries_total, steps[{step, kind, branches[{branch,
+status, audit_id, verb, exit, duration_ms, is_revert}]}]}` for
+agent consumption.
+
+The bundle id is matched by prefix; ambiguous prefixes exit non-zero
+with the full match list, and unknown prefixes exit non-zero with a
+chained hint. Long-running operators can pipe a recent
+`inspect audit ls` line straight into `inspect bundle status` to
+inspect the full transaction shape.
 
 Exit codes: **0** all steps succeeded (postflight included), **3**
 a step failed and rollback completed cleanly, **4** rollback itself

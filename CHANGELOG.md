@@ -14,6 +14,91 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L6 — Per-branch rollback tracking in bundle matrix steps + new
+  `inspect bundle status <id>` verb.** v0.1.2 retrospective:
+  `parallel: true` + `matrix:` steps rolled back the WHOLE matrix
+  when any one branch failed, including the succeeded branches whose
+  downstream effects may already have been used. Worse, the rollback
+  body was rendered with an EMPTY matrix map, so any
+  `{{ matrix.<key> }}` reference in a `rollback:` block silently
+  expanded to an empty string. v0.1.3 fixes both: branches succeed
+  or fail independently and rollback inverts only the succeeded ones
+  with per-branch matrix interpolation.
+  - **Per-branch ledger.** New `BranchResult { branch_id, status,
+    matrix_value, matrix_key }` struct in `src/bundle/exec.rs`.
+    Each parallel-matrix step populates a `Vec<BranchResult>`;
+    succeeded branches mark `Ok`, the failing branch marks
+    `Failed`, branches that the stop-on-first-error policy
+    short-circuited mark `Skipped`. Branches are sorted by
+    `branch_id` so the rollback walk and post-mortem queries see
+    a deterministic order regardless of worker scheduling.
+  - **Branch-aware rollback.** `do_rollback` now consults the
+    per-step `step_branches` map. For matrix steps it iterates
+    ONLY the succeeded branches, building a per-branch matrix
+    map (`{matrix_key → matrix_value}`) and feeding it through
+    `interpolate(rb_cmd, &bundle.vars, &mtx)`. The v0.1.2 bug
+    where `{{ matrix.<key> }}` in a rollback block expanded to
+    nothing is fixed end-to-end — guarded by
+    `l6_matrix_rollback_template_resolves_per_succeeded_branch`.
+    Failed/skipped branches log an audit note via the new
+    `bundle.rollback.skip` verb (with the branch label and a
+    why-skipped explanation) so post-mortem queries can see why
+    no inverse fired.
+  - **Audit schema.** Two new optional `AuditEntry` fields:
+    `bundle_branch: Option<String>` (format
+    `<matrix-key>=<value>`, e.g. `volume=atlas_milvus`) stamped
+    on every per-branch entry from a matrix step;
+    `bundle_branch_status: Option<String>` (`"ok"` | `"failed"` |
+    `"skipped"`) recorded in lockstep. Both `Option<T>` with
+    `skip_serializing_if`, so pre-L6 entries deserialize
+    unchanged. The pre-existing `is_revert: bool` is now also
+    set on `bundle.rollback` audit entries (which previously
+    elided it) so revert queries return the full inversion
+    history.
+  - **`BranchFailureCarrier` thread-local sidecar.** When a
+    `parallel` matrix step fails partway, `run_parallel_matrix`
+    threads the partial branch ledger back to the apply loop via
+    a thread-local cell keyed by the call site. This avoids
+    changing `Result<T, E>`'s shape (the alternative was widening
+    every error-bearing helper). The apply loop drains the
+    sidecar at the failure handler and stashes the branches in
+    `step_branches[idx]` before dispatching to `do_rollback`.
+  - **New `inspect bundle status <bundle_id>` verb.** Prefix-
+    matches the bundle id against the audit log, walks every
+    entry tagged with that id, groups by `bundle_step`, and
+    renders the per-branch outcome table:
+    ```
+    bundle status: id=...  2 step(s), 6 audit entries
+      step `tar-volumes` (matrix):
+        ✓ volume=atlas_milvus  (12300ms)
+        ✓ volume=atlas_etcd    (4100ms)
+        ✗ volume=aware_milvus  (1500ms)
+    ```
+    Markers: ✓ (ok forward), ✗ (failed), · (skipped), ↶ (ok
+    revert/rollback). `--json` emits a `{bundle_id,
+    entries_total, steps[{step, kind, branches[{branch, status,
+    audit_id, verb, exit, duration_ms, is_revert}]}]}` envelope
+    for agent consumption. Ambiguous prefix exits 2 with the
+    full match list; missing prefix exits 1 with a chained hint.
+  - **Composes with `on_failure: rollback_to: <id>`.** The
+    existing checkpoint semantics are preserved: when rolling
+    back TO a checkpoint that *includes* a fully-succeeded
+    matrix step, all branches stay in place (rollback target
+    is "everything after this checkpoint"); when rolling back
+    INTO a partially-failed matrix step itself, only succeeded
+    branches are inverted. Regression-guarded by
+    `l6_full_matrix_success_then_later_step_fails_rolls_back_all_branches`.
+  - **6 acceptance tests in
+    `tests/phase_f_v013.rs::l6_*`**: matrix-failure-rollback
+    (4-branch fanout, branch c fails, only a/b inverted, c/d
+    skip-audited), template resolves per-succeeded-branch (the
+    headline regression guard), bundle-status human-form (per-
+    branch ✓ markers + matrix labelling), bundle-status json
+    schema, full-matrix-success-then-later-step-fails (regression
+    guard for the existing checkpoint path), bundle-status-help
+    (subcommand discoverability), bundle-status-unknown-id
+    (no-match exit + chained hint).
+
 - **F18 — Per-namespace, per-day human-readable session transcripts
   at `~/.inspect/history/<ns>-<YYYY-MM-DD>.log` (mode 0600), plus
   `inspect history show / list / clear / rotate` and the
