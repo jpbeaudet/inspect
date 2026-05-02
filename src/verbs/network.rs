@@ -21,7 +21,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
         )?;
         if !out.ok() {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: docker network ls failed (exit {}): {}",
                     ns.namespace,
                     out.exit_code,

@@ -101,6 +101,52 @@ LIMITATIONS
   in regulated environments, forward audit entries to an external
   log system.
 
+SESSION TRANSCRIPTS (F18, v0.1.3)
+  Per-namespace, per-day, human-readable transcripts at
+  ~/.inspect/history/<ns>-<YYYY-MM-DD>.log (mode 0600). Each verb
+  invocation against a namespace produces one fenced block:
+
+    ── 2026-04-28T14:32:11Z arte #b8e3a1 ──────────────────────
+    $ inspect run arte -- 'docker ps'
+    arte | atlas-vault
+    arte | atlas-pg
+    ── exit=0 duration=423ms audit_id=01HXR9Q5YQK2 ──
+
+  The `── … ──` fence is awk-extractable; the trailing
+  audit_id= cross-links back to the structured audit entry.
+
+  Verbs that don't resolve a namespace (`inspect help`, `inspect
+  audit ls`, `inspect history ...` itself) produce no transcript
+  — they would always be near-empty.
+
+  Management verbs:
+    inspect history show [<ns>] [--date|--grep|--audit-id]
+    inspect history list [<ns>]
+    inspect history clear <ns> --before YYYY-MM-DD --yes
+    inspect history rotate
+
+  Retention via [history] in ~/.inspect/config.toml:
+    retain_days = 90              # delete older files on rotate
+    max_total_mb = 500            # cap across all namespaces
+    compress_after_days = 7       # gzip older files
+
+  Per-namespace overrides in ~/.inspect/servers.toml:
+    [namespaces.<ns>.history]
+    disabled = true               # skip transcript for this ns
+    redact = "off" | "normal" | "strict"
+
+  Redaction: every line tee'd to the transcript runs through the
+  L7 four-masker pipeline before being appended (PEM / Authorization
+  / URL credentials / KEY=VALUE). `redact = "off"` writes raw
+  lines (file mode 0600 already restricts exposure). `--show-secrets`
+  on the originating verb bypasses both stdout and transcript
+  redaction.
+
+  Performance: one fdatasync(2) per verb invocation regardless of
+  output volume. Buffer capped at 16 MiB; overflow becomes a
+  `[transcript truncated]` marker.
+
 SEE ALSO
   inspect help write         write verbs and the safety contract
   inspect help recipes       mutating recipes are also audited
+  inspect history --help     transcript management surface

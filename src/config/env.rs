@@ -53,6 +53,10 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         // F13 (v0.1.3): auto_reauth has no env-var override path; it is
         // a per-namespace policy that lives in `servers.toml`.
         auto_reauth: None,
+        // F18 (v0.1.3): per-namespace transcript override is
+        // config-file only (the policy is rarely set per-invocation;
+        // the file pattern matches F13 and F12).
+        history: None,
     })
 }
 

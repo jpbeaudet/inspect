@@ -278,7 +278,7 @@ pub fn current_runner() -> Box<dyn RemoteRunner> {
     if let Some(p) = mock_path() {
         match MockRunner::from_file(&p) {
             Ok(m) => return Box::new(m),
-            Err(e) => eprintln!("warning: mock file '{}' unreadable: {e}", p.display()),
+            Err(e) => crate::tee_eprintln!("warning: mock file '{}' unreadable: {e}", p.display()),
         }
     }
     Box::new(LiveRunner)
@@ -295,5 +295,10 @@ pub fn resolve_target(namespace: &str) -> Result<(ResolvedNamespace, SshTarget)>
     // here at the single boundary every verb crosses.
     ns.config.validate(&ns.name)?;
     let target = SshTarget::from_resolved(&ns)?;
+    // F18 (v0.1.3): every verb that resolves a namespace crosses
+    // this function exactly once. Stamp the transcript context with
+    // the resolved name + per-ns transcript policy here so all
+    // subsequent emit calls flow into the right per-namespace file.
+    crate::transcript::set_namespace(&ns.name);
     Ok((ns, target))
 }

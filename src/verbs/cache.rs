@@ -136,7 +136,7 @@ pub fn get_runtime(
 /// `format::render::render_doc`.
 pub fn print_source_line(info: &SourceInfo, fmt: &crate::format::OutputFormat) {
     if fmt.shows_envelope() {
-        println!("{}", info.human_line());
+        crate::tee_println!("{}", info.human_line());
     }
 }
 

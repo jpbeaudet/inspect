@@ -221,14 +221,16 @@ mod tests {
     }
 
     #[test]
-    fn index_size_under_50kb() {
+    fn index_size_under_96kb() {
         // Cap was raised 50 KB → 64 KB in v0.1.2 (bundle + watch topic
-        // prose) and 64 KB → 80 KB in v0.1.3 (L7 redaction model
-        // documented across write / safety / why help). Still small
+        // prose), 64 KB → 80 KB in v0.1.3 (L7 redaction model
+        // documented across write / safety / why help), and 80 KB →
+        // 96 KB in v0.1.3 (F18 transcript model added a 40-line
+        // SESSION TRANSCRIPTS section to safety.md). Still small
         // enough that the index loads instantly even on the smallest
         // dev VMs.
         let n = index_byte_size();
-        assert!(n <= 80 * 1024, "index is {n} bytes, exceeds 80 KB cap");
+        assert!(n <= 96 * 1024, "index is {n} bytes, exceeds 96 KB cap");
     }
 
     #[test]

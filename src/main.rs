@@ -24,6 +24,7 @@ mod safety;
 mod selector;
 mod ssh;
 mod sys;
+mod transcript;
 mod verbs;
 
 use cli::{Cli, Command};
@@ -34,6 +35,14 @@ fn main() -> ExitCode {
     // long-running loop in the engine and the SSH poller cooperates on
     // the global cancel flag (see `exec::cancel`).
     exec::cancel::install_handlers();
+
+    // F18 (v0.1.3): install the per-process transcript context so
+    // every subsequent user-visible emit can tee into the in-memory
+    // buffer. `init` records the operator's argv (post-redaction);
+    // the namespace + audit_id link are filled in by the verbs as
+    // they resolve. `finalize` is called at every return below.
+    let argv: Vec<String> = std::env::args().collect();
+    transcript::init(&argv);
 
     // F3 (v0.1.3): `inspect help <verb>` is a synonym for
     // `inspect <verb> --help`. We rewrite argv *before* clap parsing
@@ -53,6 +62,8 @@ fn main() -> ExitCode {
     // hint instead of clap's generic "unknown flag" rejection.
     if let Some(msg) = detect_namespace_flag_typo(&raw) {
         eprintln!("{msg}");
+        transcript::tee_stderr(&msg);
+        transcript::finalize(2);
         return ExitCode::from(2);
     }
     let rewritten = rewrite_help_synonym(raw);
@@ -70,6 +81,7 @@ fn main() -> ExitCode {
             let msg = err.to_string();
             if !msg.contains("cancelled") {
                 eprintln!("inspect: cancelled by signal");
+                transcript::tee_stderr("inspect: cancelled by signal");
             }
         } else {
             // Success path: the verb finished its work but the user
@@ -77,10 +89,15 @@ fn main() -> ExitCode {
             // anyway — that's what `git`, `kubectl`, and `ssh` do.
             // No extra output: the verb already wrote its envelope.
         }
+        transcript::finalize(130);
         return ExitCode::from(130);
     }
     match result {
-        Ok(kind) => ExitCode::from(kind.code()),
+        Ok(kind) => {
+            let code = kind.code();
+            transcript::finalize(code as i32);
+            ExitCode::from(code)
+        }
         Err(err) => {
             // HP-5: route the top-level error through the central
             // helper so the `see: inspect help <topic>` line is
@@ -89,10 +106,14 @@ fn main() -> ExitCode {
             error::emit(err.to_string());
             let mut source = err.source();
             while let Some(cause) = source {
-                eprintln!("  caused by: {cause}");
+                let line = format!("  caused by: {cause}");
+                eprintln!("{line}");
+                transcript::tee_stderr(&line);
                 source = cause.source();
             }
-            ExitCode::from(ExitKind::Error.code())
+            let code = ExitKind::Error.code();
+            transcript::finalize(code as i32);
+            ExitCode::from(code)
         }
     }
 }
@@ -144,6 +165,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Audit(args) => commands::audit::run(args),
         Command::Revert(args) => commands::revert::run(args),
         Command::Cache(args) => commands::cache::run(args),
+        Command::History(args) => commands::history::run(args),
         Command::Why(args) => commands::why::run(args),
         Command::Connectivity(args) => commands::connectivity::run(args),
         Command::Recipe(args) => commands::recipe::run(args),

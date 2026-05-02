@@ -632,6 +632,60 @@ EXAMPLES
   $ inspect audit gc --keep 90d --dry-run
   $ inspect audit gc --keep 100 --json";
 
+const LONG_HISTORY: &str = "\
+F18 (v0.1.3): per-namespace, per-day human-readable transcript of \
+every verb invocation and its full output, written automatically by \
+default to ~/.inspect/history/<ns>-<YYYY-MM-DD>.log (mode 0600).
+
+The transcript is a complement to the structured audit log
+(`~/.inspect/audit/`). Audit log answers \"what verbs ran with what
+arguments + what changed\"; transcript answers \"what did I see on
+my terminal during the 4-hour migration?\". Each verb produces one
+fenced block so `awk '/^── /,/^── exit=/'` extracts individual
+invocations; `audit_id=<id>` in the footer cross-links back to the
+structured audit entry for forensic round-trip.
+
+SUBCOMMANDS
+  show     Render fenced blocks. Defaults to today's transcript for
+           the most-recently-used namespace. Filter with --date,
+           --grep, or --audit-id. Transparently decompresses gz.
+  list     List transcript files with sizes and date ranges.
+  clear    Delete files older than --before YYYY-MM-DD for one
+           namespace. Confirmation gate via --yes.
+  rotate   Apply the [history] retention policy now: delete files
+           older than retain_days, gzip files older than
+           compress_after_days, evict oldest-first when total bytes
+           exceed max_total_mb. Lazy version fires once a day from
+           transcript::finalize.
+
+CONFIG (`~/.inspect/config.toml`)
+  [history]
+  retain_days = 90              # default 90; older files deleted on rotate
+  max_total_mb = 500            # default 500; cap across all namespaces
+  compress_after_days = 7       # default 7; older files gzipped on rotate
+
+PER-NAMESPACE OVERRIDES (`~/.inspect/servers.toml`)
+  [namespaces.<ns>.history]
+  disabled = true               # skip transcript writes for this ns
+  redact = \"off\" | \"normal\" | \"strict\"
+
+REDACTION
+  Every line tee'd into the transcript runs through the L7
+  four-masker pipeline (PEM / Authorization / URL credentials /
+  KEY=VALUE) using the per-namespace mode. `redact = \"off\"`
+  writes raw lines (file mode 0600 already restricts exposure).
+  `--show-secrets` on the originating verb bypasses redaction in
+  both stdout and transcript.
+
+EXAMPLES
+  $ inspect history show arte                        # today's transcript
+  $ inspect history show arte --date 2026-04-28      # one specific day
+  $ inspect history show arte --grep 'docker volume rm'
+  $ inspect history show --audit-id 01HXR9Q5YQK2     # cross-ref from audit
+  $ inspect history list arte
+  $ inspect history rotate --json
+  $ inspect history clear arte --before 2026-01-01 --yes";
+
 const LONG_CACHE: &str = "\
 Inspect or invalidate the local runtime cache.
 
@@ -893,6 +947,11 @@ pub enum Command {
     /// Inspect or invalidate the runtime cache.
     #[command(long_about = LONG_CACHE)]
     Cache(CacheArgs),
+
+    // ---- v0.1.3 F18 session transcript ---------------------------------------
+    /// Browse and rotate the per-namespace per-day transcript files.
+    #[command(long_about = LONG_HISTORY)]
+    History(HistoryArgs),
 
     // ---- Phase 11 fleet ------------------------------------------------------
     /// Run a verb across multiple namespaces.
@@ -2619,6 +2678,88 @@ pub struct AuditGcArgs {
     /// freed bytes are computed identically to a real run.
     #[arg(long)]
     pub dry_run: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+// ---- F18 history (v0.1.3) ---------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(
+    long_about = LONG_HISTORY,
+    after_help = SEE_ALSO_SAFETY,
+)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub command: HistoryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryCommand {
+    /// Render fenced transcript blocks. Filter by --date, --grep, or
+    /// --audit-id. Transparently decompresses .log.gz files. Default
+    /// scope is today's transcript for the most-recently-used
+    /// namespace.
+    Show(HistoryShowArgs),
+    /// List transcript files with sizes and date ranges. Optional
+    /// namespace filter.
+    List(HistoryListArgs),
+    /// Delete transcript files older than --before YYYY-MM-DD for
+    /// one namespace. Audit log is untouched.
+    Clear(HistoryClearArgs),
+    /// Apply the `[history]` retention policy now: delete +
+    /// compress + evict per `~/.inspect/config.toml`. Lazy version
+    /// fires once per day from `transcript::finalize`.
+    Rotate(HistoryRotateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryShowArgs {
+    /// Restrict to one namespace. When omitted with no other filter,
+    /// every namespace's today's-transcript is rendered.
+    pub namespace: Option<String>,
+    /// One specific day, YYYY-MM-DD (UTC). When omitted, today's
+    /// transcript for the resolved namespace is rendered.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub date: Option<String>,
+    /// Substring filter applied across every fenced block (header,
+    /// argv, body, footer). Case-sensitive.
+    #[arg(long, value_name = "PATTERN")]
+    pub grep: Option<String>,
+    /// Cross-reference filter: render only the block(s) whose
+    /// `audit_id=` footer matches (substring match against the
+    /// trailing audit id).
+    #[arg(long, value_name = "ID")]
+    pub audit_id: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryListArgs {
+    /// Optional namespace filter.
+    pub namespace: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryClearArgs {
+    /// Namespace whose transcripts to delete.
+    pub namespace: String,
+    /// Delete every file dated strictly before this YYYY-MM-DD.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub before: String,
+    /// Confirm the deletion. Without this flag, `clear` prints what
+    /// it would do and exits non-zero.
+    #[arg(long)]
+    pub yes: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryRotateArgs {
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

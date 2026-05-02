@@ -104,7 +104,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
         // reach stdout. `--show-secrets` opts out for vetted files.
         let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
         let Some(path) = step.path.as_deref() else {
-            eprintln!(
+            crate::tee_eprintln!(
                 "warning: '{}' has no :path; cat requires a file path (e.g. arte/atlas:/etc/atlas.conf)",
                 step.ns.namespace
             );
@@ -129,7 +129,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                         .put("exit", out.exit_code),
                 );
             } else {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: cat failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -181,7 +181,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                     Some(m) => m,
                     None => continue,
                 };
-                println!("{masked}");
+                crate::tee_println!("{masked}");
             }
         } else {
             for line in out.stdout.lines() {
@@ -189,7 +189,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                     Some(m) => m,
                     None => continue,
                 };
-                println!("{masked}");
+                crate::tee_println!("{masked}");
             }
         }
     }

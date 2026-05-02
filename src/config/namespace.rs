@@ -44,6 +44,32 @@ pub struct NamespaceConfig {
     /// `auto_reauth = false` in `~/.inspect/servers.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_reauth: Option<bool>,
+    /// F18 (v0.1.3): per-namespace transcript override. When the
+    /// `[namespaces.<ns>.history]` table is present, its fields
+    /// override the global defaults: `disabled = true` skips
+    /// transcript writes for this namespace entirely (audit log is
+    /// still written), `redact = "off"|"normal"|"strict"` overrides
+    /// the L7 redaction mode applied to lines tee'd into the
+    /// transcript file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryNsOverride>,
+}
+
+/// F18 (v0.1.3): per-namespace transcript policy override. See
+/// [`NamespaceConfig::history`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryNsOverride {
+    /// When `Some(true)`, transcript writes for this namespace are
+    /// skipped (the audit log is still written). `None` ⇒ transcript
+    /// is enabled (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    /// Per-namespace transcript redaction mode: `"normal"` (default
+    /// — L7 four-masker pipeline), `"strict"` (reserved; identical
+    /// to `"normal"` in v0.1.3), `"off"` (write raw lines without
+    /// masking). `None` ⇒ inherit the global L7 default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact: Option<String>,
 }
 
 impl NamespaceConfig {
@@ -78,6 +104,7 @@ impl NamespaceConfig {
             key_inline: other.key_inline.clone().or_else(|| self.key_inline.clone()),
             env,
             auto_reauth: other.auto_reauth.or(self.auto_reauth),
+            history: other.history.clone().or_else(|| self.history.clone()),
         }
     }
 
@@ -179,6 +206,7 @@ mod tests {
             key_inline: None,
             env: None,
             auto_reauth: None,
+            history: None,
         }
     }
 

@@ -35,7 +35,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             }
         }
         if !args.format.is_json() {
-            eprintln!("reset {deleted} cursor(s)");
+            crate::tee_eprintln!("reset {deleted} cursor(s)");
         }
         return Ok(ExitKind::Success);
     }
@@ -66,7 +66,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
                 if let Err(e) = now.save() {
                     if !args.format.is_json() {
-                        eprintln!("warn: failed to save cursor: {e}");
+                        crate::tee_eprintln!("warn: failed to save cursor: {e}");
                     }
                 }
             }
@@ -75,7 +75,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 if let Some(driver) = svc_def.log_driver {
                     if !driver.is_readable_via_docker_logs() {
                         if !args.format.is_json() {
-                            eprintln!(
+                            crate::tee_eprintln!(
                                 "{}/{}: log driver `{}` is not readable via `docker logs` -- skipped in merged view",
                                 step.ns.namespace,
                                 svc_name,
@@ -165,7 +165,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             // non-merged path. We don't bother distinguishing per
             // source here — the merged view is one logical stream.
             if !args.format.is_json() {
-                eprintln!("{}", no_match_notice(&args));
+                crate::tee_eprintln!("{}", no_match_notice(&args));
             }
             ExitKind::Success
         } else {
@@ -199,7 +199,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             // the user's actual log query.
             if let Err(e) = now.save() {
                 if !args.format.is_json() {
-                    eprintln!("warn: failed to save cursor: {e}");
+                    crate::tee_eprintln!("warn: failed to save cursor: {e}");
                 }
             }
         }
@@ -228,7 +228,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                                 .put("log_driver", driver.as_str()),
                         );
                     } else {
-                        eprintln!("{msg}");
+                        crate::tee_eprintln!("{msg}");
                     }
                     continue;
                 }
@@ -279,7 +279,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 continue;
             }
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}/{}: logs failed (exit {}): {}",
                     step.ns.namespace,
                     svc_name,
@@ -313,7 +313,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                     &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{}/{} | {safe}", step.ns.namespace, svc_name);
+                crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc_name);
             }
         }
     }
@@ -330,7 +330,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         // never reach this branch — the stream stays open until the
         // user cancels or the upstream times out.
         if !args.format.is_json() {
-            eprintln!("{}", no_match_notice(&args));
+            crate::tee_eprintln!("{}", no_match_notice(&args));
         }
         ExitKind::Success
     } else {
@@ -570,7 +570,7 @@ fn stream_follow(
                     &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{namespace}/{svc_name} | {safe}");
+                crate::tee_println!("{namespace}/{svc_name} | {safe}");
             }
         });
         if got_any {
@@ -587,7 +587,7 @@ fn stream_follow(
             Ok(_) | Err(_) if attempt >= MAX_RECONNECTS => {
                 if let Err(e) = result {
                     if !json {
-                        eprintln!("{namespace}/{svc_name}: stream ended ({e})");
+                        crate::tee_eprintln!("{namespace}/{svc_name}: stream ended ({e})");
                     }
                 }
                 return;
@@ -598,7 +598,7 @@ fn stream_follow(
         attempt += 1;
         let backoff = std::time::Duration::from_secs(1u64 << (attempt - 1));
         if !json {
-            eprintln!(
+            crate::tee_eprintln!(
                 "{namespace}/{svc_name}: stream dropped, reconnecting in {}s (attempt {attempt}/{MAX_RECONNECTS})",
                 backoff.as_secs()
             );

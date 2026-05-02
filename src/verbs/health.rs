@@ -176,7 +176,7 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
     }
     if !refresh_warnings.is_empty() {
         for w in &refresh_warnings {
-            eprintln!("warning: {w}");
+            crate::tee_eprintln!("warning: {w}");
         }
     }
 

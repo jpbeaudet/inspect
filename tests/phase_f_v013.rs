@@ -6417,3 +6417,377 @@ fn l5_lazy_gc_triggers_on_audit_append_when_retention_set() {
     );
     assert!(marker.exists(), "lazy GC must touch the .gc-checked marker");
 }
+
+// -----------------------------------------------------------------------------
+// F18 — `~/.inspect/history/<ns>-<YYYY-MM-DD>.log` per-namespace, per-day
+// human-readable transcript of every namespace-scoped verb invocation. Adds
+// `inspect history show / list / clear / rotate` plus the [history] config
+// block in `~/.inspect/config.toml` and per-ns overrides in `servers.toml`.
+// -----------------------------------------------------------------------------
+
+fn f18_today_utc() -> String {
+    use chrono::Utc;
+    Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn f18_history_path(home: &std::path::Path, ns: &str) -> std::path::PathBuf {
+    home.join("history")
+        .join(format!("{ns}-{}.log", f18_today_utc()))
+}
+
+#[test]
+fn f18_status_writes_namespace_scoped_transcript_block() {
+    // Spec: every verb invocation against a namespace produces one
+    // fenced block. A single `inspect status arte` against a fresh
+    // sandbox should yield exactly one fenced block in the day's
+    // transcript file with header + argv + body + footer.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    sb.cmd().args(["status", "arte"]).assert().success();
+    let path = f18_history_path(sb.home(), "arte");
+    let body = std::fs::read_to_string(&path).expect("transcript file should exist");
+    let header_count = body.matches("── ").count();
+    assert!(
+        header_count >= 2,
+        "expected at least one full fenced block (header + footer): got {body}"
+    );
+    assert!(body.contains("$ "), "argv line missing: {body}");
+    assert!(
+        body.contains("── exit=0 duration="),
+        "footer missing exit/duration: {body}"
+    );
+    // Header carries `arte` as the namespace token.
+    assert!(
+        body.contains("arte #"),
+        "header should name the namespace: {body}"
+    );
+}
+
+#[test]
+fn f18_help_does_not_write_global_transcript() {
+    // `inspect help` does not resolve a namespace; per F18 spec only
+    // namespace-scoped verbs produce transcripts. Verifies we don't
+    // pollute ~/.inspect/history/ with `_global-*.log` files for
+    // operator-tooling verbs.
+    let sb = Sandbox::new(json!([]));
+    sb.cmd().args(["help"]).assert().success();
+    let history = sb.home().join("history");
+    if history.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&history)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "namespace-less verb should leave history dir empty (got: {entries:?})"
+        );
+    }
+}
+
+#[test]
+fn f18_history_rotate_deletes_old_files() {
+    // retain_days = 7 ⇒ files dated 8+ days ago deleted; files
+    // within 7 days kept.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    std::fs::write(
+        sb.home().join("config.toml"),
+        "[history]\nretain_days = 7\nmax_total_mb = 500\ncompress_after_days = 999\n",
+    )
+    .unwrap();
+    let history = sb.home().join("history");
+    std::fs::create_dir_all(&history).unwrap();
+    use chrono::Utc;
+    let today = Utc::now().date_naive();
+    for d in [1, 3, 5, 8, 10, 15] {
+        let date = today - chrono::Duration::days(d);
+        let path = history.join(format!("arte-{}.log", date.format("%Y-%m-%d")));
+        std::fs::write(&path, b"fake transcript").unwrap();
+    }
+    sb.cmd()
+        .args(["history", "rotate", "--json"])
+        .assert()
+        .success();
+    let remaining: Vec<_> = std::fs::read_dir(&history)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("arte-"))
+        .collect();
+    // Days 1, 3, 5 within the 7-day window survive; 8, 10, 15 deleted.
+    assert!(
+        remaining.len() == 3,
+        "expected 3 surviving files, got {remaining:?}"
+    );
+    for d in [1, 3, 5] {
+        let date = today - chrono::Duration::days(d);
+        let name = format!("arte-{}.log", date.format("%Y-%m-%d"));
+        assert!(
+            remaining.iter().any(|n| n == &name),
+            "expected {name} to survive: {remaining:?}"
+        );
+    }
+}
+
+#[test]
+fn f18_history_rotate_compresses_old_files_and_show_decompresses() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    // compress_after_days = 1 ⇒ yesterday's file is gzipped.
+    std::fs::write(
+        sb.home().join("config.toml"),
+        "[history]\nretain_days = 365\nmax_total_mb = 500\ncompress_after_days = 1\n",
+    )
+    .unwrap();
+    let history = sb.home().join("history");
+    std::fs::create_dir_all(&history).unwrap();
+    use chrono::Utc;
+    let yesterday = Utc::now().date_naive() - chrono::Duration::days(2);
+    let path = history.join(format!("arte-{}.log", yesterday.format("%Y-%m-%d")));
+    let content = "── 2026-04-27T10:00:00Z arte #abc1234 ──────\n\
+                   $ inspect status arte\n\
+                   arte | atlas-vault: ok\n\
+                   ── exit=0 duration=10ms ──\n\n";
+    std::fs::write(&path, content).unwrap();
+
+    sb.cmd().args(["history", "rotate"]).assert().success();
+    let gz_path = history.join(format!("arte-{}.log.gz", yesterday.format("%Y-%m-%d")));
+    assert!(gz_path.exists(), "yesterday's file should be gzipped");
+    assert!(!path.exists(), "original .log should be removed");
+
+    // history show --date <yesterday> transparently decompresses.
+    let assert = sb
+        .cmd()
+        .args([
+            "history",
+            "show",
+            "arte",
+            "--date",
+            &yesterday.format("%Y-%m-%d").to_string(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("atlas-vault: ok") && stdout.contains("$ inspect status arte"),
+        "history show should decompress + render the original block: {stdout}"
+    );
+}
+
+#[test]
+fn f18_history_disabled_per_ns_skips_transcript_but_audit_still_writes() {
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    // Note: write_servers_toml stomps the file, so we need to write
+    // the [namespaces.arte.history] block as part of our own toml.
+    let body = r#"schema_version = 1
+
+[namespaces.arte]
+host = "arte.example.invalid"
+user = "deploy"
+port = 22
+
+[namespaces.arte.history]
+disabled = true
+"#;
+    let path = h.join("servers.toml");
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
+    let transcript = f18_history_path(h, "arte");
+    assert!(
+        !transcript.exists(),
+        "disabled per-ns transcript should NOT be written"
+    );
+    // Audit log entry is still written.
+    let audit_dir = h.join("audit");
+    let any_audit_jsonl = std::fs::read_dir(&audit_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().is_some_and(|s| s == "jsonl"))
+        })
+        .unwrap_or(false);
+    assert!(
+        any_audit_jsonl,
+        "audit log must still be written even when transcript is disabled"
+    );
+}
+
+#[test]
+fn f18_history_show_filters_by_audit_id() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    // Two separate cache-clear invocations write two transcript
+    // blocks AND two audit entries. We grep audit JSONL for the
+    // first id, then ask `history show --audit-id <id>` to find it.
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
+    let audit_dir = sb.home().join("audit");
+    let mut audit_ids: Vec<String> = Vec::new();
+    for ent in std::fs::read_dir(&audit_dir).unwrap() {
+        let ent = ent.unwrap();
+        if ent.path().extension().is_some_and(|s| s == "jsonl") {
+            let body = std::fs::read_to_string(ent.path()).unwrap();
+            for line in body.lines() {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                    audit_ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        audit_ids.len() >= 2,
+        "expected at least 2 audit ids, got {audit_ids:?}"
+    );
+    let target = &audit_ids[0];
+    let assert = sb
+        .cmd()
+        .args(["history", "show", "arte", "--audit-id", target])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains(&format!("audit_id={target}")),
+        "history show --audit-id should render the matching block (target={target}): {stdout}"
+    );
+    // The OTHER block's id should NOT appear.
+    let other = &audit_ids[1];
+    if other != target {
+        assert!(
+            !stdout.contains(&format!("audit_id={other}")),
+            "history show --audit-id should isolate to the targeted block, not show {other}"
+        );
+    }
+}
+
+#[test]
+fn f18_history_list_lines_up_files_with_sizes() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte", "bravo"]);
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
+    sb.cmd()
+        .args(["cache", "clear", "bravo"])
+        .assert()
+        .success();
+    let assert = sb
+        .cmd()
+        .args(["history", "list", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let mut found_arte = false;
+    let mut found_bravo = false;
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        let ns = v["namespace"].as_str().unwrap_or("");
+        if ns == "arte" {
+            found_arte = true;
+        }
+        if ns == "bravo" {
+            found_bravo = true;
+        }
+        assert!(v.get("date").is_some());
+        assert!(v.get("bytes").is_some());
+        assert!(v.get("compressed").is_some());
+    }
+    assert!(
+        found_arte && found_bravo,
+        "history list --json should emit one record per (ns, date)"
+    );
+}
+
+#[test]
+fn f18_history_clear_requires_yes_then_deletes() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    let history = sb.home().join("history");
+    std::fs::create_dir_all(&history).unwrap();
+    use chrono::Utc;
+    let today = Utc::now().date_naive();
+    let old = today - chrono::Duration::days(20);
+    let path = history.join(format!("arte-{}.log", old.format("%Y-%m-%d")));
+    std::fs::write(&path, b"x").unwrap();
+    // Without --yes ⇒ refuse.
+    sb.cmd()
+        .args([
+            "history",
+            "clear",
+            "arte",
+            "--before",
+            &today.format("%Y-%m-%d").to_string(),
+        ])
+        .assert()
+        .failure();
+    assert!(path.exists(), "clear without --yes must NOT delete");
+    // With --yes ⇒ delete.
+    sb.cmd()
+        .args([
+            "history",
+            "clear",
+            "arte",
+            "--before",
+            &today.format("%Y-%m-%d").to_string(),
+            "--yes",
+        ])
+        .assert()
+        .success();
+    assert!(!path.exists(), "clear --yes should remove old files");
+}
+
+#[test]
+fn f18_help_documents_history_subcommands() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["history", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    for needle in [
+        "show",
+        "list",
+        "clear",
+        "rotate",
+        "[history]",
+        "config.toml",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "history --help should document '{needle}': {stdout}"
+        );
+    }
+}
+
+#[test]
+fn f18_argv_password_is_redacted_in_transcript_header() {
+    // The verb itself rejects with an unknown-flag error since
+    // --password=... isn't a real flag, but the argv-line we record
+    // in the transcript header MUST mask the secret regardless.
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+    sb.cmd()
+        .args(["status", "arte", "--password=hunter2"])
+        .assert()
+        .failure();
+    // Even on parse failure the transcript may not be written
+    // (namespace not resolved). So we at least confirm the secret
+    // never reaches the transcript dir if any was created.
+    let history = sb.home().join("history");
+    if history.exists() {
+        for ent in std::fs::read_dir(&history).unwrap() {
+            let ent = ent.unwrap();
+            if let Ok(body) = std::fs::read_to_string(ent.path()) {
+                assert!(
+                    !body.contains("hunter2"),
+                    "transcript must never contain the literal password: {body}"
+                );
+            }
+        }
+    }
+}

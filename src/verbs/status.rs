@@ -248,7 +248,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         // human operators still see the per-ns reason. Single line per
         // namespace; never per-service spam.
         for w in &refresh_warnings {
-            eprintln!("warning: {w}");
+            crate::tee_eprintln!("warning: {w}");
         }
     }
 

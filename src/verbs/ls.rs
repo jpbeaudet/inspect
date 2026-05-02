@@ -38,7 +38,7 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
         )?;
         if !out.ok() {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: ls failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -70,13 +70,13 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
             }
         } else {
             let svc_part = step.service().map(|s| format!("/{s}")).unwrap_or_default();
-            println!("# {}{svc_part}:{path}", step.ns.namespace);
+            crate::tee_println!("# {}{svc_part}:{path}", step.ns.namespace);
             for line in out.stdout.lines() {
                 let safe = crate::format::safe::safe_terminal_line(
                     line,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{safe}");
+                crate::tee_println!("{safe}");
             }
         }
     }

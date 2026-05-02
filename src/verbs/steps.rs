@@ -314,7 +314,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     // intent without trawling the terminal scrollback.
     let reason = crate::safety::validate_reason(args.reason.as_deref())?;
     if let Some(r) = &reason {
-        eprintln!("# reason: {r}");
+        crate::tee_eprintln!("# reason: {r}");
     }
 
     let (manifest, manifest_sha) = match load_manifest(&manifest_path, is_yaml) {
@@ -373,7 +373,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         Ok(s) => Some(s),
         Err(e) => {
             // Match the F9/F16 fallback shape: warn, proceed.
-            eprintln!("warning: audit log unavailable ({e}); proceeding without audit");
+            crate::tee_eprintln!("warning: audit log unavailable ({e}); proceeding without audit");
             None
         }
     };
@@ -457,9 +457,9 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         // N sub-blocks.
         if !json {
             if target_count == 1 {
-                println!("STEP {} ▶", spec.name);
+                crate::tee_println!("STEP {} ▶", spec.name);
             } else {
-                println!("STEP {} ▶ (across {} target(s))", spec.name, target_count);
+                crate::tee_println!("STEP {} ▶ (across {} target(s))", spec.name, target_count);
             }
         } else {
             JsonOut::write(
@@ -538,7 +538,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                         &mut |line| {
                             // Live print every line (uncapped).
                             if !json {
-                                println!("{label_for_step} | {line}");
+                                crate::tee_println!("{label_for_step} | {line}");
                             } else {
                                 JsonOut::write(
                                     &Envelope::new(&label_for_step, "run", "step")
@@ -702,12 +702,14 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         if !json {
             for tr in &per_target_results {
                 if target_count == 1 {
-                    println!(
+                    crate::tee_println!(
                         "STEP {} ◀ exit={} duration={}ms",
-                        spec.name, tr.exit, tr.duration_ms
+                        spec.name,
+                        tr.exit,
+                        tr.duration_ms
                     );
                 } else {
-                    println!(
+                    crate::tee_println!(
                         "  ◀ {}: exit={} duration={}ms{}",
                         tr.label,
                         tr.exit,
@@ -720,11 +722,11 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                     );
                 }
                 if tr.output_truncated {
-                    println!("  ⚠ {}: stdout capture truncated at 10 MiB", tr.label);
+                    crate::tee_println!("  ⚠ {}: stdout capture truncated at 10 MiB", tr.label);
                 }
             }
             if target_count > 1 {
-                println!(
+                crate::tee_println!(
                     "STEP {} ◀ status={} ({}/{} targets ok)",
                     spec.name,
                     aggregate.label(),
@@ -792,12 +794,12 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     let mut auto_revert_count = 0usize;
     if args.revert_on_failure && stopped_at.is_some() {
         if !json {
-            println!();
+            crate::tee_println!();
             let applied_steps = results
                 .iter()
                 .filter(|r| matches!(r.status, StepStatus::Ok | StepStatus::Failed))
                 .count();
-            println!(
+            crate::tee_println!(
                 "─── REVERT: unwinding {} prior step(s) in reverse manifest order ───",
                 applied_steps
             );
@@ -812,7 +814,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 Some(c) if !c.trim().is_empty() => c.clone(),
                 _ => {
                     if !json {
-                        eprintln!(
+                        crate::tee_eprintln!(
                             "  · skipped revert for '{}' (no declared revert_cmd)",
                             spec.name
                         );
@@ -856,12 +858,14 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 };
                 if !json {
                     if revert_ok {
-                        println!(
+                        crate::tee_println!(
                             "  ✓ reverted '{}' on {} (exit=0, duration={}ms)",
-                            spec.name, target_result.label, dur
+                            spec.name,
+                            target_result.label,
+                            dur
                         );
                     } else {
-                        eprintln!(
+                        crate::tee_eprintln!(
                             "  ✗ revert FAILED for '{}' on {} (exit={}, {})",
                             spec.name,
                             target_result.label,
@@ -976,7 +980,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             "steps": results,
             "summary": summary,
         });
-        println!("{}", payload);
+        crate::tee_println!("{}", payload);
     } else {
         let mut r = Renderer::new();
         let across = if target_count == 1 {

@@ -323,9 +323,13 @@ pub fn topic_for_message(msg: &str) -> Option<&'static str> {
 /// `error:` line, matching the HP-0 baseline.
 pub fn emit(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
-    eprintln!("error: {msg}");
+    let line = format!("error: {msg}");
+    eprintln!("{line}");
+    crate::transcript::tee_stderr(&line);
     if let Some(topic) = topic_for_message(msg) {
-        eprintln!("  see: inspect help {topic}");
+        let see = format!("  see: inspect help {topic}");
+        eprintln!("{see}");
+        crate::transcript::tee_stderr(&see);
     }
 }
 

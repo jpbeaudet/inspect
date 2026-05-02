@@ -1041,10 +1041,167 @@ retention parses; empty file = defaults).
 
 ---
 
+## 16. Session transcripts (v0.1.3, F18)
+
+Per-namespace, per-day, human-readable transcripts complement the
+structured audit log. Each `~/.inspect/history/<ns>-<YYYY-MM-DD>.log`
+is a single file (mode 0600) holding one fenced block per verb
+invocation against that namespace.
+
+### 16.1 The tee architecture
+
+Every `inspect <verb>` invocation is a separate process. The
+transcript writer is per-process state held in
+`OnceLock<Mutex<Option<TranscriptContext>>>`, installed at the top
+of `main()` (after `cancel::install_handlers()` and before clap
+parsing) via `transcript::init(&argv)`. The `argv` is captured
+post-redaction (`--password=` / `--token=` flags masked).
+
+User-visible output flows through two macros defined in
+`src/transcript.rs`:
+
+- `tee_println!` — writes to stdout AND appends to the per-process
+  buffer.
+- `tee_eprintln!` — same for stderr.
+
+Every central rendering site uses these — `Renderer::print`,
+`JsonOut::write`, `OutputDoc::print_*`, `format::render::render_doc`,
+and the streaming line-emit sites in run/logs/cat/grep/find/merged/
+steps/watch/status/health/cache/why/ports/connectivity/network/
+correlation/cursor/dispatch/transfer/ls/ps/images/volumes.
+`error::emit` tees stderr too. New verbs MUST use the macros at
+their emit sites or their output won't appear in the transcript.
+
+### 16.2 The namespace hook
+
+`transcript::set_namespace(ns)` resolves the per-ns redaction mode
++ disabled flag from `[namespaces.<ns>.history]` and stamps the
+transcript context. It fires from two places:
+
+1. `verbs::runtime::resolve_target` — every dispatch verb that
+   crosses this function (every read/write verb that talks to a
+   remote host).
+2. Verbs that manage namespaces locally without going through
+   `resolve_target`. Today that's `inspect cache clear <ns>`; new
+   verbs of this shape MUST call `transcript::set_namespace`
+   explicitly.
+
+If neither hook fires, `finalize` short-circuits: no transcript is
+written, no `_global-*.log` file appears in the history dir.
+
+### 16.3 The redaction pipeline
+
+Every line tee'd to the transcript runs through the L7 four-masker
+pipeline (`OutputRedactor::new(false, false)`) before being
+appended to the buffer. The PEM masker's `None` return suppresses
+the line (just like in stdout); the BEGIN-line marker is what gets
+stored. Per-namespace `redact = "off"` short-circuits the masker
+entirely; `redact = "strict"` is reserved (identical to "normal" in
+v0.1.3 — the future tightening will mask any KEY=VALUE whose key
+looks secret-shaped).
+
+`--show-secrets` on the originating verb bypasses redaction in
+both stdout and transcript — single flag, single bypass.
+
+### 16.4 The audit cross-link
+
+`AuditStore::append` calls `transcript::set_audit_id(&entry.id)`
+on first append (subsequent calls in the same verb are no-ops:
+first-write-wins). This means the transcript footer's
+`audit_id=<id>` always points at the **parent** entry on
+multi-audit verbs (F17 `--steps` parent, bundle parent, etc.) —
+not the per-step entries. Forensic round-trip from a transcript
+hit back to a structured audit entry is one `inspect audit show
+<id>` away.
+
+### 16.5 The fenced-block format
+
+```text
+── 2026-04-28T14:32:11Z arte #b8e3a1 ──────────────────────────
+$ inspect run arte -- 'docker ps'
+<output lines, post-redaction>
+── exit=0 duration=423ms audit_id=01HXR9Q5YQK2 ──
+```
+
+The fence pattern is `awk '/^── /,/^── exit=/'`-friendly. Footer
+omits `audit_id=` when the verb didn't append an audit entry (read
+verbs without F17/F11 instrumentation, e.g. `inspect status`).
+
+### 16.6 Performance + buffer cap
+
+Output accumulates in memory during the verb. At finalize, the
+full block is written via `OpenOptions::new().create(true).append(true).open(...)` and `sync_data()`. **One fdatasync(2) per verb
+invocation, regardless of output volume** — satisfies the F18
+≤ 70-fsyncs-per-10-min performance gate trivially.
+
+The buffer is capped at 16 MiB (`MAX_BUFFER_BYTES` in
+`src/transcript.rs`). Past the cap, the buffer is closed with a
+`[transcript truncated: buffer cap reached]` marker and subsequent
+writes are no-ops. A runaway streaming verb cannot OOM the
+process — the cap is reached, the marker is recorded, the verb
+keeps writing to stdout normally.
+
+### 16.7 Rotation + retention + compression
+
+`src/transcript/rotate.rs::run_rotate(policy, dry_run)` is the
+single source of truth. Three steps in order:
+
+1. Delete files dated older than `retain_days` (default 90).
+2. Gzip files dated older than `compress_after_days` (default 7)
+   that aren't already `.gz`. Atomic via `<name>.part` →
+   `rename(2)`. Original is `unlink(2)`-ed only after the rename
+   succeeds.
+3. Enforce `max_total_mb` cap (default 500): sort oldest-first,
+   evict until under. Today's file is never evicted (active write
+   target).
+
+`maybe_run_lazy()` fires from `transcript::finalize` gated by a
+once-per-day marker (`~/.inspect/history/.rotated`, mtime-checked
+against a 23-hour stale window). Errors swallowed at the call site
+so transient rotation failure cannot break the just-emitted
+transcript block. `inspect history rotate` calls `run_rotate(None)`
+explicitly with the on-disk policy.
+
+### 16.8 The `inspect history` verb tree
+
+Implemented in `src/commands/history.rs`. Subcommands:
+
+- `show [<ns>] [--date YYYY-MM-DD] [--grep <pattern>] [--audit-id
+  <id>]` — renders fenced blocks. Transparently decompresses
+  `.log.gz` via `read_transcript`. Filter logic: `--date` selects
+  by file (one per day), `--grep` filters per-block on the full
+  block bytes (header + argv + body + footer), `--audit-id` filters
+  on the footer's `audit_id=` token (substring match).
+- `list [<ns>]` — walks the dir grouping by (namespace, date) with
+  byte sizes; sort by namespace then date desc.
+- `clear <ns> --before YYYY-MM-DD` — deletes files in that namespace
+  with date < cutoff. `--yes` gate to confirm.
+- `rotate` — calls `run_rotate(None)`.
+
+All four have `--json` envelopes (top-level, no `data` wrapper).
+
+### 16.9 Writing new verbs F18-correctly
+
+Three rules:
+
+1. Use `tee_println!` / `tee_eprintln!` for any line that should
+   appear in the operator's transcript. Bare `println!` /
+   `eprintln!` calls write to stdout/stderr only.
+2. If your verb resolves a namespace, it should go through
+   `verbs::runtime::resolve_target`. If it must handle the
+   namespace directly (e.g. local-only operations like cache
+   clear), call `crate::transcript::set_namespace(ns)` explicitly
+   at the point where the namespace is committed.
+3. Audit entries written via `AuditStore::append` automatically
+   stamp the transcript's audit_id — no extra work needed.
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
 mode); §12 in F15 (file transfer); §13 in F16 (streaming executor);
-§14 in F17 (multi-step runner); §15 in L5 (audit gc + lazy trigger).
-Any deviation between this runbook and the bible is a runbook bug.*
+§14 in F17 (multi-step runner); §15 in L5 (audit gc + lazy trigger);
+§16 in F18 (session transcripts). Any deviation between this runbook
+and the bible is a runbook bug.*

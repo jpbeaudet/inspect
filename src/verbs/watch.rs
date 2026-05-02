@@ -140,7 +140,7 @@ pub fn run(args: WatchArgs) -> Result<ExitKind> {
 
     let reason = crate::safety::validate_reason(args.reason.as_deref())?;
     if let Some(r) = &reason {
-        eprintln!("# reason: {r}");
+        crate::tee_eprintln!("# reason: {r}");
     }
 
     // Resolve selector → exactly one target. Watch is single-target by
@@ -295,14 +295,14 @@ pub fn run(args: WatchArgs) -> Result<ExitKind> {
         Outcome::Match { value, polls } => {
             // Emit the matched value to stdout so shell pipelines can
             // consume it (e.g. `version=$(inspect watch ...)`).
-            println!("{}", value.trim_end_matches('\n'));
-            eprintln!(
+            crate::tee_println!("{}", value.trim_end_matches('\n'));
+            crate::tee_eprintln!(
                 "[inspect] watch matched on {label}: {pred_label} (poll {polls}, {dur_ms}ms)"
             );
             Ok(ExitKind::Success)
         }
         Outcome::Timeout => {
-            eprintln!(
+            crate::tee_eprintln!(
                 "[inspect] watch timed out on {label} after {dur_ms}ms: {pred_label}{}",
                 last_seen
                     .as_deref()
@@ -312,7 +312,7 @@ pub fn run(args: WatchArgs) -> Result<ExitKind> {
             Ok(ExitKind::Inner(124))
         }
         Outcome::Cancelled => {
-            eprintln!("[inspect] watch cancelled on {label}: {pred_label}");
+            crate::tee_eprintln!("[inspect] watch cancelled on {label}: {pred_label}");
             Ok(ExitKind::Error)
         }
         Outcome::Error(msg) => {
@@ -346,7 +346,9 @@ fn emit_status(
         );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     } else {
-        eprintln!("[inspect] watching {label}: {pred_label} (poll {poll_n}, {secs}s elapsed)");
+        crate::tee_eprintln!(
+            "[inspect] watching {label}: {pred_label} (poll {poll_n}, {secs}s elapsed)"
+        );
     }
 }
 

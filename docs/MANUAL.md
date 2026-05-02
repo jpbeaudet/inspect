@@ -1265,6 +1265,122 @@ The global config file is distinct from per-namespace `servers.toml`:
 not keyed on a server. A missing file is not an error — the lazy GC
 simply stays off until you opt in.
 
+### 8.4 Session transcripts: `inspect history` (F18, v0.1.3)
+
+The structured audit log (`~/.inspect/audit/`) answers *what verbs
+ran with what arguments + what changed*. The session transcript at
+`~/.inspect/history/<ns>-<YYYY-MM-DD>.log` answers *what did the
+operator see on their terminal*. The two are complementary; F11
+revert and L5 retention work against the audit log; F18 transcripts
+make 4-hour migrations queryable after the fact.
+
+```sh
+# Today's transcript for one namespace.
+inspect history show arte
+
+# A specific past day (transparently decompresses .log.gz).
+inspect history show arte --date 2026-04-28
+
+# Find the block that ran a specific destructive command.
+inspect history show arte --grep 'docker volume rm'
+
+# Cross-reference from a structured audit hit back to the operator
+# transcript block.
+inspect history show --audit-id 01HXR9Q5YQK2
+
+# List every transcript file with byte sizes.
+inspect history list
+
+# Apply the [history] retention now (otherwise it fires lazily once
+# per day from the next verb's finalize).
+inspect history rotate
+
+# Delete a namespace's pre-cutoff history (audit log untouched).
+inspect history clear arte --before 2026-01-01 --yes
+```
+
+**Format.** Each verb invocation produces one fenced block:
+
+```text
+── 2026-04-28T14:32:11Z arte #b8e3a1 ──────────────────────────
+$ inspect run arte -- 'docker ps --format "{{.Names}}"'
+arte | atlas-vault
+arte | atlas-pg
+── exit=0 duration=423ms audit_id=01HXR9Q5YQK2 ──
+```
+
+The `── … ──` fence pattern is `awk '/^── /,/^── exit=/'`-friendly
+so block extraction is trivial without a parser. The trailing
+`audit_id=` cross-links back to the structured audit entry —
+forensic round-trip is one `inspect audit show <id>` away.
+
+**Scope.** "Every verb invocation **against a namespace**" gets a
+transcript. Operator-tooling verbs (`inspect help`, `inspect list`,
+`inspect audit ls`, `inspect history ...` itself) produce no
+transcript file — they would always be near-empty. Verbs that
+resolve a namespace via `verbs::runtime::resolve_target` (run,
+status, logs, why, exec, edit, cat, grep, find, restart, ports,
+etc.) produce one block; verbs that handle namespaces directly
+(`inspect cache clear <ns>`) call `transcript::set_namespace`
+explicitly so they end up in the right per-ns file too.
+
+**Captured surface.** The transcript reflects what the terminal
+showed: SUMMARY/DATA/NEXT envelopes, JSON envelopes (one block per
+invocation, even multi-line JSONL pipelines), streaming line-by-line
+output from F16 `--stream` and `inspect logs --follow`, F14 script
+mode (script body referenced by sha256 + stored separately under
+`~/.inspect/scripts/`), F15 file transfers (paths + sizes + sha256
+in argv line, transferred bytes not in body), F17 multi-step blocks
+per (step, target). `error::emit` tees stderr too, so failure cases
+are captured.
+
+**Redaction.** Every line tee'd to the transcript runs through the
+L7 four-masker pipeline (PEM / Authorization / URL credentials /
+KEY=VALUE) before being appended. Per-namespace
+`[namespaces.<ns>.history].redact = "off"` writes raw lines to the
+transcript file (file mode 0600 already restricts exposure — use
+this for forensic dumps where you need raw output and trust local
+disk security). `--show-secrets` on the originating verb bypasses
+both stdout and transcript redaction.
+
+```toml
+# ~/.inspect/servers.toml
+[namespaces.arte]
+host = "arte.internal"
+user = "ubuntu"
+
+# Per-namespace transcript override.
+[namespaces.arte.history]
+disabled = false              # default false; true skips writes entirely
+redact = "normal"             # "normal" (default) | "strict" | "off"
+```
+
+`disabled = true` skips the transcript write for this namespace
+(the audit log is still written — F11 contract is independent).
+
+**Retention.** `[history]` in `~/.inspect/config.toml`:
+
+```toml
+[history]
+retain_days = 90              # default 90; older files deleted on rotate
+max_total_mb = 500            # default 500; cap across all namespaces
+compress_after_days = 7       # default 7; older files gzipped on rotate
+```
+
+`inspect history rotate` runs the full pass: deletes files older
+than `retain_days`, gzips files older than `compress_after_days`,
+evicts oldest first when total bytes exceed `max_total_mb`. A lazy
+trigger fires once per day from the next verb's `finalize` so an
+operator never has to remember to rotate. Today's transcript is
+never gzipped or evicted — it's the active write target.
+
+**Performance.** Output is buffered in memory during the verb and
+written in one shot at finalize: **one `fdatasync(2)` per verb
+invocation**, regardless of how much output the verb produced.
+A 10-minute streaming verb produces exactly 1 fsync against the
+transcript file. The buffer is capped at 16 MiB; overflow is
+replaced with a `[transcript truncated: buffer cap reached]` marker.
+
 ---
 
 ## 9. Output formats and scripting

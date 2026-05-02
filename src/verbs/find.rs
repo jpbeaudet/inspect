@@ -52,7 +52,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
             // find can return non-zero on permission denied while still
             // listing matches; only treat true failures (no stdout) as errors.
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: find failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -74,7 +74,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
                         .put("path", masked.as_ref()),
                 );
             } else {
-                println!(
+                crate::tee_println!(
                     "{}{}: {masked}",
                     step.ns.namespace,
                     step.service().map(|s| format!("/{s}")).unwrap_or_default()
@@ -84,7 +84,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
     }
     if total_hits == 0 {
         if !args.format.is_json() {
-            eprintln!("(no matches)");
+            crate::tee_eprintln!("(no matches)");
         }
         return Ok(ExitKind::NoMatches);
     }

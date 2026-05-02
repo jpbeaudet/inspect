@@ -158,7 +158,7 @@ fn push(args: PushArgs) -> Result<ExitKind> {
 
     let warn_bytes = large_file_warn_threshold();
     if warn_bytes > 0 && body.len() >= warn_bytes {
-        eprintln!(
+        crate::tee_eprintln!(
             "inspect: warning: pushing {} bytes through the multiplexed SSH channel \
              will briefly starve concurrent verbs against the same host. \
              (silence with INSPECT_CP_WARN_BYTES=0)",
@@ -241,7 +241,7 @@ fn push(args: PushArgs) -> Result<ExitKind> {
     if let ConfirmResult::Aborted(why) =
         gate.confirm(Confirm::LargeFanout, planned.len(), "Continue?")
     {
-        eprintln!("aborted: {why}");
+        crate::tee_eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
     }
 
@@ -371,7 +371,7 @@ fn pull(remote_sel: String, local: String) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
     if steps.len() > 1 {
-        eprintln!(
+        crate::tee_eprintln!(
             "error: get requires exactly one source target; got {}",
             steps.len()
         );
@@ -405,7 +405,7 @@ fn pull(remote_sel: String, local: String) -> Result<ExitKind> {
     let dur = started.elapsed().as_millis() as u64;
 
     if !out.ok() {
-        eprintln!(
+        crate::tee_eprintln!(
             "error: pulling '{}' failed (exit {}): {}",
             path,
             out.exit_code,

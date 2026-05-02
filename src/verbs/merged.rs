@@ -241,7 +241,7 @@ pub fn follow_merged(
 pub fn print_human(prefix_svc: &str, body: &str) {
     let safe =
         crate::format::safe::safe_terminal_line(body, crate::format::safe::DEFAULT_MAX_LINE_BYTES);
-    println!("[{prefix_svc}] {safe}");
+    crate::tee_println!("[{prefix_svc}] {safe}");
 }
 
 /// JSON-out variant: emit a single envelope keyed on the namespace

@@ -100,6 +100,11 @@ fn clear(args: CacheClearArgs) -> Result<ExitKind> {
         let ns = args
             .namespace
             .ok_or_else(|| anyhow!("specify a namespace, or use --all"))?;
+        // F18 (v0.1.3): cache clear is a namespace-scoped verb that
+        // does not go through `resolve_target`. Stamp the transcript
+        // context here so this invocation's output lands in the
+        // right per-ns transcript file.
+        crate::transcript::set_namespace(&ns);
         runtime::clear_runtime(&ns);
         vec![ns]
     };

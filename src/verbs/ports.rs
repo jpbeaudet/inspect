@@ -115,7 +115,7 @@ pub fn run(args: PortsArgs) -> Result<ExitKind> {
         )?;
         if !out.ok() {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: ports failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,

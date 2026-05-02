@@ -37,6 +37,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 similar = "2"
 hex = "0.4"
 unicode-width = "0.1"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

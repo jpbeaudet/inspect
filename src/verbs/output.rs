@@ -56,30 +56,31 @@ impl Renderer {
         self
     }
     pub fn print(&self) {
+        use crate::transcript::emit_stdout;
         if !self.quiet {
-            println!("SUMMARY: {}", self.summary);
+            emit_stdout(&format!("SUMMARY: {}", self.summary));
         }
         if self.data.is_empty() {
             if !self.quiet {
-                println!("DATA:    (none)");
+                emit_stdout("DATA:    (none)");
             }
         } else if self.quiet {
             for line in &self.data {
-                println!("{line}");
+                emit_stdout(line);
             }
         } else {
-            println!("DATA:");
+            emit_stdout("DATA:");
             for line in &self.data {
-                println!("  {line}");
+                emit_stdout(&format!("  {line}"));
             }
         }
         if !self.quiet {
             if self.next.is_empty() {
-                println!("NEXT:    (none)");
+                emit_stdout("NEXT:    (none)");
             } else {
-                println!("NEXT:");
+                emit_stdout("NEXT:");
                 for line in &self.next {
-                    println!("  {line}");
+                    emit_stdout(&format!("  {line}"));
                 }
             }
         }
@@ -162,7 +163,7 @@ pub struct JsonOut;
 impl JsonOut {
     pub fn write(env: &Envelope) {
         if let Ok(s) = serde_json::to_string(env) {
-            println!("{s}");
+            crate::transcript::emit_stdout(&s);
         }
     }
 }
@@ -242,7 +243,7 @@ impl OutputDoc {
     /// Print to stdout: a single JSON line for `--json` callers.
     pub fn print_json(&self) {
         if let Ok(s) = serde_json::to_string(self) {
-            println!("{s}");
+            crate::transcript::emit_stdout(&s);
         }
     }
 
@@ -250,32 +251,33 @@ impl OutputDoc {
     /// renderer for `data` lines because the structured shape varies
     /// per command. `next` is rendered as `cmd  -- rationale`.
     pub fn print_human(&self, data_lines: &[String]) {
+        use crate::transcript::emit_stdout;
         if !self.quiet {
-            println!("SUMMARY: {}", self.summary);
+            emit_stdout(&format!("SUMMARY: {}", self.summary));
         }
         if data_lines.is_empty() {
             if !self.quiet {
-                println!("DATA:    (none)");
+                emit_stdout("DATA:    (none)");
             }
         } else if self.quiet {
             // F7.4: pipe-clean DATA only — no envelope, no
             // indentation prefix, just the data lines as-is.
             for l in data_lines {
-                println!("{l}");
+                emit_stdout(l);
             }
         } else {
-            println!("DATA:");
+            emit_stdout("DATA:");
             for l in data_lines {
-                println!("  {l}");
+                emit_stdout(&format!("  {l}"));
             }
         }
         if !self.quiet {
             if self.next.is_empty() {
-                println!("NEXT:    (none)");
+                emit_stdout("NEXT:    (none)");
             } else {
-                println!("NEXT:");
+                emit_stdout("NEXT:");
                 for n in &self.next {
-                    println!("  {}  -- {}", n.cmd, n.rationale);
+                    emit_stdout(&format!("  {}  -- {}", n.cmd, n.rationale));
                 }
             }
         }

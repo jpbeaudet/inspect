@@ -36,7 +36,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
             }
         }
         if !args.format.is_json() {
-            eprintln!("reset {deleted} cursor(s)");
+            crate::tee_eprintln!("reset {deleted} cursor(s)");
         }
         return Ok(ExitKind::Success);
     }
@@ -61,7 +61,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
             let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_for_cursor);
             if let Err(e) = now.save() {
                 if !args.format.is_json() {
-                    eprintln!("warn: failed to save cursor: {e}");
+                    crate::tee_eprintln!("warn: failed to save cursor: {e}");
                 }
             }
         }
@@ -79,7 +79,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: grep failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -108,7 +108,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                         .put("count", n),
                 );
             } else {
-                println!("{}/{}: {n}", step.ns.namespace, svc);
+                crate::tee_println!("{}/{}: {n}", step.ns.namespace, svc);
             }
             continue;
         }
@@ -136,7 +136,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                     &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{}/{} | {safe}", step.ns.namespace, svc);
+                crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc);
             }
         }
     }

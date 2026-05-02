@@ -28,6 +28,8 @@ use crate::paths::inspect_home;
 pub struct GlobalConfig {
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default)]
+    pub history: HistoryConfig,
 }
 
 /// `[audit]` table.
@@ -39,6 +41,27 @@ pub struct AuditConfig {
     /// works manually.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<String>,
+}
+
+/// `[history]` table — F18 (v0.1.3) transcript retention policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistoryConfig {
+    /// Days of transcripts to keep. Older files are deleted on every
+    /// `inspect history rotate` (or lazy fire from `transcript::finalize`).
+    /// `None` ⇒ default 90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_days: Option<u32>,
+    /// Cap (megabytes) on total transcript bytes across all
+    /// namespaces. When over, oldest files are evicted first
+    /// (today's file is never evicted while it's the active write
+    /// target). `None` ⇒ default 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_mb: Option<u32>,
+    /// Days after which a transcript is gzipped on rotate.
+    /// `<ns>-<YYYY-MM-DD>.log` becomes `<ns>-<YYYY-MM-DD>.log.gz`.
+    /// `None` ⇒ default 7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress_after_days: Option<u32>,
 }
 
 /// Path to the global config file (`~/.inspect/config.toml`).

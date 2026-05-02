@@ -14,6 +14,137 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **F18 — Per-namespace, per-day human-readable session transcripts
+  at `~/.inspect/history/<ns>-<YYYY-MM-DD>.log` (mode 0600), plus
+  `inspect history show / list / clear / rotate` and the
+  `[history]` config block in `~/.inspect/config.toml`.**
+  Migration-operator field feedback: *"After a 4-hour migration I
+  had to scroll my chat history to find which exact `inspect run`
+  command did what. An `~/.inspect/history/arte-2026-04-28.log`
+  (rotating, all in/out) would let me audit and post-mortem
+  migrations cleanly. **High value for compliance / audit trails of
+  destructive ops.**"* The structured audit log already answered
+  "what verbs ran with what arguments + what changed"; F18 ships a
+  complementary human-readable transcript that captures the full
+  input + output of every namespace-scoped verb invocation as the
+  operator saw it on the terminal.
+  - **Fenced-block format.** Each verb invocation produces one
+    `── <ts> <ns> #<token> ──...` header → argv line → buffered
+    stdout/stderr → `── exit=N duration=Mms audit_id=<id> ──`
+    footer block. The fence pattern is `awk '/^── /,/^── exit=/'`
+    friendly so block extraction stays trivial without a
+    parser; the trailing `audit_id=` cross-links back to the
+    structured audit entry for forensic round-trip.
+  - **Captured surface.** The transcript reflects what the
+    operator's terminal showed: the `Renderer::print()`,
+    `JsonOut::write`, `OutputDoc::print_*`, and `format::render`
+    paths plus every streaming verb's per-line emit (run / logs /
+    cat / grep / find / merged / steps / watch / status / health /
+    cache / why / ports / connectivity / network / correlation /
+    cursor / dispatch / transfer / ls / ps / images / volumes —
+    swept via two new `tee_println!` / `tee_eprintln!` macros).
+    `error::emit` tees to stderr too, so failure cases are
+    captured. F14 script-mode verb output is captured; F15 file
+    transfer verb output is captured; F16 streamed lines are
+    captured byte-for-byte; F17 multi-step output is captured
+    block-by-block per (step, target). The argv line itself runs
+    through a small additional masker for `--password=` /
+    `--token=` flags before being recorded.
+  - **L7 redaction passthrough.** Every line tee'd to the
+    transcript runs through the existing four-masker pipeline
+    (PEM / Authorization / URL credentials / KEY=VALUE) using a
+    fresh `OutputRedactor` per line; `None` returns from the PEM
+    masker (interior of an active PEM block) suppress the line in
+    the transcript too — secret bytes never reach the transcript
+    file. Per-namespace `[namespaces.<ns>.history].redact = "off"`
+    disables redaction in the transcript only (file mode 0600
+    already restricts exposure); `--show-secrets` on the
+    originating verb bypasses redaction in both stdout and
+    transcript (single flag, single bypass — same contract as
+    L7).
+  - **Per-namespace disable.**
+    `[namespaces.<ns>.history].disabled = true` in
+    `~/.inspect/servers.toml` skips transcript writes for that
+    namespace entirely. The audit log is still written — F18 and
+    F11 are independent contracts.
+  - **`inspect history` subcommand tree** — `show [<ns>] [--date
+    YYYY-MM-DD] [--grep <pattern>] [--audit-id <id>]` renders
+    fenced blocks (transparently decompresses `.log.gz` on read);
+    `list [<ns>]` walks the history dir grouping by (namespace,
+    date) with byte sizes; `clear <ns> --before YYYY-MM-DD` deletes
+    files older than the cutoff for one namespace (gated by
+    `--yes`); `rotate` applies the retention policy now. All four
+    have `--json` variants for agent consumption.
+  - **`[history]` config block in `~/.inspect/config.toml`.**
+    Three knobs with the spec-mandated defaults: `retain_days = 90`
+    (older files deleted on rotate), `max_total_mb = 500` (cap
+    across all namespaces; oldest-first eviction; today's file is
+    never evicted), `compress_after_days = 7` (older files gzipped
+    in place — `<ns>-<YYYY-MM-DD>.log` becomes `.log.gz` so the
+    date stays parseable). Atomic compress via `<name>.part` →
+    `rename(2)` so a crash mid-encode doesn't leave a half-written
+    `.gz` next to the original.
+  - **Lazy rotation trigger.** A once-per-day marker
+    (`~/.inspect/history/.rotated`) gates the lazy rotate fire
+    from `transcript::finalize` — a busy session does not pay an
+    FS scan per verb. The 23-hour stale window allows one fire
+    per UTC day even with mild clock skew. Errors from the lazy
+    path are swallowed so a transient rotation failure cannot
+    break the just-emitted transcript block.
+  - **Performance.** Output is accumulated in memory during the
+    verb and written in one shot at finalize. **One `fdatasync(2)`
+    per verb invocation.** A 10-minute streaming verb that
+    produces 100 MB of output produces exactly 1 fsync against
+    the transcript file — satisfies the F18 ≤ 70-fsyncs-per-10-min
+    performance gate by orders of magnitude. Buffer is capped at
+    16 MiB; overflow is replaced with a `[transcript truncated:
+    buffer cap reached]` marker so a runaway verb cannot OOM.
+  - **Scope contract.** "Every verb invocation **against a
+    namespace**" gets a transcript. Operator-tooling verbs that do
+    not resolve a namespace (`inspect help`, `inspect list`,
+    `inspect audit ls`, `inspect history ...` itself) produce no
+    transcript file — they would always be near-empty and would
+    pollute the history dir. The hook fires from
+    `verbs::runtime::resolve_target` for every dispatch verb that
+    crosses it; verbs that handle namespaces directly (e.g.
+    `inspect cache clear <ns>`) call
+    `transcript::set_namespace(ns)` explicitly.
+  - **Module structure.** New `src/transcript.rs` (~430 LOC) holds
+    the per-process `TranscriptContext` (stored in
+    `OnceLock<Mutex<Option<...>>>`) plus `init`, `set_namespace`,
+    `set_audit_id`, `tee_stdout`, `tee_stderr`, `emit_stdout`,
+    `finalize`, the L7 redaction passthrough, the `tee_println!` /
+    `tee_eprintln!` macros, and 5 unit tests. Submodule
+    `src/transcript/rotate.rs` (~330 LOC) holds `HistoryPolicy`,
+    `RotateReport`, `run_rotate`, `maybe_run_lazy`,
+    `parse_transcript_name`, `read_transcript`, plus 5 unit tests.
+    New `src/commands/history.rs` (~400 LOC) holds the four
+    subcommand dispatchers and a fenced-block parser with 3 unit
+    tests. `GlobalConfig` extended with `HistoryConfig` (3 fields:
+    `retain_days`, `max_total_mb`, `compress_after_days`);
+    `NamespaceConfig` extended with optional `history:
+    HistoryNsOverride { disabled, redact }`. New `flate2` dep
+    (default features = pure-Rust miniz_oxide backend).
+  - **AuditStore::append** now also calls
+    `transcript::set_audit_id(&entry.id)` (first-write-wins) so
+    the transcript footer cross-links to the umbrella audit
+    entry on multi-audit verbs (F17 `--steps` parent).
+  - **Help-text discoverability.** New `LONG_HISTORY` constant on
+    `inspect history --help` documents the GC + RETENTION knobs,
+    `[history]` config, per-ns overrides, redaction integration,
+    and 6 worked examples; `inspect help safety` already linked.
+  - **10 acceptance tests in `tests/phase_f_v013.rs::f18_*`** plus
+    5 unit tests in `transcript::tests`, 5 in
+    `transcript::rotate::tests`, and 3 in
+    `commands::history::tests`: status-writes-block; help-no-global;
+    rotate deletes old files (retain_days = 7 against a 6-file
+    fixture); rotate compresses + show decompresses (round-trip);
+    per-ns disabled = no file but audit still writes; show
+    --audit-id cross-references; list emits structured records per
+    file; clear requires --yes then deletes; help documents all
+    subcommands; argv `--password=` is masked in the recorded argv
+    line. Full suite green (28 suites; 201 phase_f tests).
+
 - **L5 — `inspect audit gc` retention + orphan-snapshot sweep, plus
   optional lazy GC trigger via `[audit] retention` in
   `~/.inspect/config.toml`.** v0.1.2 retrospective: `~/.inspect/audit/`

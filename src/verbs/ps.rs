@@ -20,7 +20,7 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
         let out = runner.run(&ns.namespace, &ns.target, &cmd, RunOpts::with_timeout(20))?;
         if !out.ok() {
             if fmt.shows_envelope() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: docker ps failed (exit {}): {}",
                     ns.namespace,
                     out.exit_code,

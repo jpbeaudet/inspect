@@ -461,6 +461,11 @@ impl AuditStore {
         let line = serde_json::to_string(entry)?;
         append_locked(&path, &line)?;
         let _ = set_file_mode_0600(&path);
+        // F18 (v0.1.3): cross-link from transcript → audit. First
+        // audit append wins; on multi-audit verbs (F17 `--steps`)
+        // the parent entry is appended first so the transcript
+        // footer points at the umbrella id.
+        crate::transcript::set_audit_id(&entry.id);
         // L5 (v0.1.3): cheap-path lazy retention check. Best-effort —
         // GC failure must never break the just-appended audit record,
         // and the marker-file guard inside `maybe_run_lazy_gc` ensures

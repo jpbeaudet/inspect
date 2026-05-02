@@ -390,7 +390,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     // operator gets a useful error before we dial out to remote hosts.
     let reason = crate::safety::validate_reason(args.reason.as_deref())?;
     if let Some(r) = &reason {
-        eprintln!("# reason: {r}");
+        crate::tee_eprintln!("# reason: {r}");
     }
 
     let fmt = args.format.resolve()?;
@@ -532,7 +532,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         Ok(s) => Some(s),
         Err(e) => {
             if stdin_payload.is_some() {
-                eprintln!("warning: audit log unavailable ({e}); proceeding");
+                crate::tee_eprintln!("warning: audit log unavailable ({e}); proceeding");
             }
             None
         }
@@ -548,7 +548,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     // is still on disk.
     if let Some(sc) = &script {
         if let Err(e) = store_script_body(&sc.body, &sc.sha256) {
-            eprintln!("warning: script dedup-store write failed ({e}); proceeding");
+            crate::tee_eprintln!("warning: script dedup-store write failed ({e}); proceeding");
         }
     }
     // F13 (v0.1.3): track transport-class outcomes across steps so the
@@ -632,7 +632,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             crate::exec::env_overlay::merge(Some(&s.ns.env_overlay), &user_env, args.env_clear);
         let cmd = crate::exec::env_overlay::apply_to_cmd(&cmd, &effective_overlay).into_owned();
         if args.debug {
-            eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
+            crate::tee_eprintln!("[inspect] rendered command for {}: {}", s.ns.namespace, cmd);
         }
 
         let svc_name = s.service().unwrap_or("_").to_string();
@@ -708,7 +708,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                                 if line_budget != usize::MAX && masked.len() > line_budget {
                                     *truncated_lines_ref += 1;
                                 }
-                                println!("{label} | {safe}");
+                                crate::tee_println!("{label} | {safe}");
                             }
                         },
                     )
@@ -758,7 +758,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     bad += 1;
                     command_failures += 1;
                     if !json {
-                        eprintln!("{label}: exit {code}");
+                        crate::tee_eprintln!("{label}: exit {code}");
                     }
                 }
                 if let Some(prev) = last_inner {
@@ -802,7 +802,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     _ => None,
                 };
                 if !json {
-                    eprintln!("{label}: {e}");
+                    crate::tee_eprintln!("{label}: {e}");
                 }
                 if let Some(store) = &audit_store {
                     let mut entry = crate::safety::audit::AuditEntry::new("run", &label);
@@ -827,7 +827,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 bad += 1;
                 all_same = false;
                 if !json {
-                    eprintln!("{label}: {e}");
+                    crate::tee_eprintln!("{label}: {e}");
                 }
                 if stdin_audited || stream_audited {
                     if let Some(store) = &audit_store {
@@ -889,7 +889,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // line was truncated mid-content. Goes to stderr so it doesn't
         // interleave with the data captured by `> file` redirects.
         if truncated_lines > 0 {
-            eprintln!(
+            crate::tee_eprintln!(
                 "── output truncated: {n} line{s} exceeded the {budget}-byte per-line cap (re-run with --no-truncate to see full content) ──",
                 n = truncated_lines,
                 s = if truncated_lines == 1 { "" } else { "s" },
