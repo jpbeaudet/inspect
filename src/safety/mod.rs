@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod diff;
 pub mod gate;
+pub mod gc;
 pub mod snapshot;
 
 pub use audit::{validate_reason, AuditEntry, AuditStore, Revert};

@@ -1178,6 +1178,93 @@ implement `fsync` (some FUSE/network mounts) `inspect` warns once
 and continues — it would rather record the entry than refuse the
 operation.
 
+### 8.3 Retention and orphan-snapshot GC: `inspect audit gc` (L5, v0.1.3)
+
+`~/.inspect/audit/` and its `snapshots/` subdirectory grow without
+bound by default. A team running 50 mutations per day will accumulate
+years of JSONL plus orphaned snapshot files. `inspect audit gc`
+prunes both in one pass.
+
+```sh
+# Preview: delete entries older than 90 days, sweep orphan snapshots.
+inspect audit gc --keep 90d --dry-run
+
+# Apply.
+inspect audit gc --keep 90d
+
+# Or by entry count: keep newest 100 per namespace.
+inspect audit gc --keep 100
+
+# Machine-readable output for pipelines.
+inspect audit gc --keep 90d --json
+```
+
+`--keep` takes either a duration suffix (`d`/`w`/`h`/`m`) or a bare
+integer. Integer mode keeps the newest N entries **per namespace**
+— namespace is derived from the entry's `selector` field
+(`arte/atlas-vault` → `arte`); selector-less entries group under the
+sentinel `_`. `--keep 0` is rejected: refusing to silently delete
+every entry is the only safe default.
+
+The `--json` envelope is stable and top-level (no `data` wrapper):
+
+```json
+{
+  "_source": "audit.gc",
+  "_medium":  "audit",
+  "server":   "local",
+  "dry_run":  false,
+  "policy":   "90d",
+  "entries_total":           240,
+  "entries_kept":            127,
+  "deleted_entries":         113,
+  "deleted_snapshots":        47,
+  "freed_bytes":         1572864,
+  "deleted_ids":            [...],
+  "deleted_snapshot_hashes":[...]
+}
+```
+
+`freed_bytes` covers both JSONL shrinkage (rewritten in place via
+atomic `tmp.gctmp.<pid>` → `rename(2)`; fully-emptied files are
+unlinked) and snapshot file sizes, so an operator can size the next
+retention window from the report alone.
+
+**The pinned-snapshot invariant is non-negotiable.** A snapshot under
+`~/.inspect/audit/snapshots/sha256-<hex>` is **never** deleted while
+any retained audit entry references it via `previous_hash`,
+`new_hash`, the `snapshot` filename, or a `revert.payload` (state
+snapshot kind, including nested `state_snapshot` records inside the
+F17 composite-revert JSON array). That is the F11 revert contract,
+and the GC enforces it as the only invariant the operator cannot
+relax.
+
+#### Automatic GC via `~/.inspect/config.toml`
+
+Set `[audit] retention` once and the GC fires lazily on every audit
+append:
+
+```toml
+# ~/.inspect/config.toml
+[audit]
+retention = "90d"   # or "100" for newest-N-per-namespace; unset = manual only
+```
+
+The trigger is gated by a once-per-minute cheap-path marker
+(`~/.inspect/audit/.gc-checked`): the marker's mtime acts as a
+debounce, and within the cheap path only the *oldest* JSONL file's
+mtime is probed against the retention threshold. If the oldest is
+fresher than the cutoff, the GC no-ops without scanning the directory.
+Errors from the lazy path are deliberately swallowed so a transient
+GC failure can never break the just-appended audit record. Manual
+`inspect audit gc` and the lazy trigger share the same code path —
+the only difference is who calls it.
+
+The global config file is distinct from per-namespace `servers.toml`:
+`~/.inspect/config.toml` is reserved for cross-cutting policy that is
+not keyed on a server. A missing file is not an error — the lazy GC
+simply stays off until you opt in.
+
 ---
 
 ## 9. Output formats and scripting

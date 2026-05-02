@@ -14,6 +14,101 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L5 — `inspect audit gc` retention + orphan-snapshot sweep, plus
+  optional lazy GC trigger via `[audit] retention` in
+  `~/.inspect/config.toml`.** v0.1.2 retrospective: `~/.inspect/audit/`
+  grew unbounded; a team running 50 bundle ops per day would
+  accumulate years of JSONL plus orphaned snapshot directories with no
+  cleanup verb and no retention policy. After F11/F14/F15/F16/F17 each
+  added new audit fields and (in F17's case) per-(step, target) and
+  per-revert entries that multiply the per-mutation footprint by an
+  order of magnitude, the maintenance gap had to close before the
+  next field rollout.
+  - **New `inspect audit gc --keep <X>` subcommand.** `<X>` accepts
+    duration suffixes `90d` / `4w` / `12h` / `15m` (days, weeks,
+    hours, minutes) or a bare integer (newest N entries kept *per
+    namespace*, where namespace is parsed from the entry's
+    `selector` field — `arte/atlas-vault` → `arte`; entries with no
+    namespace prefix group under the sentinel `_`). `--dry-run`
+    previews counts and freed bytes without touching the
+    filesystem; the same code path computes the deletion set so
+    the dry-run report is byte-for-byte what an `--apply` run
+    would produce. `--keep 0` is rejected loudly with a chained
+    hint — refusing to silently delete every entry is the only
+    safe default.
+  - **Stable `--json` envelope.** Fields: `dry_run`, `policy`
+    (canonical formatted form: `90d`, `4w`, `12h`, `15m`, or the
+    integer count), `entries_total`, `entries_kept`,
+    `deleted_entries`, `deleted_snapshots`, `freed_bytes`,
+    `deleted_ids` (full list, not truncated), and
+    `deleted_snapshot_hashes` (without the `sha256-` prefix). The
+    envelope sits at top level (no `data` wrapper) and includes
+    the standard `_source: "audit.gc"` / `_medium: "audit"` /
+    `server: "local"` discriminators so a fleet of GCs can be
+    streamed through one log pipeline.
+  - **Snapshot orphan sweep.** Walks
+    `~/.inspect/audit/snapshots/sha256-<hex>` and deletes any file
+    whose hash is not referenced by a *retained* audit entry.
+    "Referenced" means: `previous_hash`, `new_hash`, the file-name
+    portion of `snapshot`, and — critically for v0.1.3 — the
+    `revert.payload` of a `state_snapshot` revert AND nested
+    `state_snapshot` payloads inside a `composite` revert (F17's
+    parent `run --steps` entries store per-step inverses as a
+    JSON array; the GC must recurse into that array or it would
+    treat F17 step snapshots as orphans). A snapshot pinned by
+    any retained entry is **never** deleted — that is the F11
+    revert contract and the GC enforces it as the only invariant
+    that cannot be relaxed by config. Pre-existing acceptance test
+    `l5_gc_keeps_snapshot_referenced_by_retained_entry` is the
+    headline regression guard.
+  - **Atomic JSONL rewrite.** Each affected JSONL file is
+    rewritten via `tmp.gctmp.<pid>` → `rename(2)` (mode 0600 from
+    the start on unix). A file whose entries are *all* deleted is
+    `unlink(2)`-ed entirely — the GC never leaves zero-byte
+    JSONLs lying around. `freed_bytes` covers BOTH JSONL
+    shrinkage AND snapshot file sizes, so an operator can size
+    their next retention window from the report alone.
+  - **`[audit] retention` config block.** New
+    `~/.inspect/config.toml` with `[audit] retention = "90d"`
+    (or any value `--keep` accepts) opts an installation in to
+    automatic lazy GC. The trigger fires on every successful
+    `AuditStore::append` — i.e. every write verb that produced an
+    audit record — guarded by a once-per-minute cheap-path
+    marker (`~/.inspect/audit/.gc-checked`). Within the cheap
+    path: only the oldest JSONL file's mtime is checked against
+    the retention threshold; if it is fresher, the GC no-ops
+    immediately (no full FS scan). Count-based policies always
+    run a full pass per check window since mtime alone cannot
+    decide them. Errors from lazy GC are deliberately swallowed
+    so a transient GC failure can never break the just-appended
+    audit record (the `let _ = ...maybe_run_lazy_gc()` call site
+    in `AuditStore::append`).
+  - **`~/.inspect/config.toml` is a fresh global-policy file.**
+    Distinct from `servers.toml` (per-namespace runtime config) —
+    L5 is the first item to land it; future cross-cutting
+    behavior toggles (cache TTLs, history rotation) can plug in
+    here without polluting per-server schema. Missing file is
+    not an error: it deserializes to `GlobalConfig::default()`
+    and lazy GC stays off.
+  - **Help-text discoverability.** `inspect audit --help` gains
+    a `GC + RETENTION (L5, v0.1.3)` section listing `--keep`
+    syntax, the `[audit] retention` config hook, and the
+    cheap-path-marker semantics. `inspect audit gc --help`
+    documents `--keep`, `--dry-run`, and the full `FormatArgs`
+    flags.
+  - **11 acceptance tests in `tests/phase_f_v013.rs::l5_*`** plus
+    9 unit tests in `safety::gc::tests` and 3 in
+    `config::global::tests`: dry-run-doesn't-delete, apply
+    deletes old entries + orphan snapshots, retained-entry
+    snapshots are NEVER deleted (the F11 contract guard), JSON
+    envelope schema, count-policy keeps newest per namespace,
+    invalid `--keep` value chains a hint, `--keep 0` rejected,
+    `--help` documents the contract surface, empty audit dir
+    yields zero counts, lazy GC marker prevents double-scan
+    within a minute, lazy GC fires on next audit append when the
+    oldest file's mtime crosses the threshold (uses
+    `std::fs::File::set_modified` to backdate the seed file).
+
 - **F17 — `inspect run --steps <file.json>` multi-step runner with
   per-step exit codes, structured per-step output, F11 composite
   revert, and `--revert-on-failure` auto-unwind (migration-operator

@@ -1,14 +1,22 @@
-//! `inspect audit ls|show|grep|verify` (bible §8.2).
+//! `inspect audit ls|show|grep|verify|gc` (bible §8.2; gc = L5
+//! v0.1.3).
 
 use anyhow::Result;
 
-use crate::cli::{AuditArgs, AuditCommand};
+use crate::cli::{AuditArgs, AuditCommand, AuditGcArgs};
 use crate::error::ExitKind;
+use crate::safety::gc::{parse_retention, run_gc, GcReport};
 use crate::safety::snapshot::sha256_hex;
 use crate::safety::{AuditStore, SnapshotStore};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 
 pub fn run(args: AuditArgs) -> Result<ExitKind> {
+    // The `gc` path opens its own store implicitly via the path
+    // helpers — it walks files directly so we don't pre-load every
+    // entry just to discard most of them.
+    if let AuditCommand::Gc(o) = &args.command {
+        return gc(o);
+    }
     let store = AuditStore::open()?;
     let entries = store.all()?;
     match args.command {
@@ -21,6 +29,7 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
         AuditCommand::Show(o) => show(&entries, &o.id, o.format.is_json()),
         AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.format.is_json()),
         AuditCommand::Verify(o) => verify(&entries, o.format.is_json()),
+        AuditCommand::Gc(_) => unreachable!("handled above"),
     }
 }
 
@@ -312,4 +321,92 @@ fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind>
     } else {
         ExitKind::Error
     })
+}
+
+/// L5 (v0.1.3): dispatch for `inspect audit gc --keep <X>`.
+fn gc(args: &AuditGcArgs) -> Result<ExitKind> {
+    let policy = match parse_retention(&args.keep) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::error::emit(format!(
+                "{e}\nhint: see 'inspect audit --help' for the GC + RETENTION section"
+            ));
+            return Ok(ExitKind::Error);
+        }
+    };
+    let report = run_gc(&policy, args.dry_run)?;
+    if args.format.is_json() {
+        emit_gc_json(&report);
+        return Ok(ExitKind::Success);
+    }
+    let mut r = Renderer::new();
+    let prefix = if report.dry_run {
+        "would delete"
+    } else {
+        "deleted"
+    };
+    r.summary(format!(
+        "audit gc (--keep {}): {prefix} {} entries / {} snapshots / {} bytes; {} entries kept",
+        report.policy,
+        report.deleted_entries,
+        report.deleted_snapshots,
+        format_bytes(report.freed_bytes),
+        report.entries_kept,
+    ));
+    if report.deleted_entries == 0 && report.deleted_snapshots == 0 {
+        r.data_line("nothing to delete (every entry + snapshot is within the retention window)");
+    } else {
+        for id in report.deleted_ids.iter().take(10) {
+            r.data_line(format!("entry  {prefix}: {id}"));
+        }
+        if report.deleted_ids.len() > 10 {
+            r.data_line(format!(
+                "  … and {} more entries (use --json for the full list)",
+                report.deleted_ids.len() - 10
+            ));
+        }
+        for h in report.deleted_snapshot_hashes.iter().take(10) {
+            r.data_line(format!("snapshot {prefix}: sha256-{h}"));
+        }
+        if report.deleted_snapshot_hashes.len() > 10 {
+            r.data_line(format!(
+                "  … and {} more snapshots",
+                report.deleted_snapshot_hashes.len() - 10
+            ));
+        }
+    }
+    if report.dry_run {
+        r.next("inspect audit gc --keep <X>   # rerun without --dry-run to apply");
+    } else {
+        r.next("inspect audit verify          # confirm remaining entries are intact");
+    }
+    r.print();
+    Ok(ExitKind::Success)
+}
+
+fn emit_gc_json(r: &GcReport) {
+    JsonOut::write(
+        &Envelope::new("local", "audit", "audit.gc")
+            .put("dry_run", r.dry_run)
+            .put("policy", r.policy.clone())
+            .put("entries_total", r.entries_total)
+            .put("entries_kept", r.entries_kept)
+            .put("deleted_entries", r.deleted_entries)
+            .put("deleted_snapshots", r.deleted_snapshots)
+            .put("freed_bytes", r.freed_bytes)
+            .put("deleted_ids", r.deleted_ids.clone())
+            .put("deleted_snapshot_hashes", r.deleted_snapshot_hashes.clone()),
+    );
+}
+
+fn format_bytes(b: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if b >= MB {
+        format!("{:.2} MiB", b as f64 / MB as f64)
+    } else if b >= KB {
+        format!("{:.2} KiB", b as f64 / KB as f64)
+    } else {
+        format!("{b} B")
+    }
 }

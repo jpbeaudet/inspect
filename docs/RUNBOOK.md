@@ -897,10 +897,154 @@ interleaving + audit-link-ordering races would require a render
 
 ---
 
+## 15. Audit retention + orphan-snapshot GC (v0.1.3, L5)
+
+`~/.inspect/audit/` and `~/.inspect/audit/snapshots/` grew without
+bound through v0.1.2. After F11/F14/F15/F16/F17 each added new audit
+fields and (in F17's case) per-(step, target) plus per-revert
+entries that multiply the per-mutation footprint by an order of
+magnitude, the maintenance gap had to close. L5 adds one verb plus
+an opt-in lazy trigger.
+
+### 15.1 The deletion algorithm
+
+Single source of truth: `src/safety/gc.rs::run_gc(policy, dry_run)`.
+Every code path — the `audit gc` subcommand, the lazy trigger from
+`AuditStore::append`, and the unit tests — calls this one function.
+
+1. **Walk every JSONL file** under `~/.inspect/audit/` (top level,
+   not the `snapshots/` subdir). Files are ordered alphabetically;
+   within each file, entries are read in append order. Malformed
+   lines are skipped, not fatal.
+2. **Compute the deletion set** from the [`RetentionPolicy`]:
+   - `Duration(d)` keeps entries where `now - entry.ts <= d`.
+   - `Count(n)` keeps the newest `n` entries **per namespace**.
+     Namespace is parsed from the entry's `selector` field
+     (`arte/atlas-vault` → `arte`); selector-less entries group
+     under the sentinel `_`.
+3. **Pin every snapshot reachable from a *retained* entry.** Walk
+   the entry's `previous_hash`, `new_hash`, `snapshot` filename,
+   and `revert.payload` for `state_snapshot` reverts. For
+   `composite` reverts (F17 parent entries), parse the JSON
+   payload and **recurse** into its array — nested
+   `state_snapshot` records pin further hashes. Best-effort:
+   malformed JSON is ignored (the GC must never delete a
+   snapshot it can't prove is orphaned).
+4. **Sweep `~/.inspect/audit/snapshots/`** for `sha256-<hex>`
+   files whose hash isn't in the pinned set. `.part` temp files
+   and anything not matching the `sha256-<hex>` shape is left
+   alone.
+5. **Mutate (skipped on `--dry-run`)**:
+   - For each JSONL file with at least one to-delete entry:
+     write the kept entries to `<file>.gctmp.<pid>` (mode 0600
+     from the start on unix) and `rename(2)` over the original.
+     If every entry in a file was deleted, the file is
+     `unlink(2)`-ed instead.
+   - For each orphan snapshot file: `remove_file`.
+   - Touch `~/.inspect/audit/.gc-checked` so subsequent appends
+     don't re-scan within the same minute.
+
+`freed_bytes` in the report covers BOTH JSONL shrinkage AND snapshot
+file sizes — the operator reads one number to size the next
+retention window.
+
+### 15.2 The pinned-snapshot invariant
+
+The GC has exactly one invariant the config cannot relax: a snapshot
+referenced by any retained audit entry is **never** deleted. This is
+the F11 revert contract. The acceptance test
+`l5_gc_keeps_snapshot_referenced_by_retained_entry` is the
+load-bearing regression guard — a failure here means the GC could
+silently break `inspect revert <id>` on retained entries, which
+violates the v0.1.3 production-grade-only mandate. If a future
+refactor of `RevertKind` adds a new variant that pins additional
+snapshots, `collect_snapshot_hashes` and `collect_composite_hashes`
+in `src/safety/gc.rs` must be extended in lockstep.
+
+### 15.3 The lazy trigger and its cheap-path guard
+
+`[audit] retention = "<X>"` in `~/.inspect/config.toml` opts an
+installation in. The trigger fires from `AuditStore::append` after
+every successful append — i.e. after every write verb that produced
+an audit record. Without the cheap-path guard, this would mean an FS
+scan per audit entry, which a busy F17 multi-step run could fire
+hundreds of times per minute.
+
+The cheap path:
+
+1. Read `~/.inspect/config.toml`. If `[audit] retention` is unset,
+   return immediately — the most common case for installations
+   that haven't opted in.
+2. Stat `~/.inspect/audit/.gc-checked`. If it exists and its mtime
+   is within the last 60 seconds, return immediately. **No FS scan
+   beyond the marker stat.**
+3. Touch the marker (this happens *before* the rotation pass so a
+   transient failure doesn't make us retry every audit append for
+   the next minute).
+4. For duration policies: stat every JSONL file in
+   `~/.inspect/audit/`, take the minimum mtime, compare against
+   the cutoff. If the oldest file is fresher, return without
+   scanning entries.
+5. For count policies: skip the mtime probe (it can't decide them)
+   and run a full pass.
+6. Run `run_gc(policy, false)`.
+
+Errors from the lazy path are swallowed at the `let _ = ...` call
+site in `AuditStore::append` so a transient GC failure cannot break
+the just-appended audit record.
+
+### 15.4 The global config file
+
+`~/.inspect/config.toml` is a fresh file shipped by L5. It is
+distinct from `servers.toml` (per-namespace runtime config); the
+intent is cross-cutting policy that is not keyed on a server. The
+schema lives in `src/config/global.rs::GlobalConfig` and is empty by
+default. Future cross-cutting toggles (cache TTLs, history rotation,
+default redaction policy) plug in as new tables here without
+polluting the per-server schema.
+
+A missing file is not an error — `load()` returns
+`GlobalConfig::default()` and lazy GC stays off until the operator
+opts in.
+
+### 15.5 Acceptance test surface
+
+11 tests in `tests/phase_f_v013.rs::l5_*` lock the contract:
+
+- Dry-run reports counts but doesn't modify the JSONL.
+- Apply deletes old entries and orphan snapshots; rewrites JSONL
+  atomically; unlinks fully-emptied JSONL files.
+- Snapshot pinned by a retained entry's `revert.payload` is NEVER
+  deleted (the F11 invariant).
+- JSON envelope schema: `dry_run` / `policy` / `entries_total` /
+  `entries_kept` / `deleted_entries` / `deleted_snapshots` /
+  `freed_bytes` / `deleted_ids` / `deleted_snapshot_hashes`.
+- Count policy keeps the newest N per namespace, not overall.
+- Invalid `--keep` exits with a chained hint pointing at
+  `inspect audit --help`.
+- `--keep 0` is rejected loudly.
+- `--help` documents the GC + RETENTION section, the `[audit]
+  retention` config hook, and the cheap-path-marker semantics.
+- Empty audit dir yields zero counts (clean fresh-install path).
+- Manual `audit gc` touches the cheap-path marker so a subsequent
+  audit append within 60s no-ops the lazy trigger.
+- Lazy GC fires on the next audit append when the oldest JSONL
+  file's mtime crosses the threshold (uses
+  `std::fs::File::set_modified` to backdate the seed file; runs
+  `cache clear arte` to produce the audit entry that drives the
+  trigger).
+
+Plus 9 unit tests in `src/safety/gc.rs::tests` (parser edge cases,
+namespace extraction, composite-payload recursion) and 3 in
+`src/config/global.rs::tests` (missing file = defaults; valid
+retention parses; empty file = defaults).
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
 mode); §12 in F15 (file transfer); §13 in F16 (streaming executor);
-§14 in F17 (multi-step runner). Any deviation between this runbook
-and the bible is a runbook bug.*
+§14 in F17 (multi-step runner); §15 in L5 (audit gc + lazy trigger).
+Any deviation between this runbook and the bible is a runbook bug.*

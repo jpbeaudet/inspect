@@ -461,6 +461,12 @@ impl AuditStore {
         let line = serde_json::to_string(entry)?;
         append_locked(&path, &line)?;
         let _ = set_file_mode_0600(&path);
+        // L5 (v0.1.3): cheap-path lazy retention check. Best-effort —
+        // GC failure must never break the just-appended audit record,
+        // and the marker-file guard inside `maybe_run_lazy_gc` ensures
+        // the FS scan only fires once per minute even if every write
+        // verb in a long pipeline ends up here.
+        let _ = crate::safety::gc::maybe_run_lazy_gc();
         Ok(())
     }
 

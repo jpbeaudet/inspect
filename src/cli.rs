@@ -607,12 +607,30 @@ EXAMPLES
 
 const LONG_AUDIT: &str = "\
 Inspect or query the local audit log. Subcommands: ls, show, grep, \
-verify.
+verify, gc.
+
+GC + RETENTION (L5, v0.1.3)
+  `inspect audit gc --keep <X>` deletes audit entries older than the
+  retention threshold and sweeps orphan snapshot files under
+  `~/.inspect/audit/snapshots/`. `<X>` accepts:
+    90d / 4w / 12h / 15m  duration suffix (days, weeks, hours, minutes)
+    100                   integer = newest N entries kept per namespace
+  `--dry-run` previews counts + freed bytes without modifying anything.
+  `--json` emits the deterministic { deleted_entries, deleted_snapshots,
+  freed_bytes, ... } envelope. A snapshot referenced by any retained
+  audit entry is **never** deleted (F11 revert contract).
+
+  Set `[audit] retention = \"<X>\"` in `~/.inspect/config.toml` to make
+  GC run lazily on every audit append (cheap-path: scans only when the
+  oldest file's mtime crosses the threshold, and at most once per
+  minute via the `~/.inspect/audit/.gc-checked` marker).
 
 EXAMPLES
   $ inspect audit ls
   $ inspect audit show <id>
-  $ inspect audit grep \"atlas\"";
+  $ inspect audit grep \"atlas\"
+  $ inspect audit gc --keep 90d --dry-run
+  $ inspect audit gc --keep 100 --json";
 
 const LONG_CACHE: &str = "\
 Inspect or invalidate the local runtime cache.
@@ -2522,12 +2540,7 @@ pub struct EditArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    long_about = "Inspect or query the local audit log. Subcommands: ls, \
-show, grep, verify.\n\n\
-EXAMPLES\n  \
-  $ inspect audit ls\n  \
-  $ inspect audit show <id>\n  \
-  $ inspect audit grep \"atlas\"",
+    long_about = LONG_AUDIT,
     after_help = SEE_ALSO_SAFETY,
 )]
 pub struct AuditArgs {
@@ -2552,6 +2565,12 @@ pub enum AuditCommand {
     /// forward audit entries to an append-only log sink (syslog,
     /// journald, or a remote collector).
     Verify(AuditVerifyArgs),
+    /// L5 (v0.1.3): delete audit entries older than the retention
+    /// threshold and sweep orphan snapshot files. See
+    /// `inspect audit --help` for the GC + RETENTION section that
+    /// documents `--keep` syntax, the `[audit] retention` config
+    /// hook, and the once-per-minute cheap-path marker.
+    Gc(AuditGcArgs),
 }
 
 #[derive(Debug, Args)]
@@ -2583,6 +2602,23 @@ pub struct AuditGrepArgs {
 
 #[derive(Debug, Args)]
 pub struct AuditVerifyArgs {
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+/// L5 (v0.1.3): retention GC over `~/.inspect/audit/`.
+#[derive(Debug, Args)]
+pub struct AuditGcArgs {
+    /// Retention threshold. Either a duration suffix (`90d`, `4w`,
+    /// `12h`, `15m`) or a bare integer (entries-per-namespace, newest
+    /// first). Pass `0` is rejected — refusing to silently delete
+    /// every entry is the only safe default.
+    #[arg(long, value_name = "DURATION-OR-COUNT")]
+    pub keep: String,
+    /// Preview the deletion without modifying anything; counts and
+    /// freed bytes are computed identically to a real run.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

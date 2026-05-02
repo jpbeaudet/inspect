@@ -5940,3 +5940,480 @@ fn f17_steps_yaml_help_documents_flag() {
         "run --help should document --steps-yaml: {stdout}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// L5 — `inspect audit gc` retention + orphan-snapshot sweep, plus the
+// lazy-trigger marker on `[audit] retention` in `~/.inspect/config.toml`.
+// Spec: deletes audit entries older than --keep, sweeps orphan snapshots
+// while never touching one referenced by a retained entry; exposes a
+// stable `--json` envelope; lazy GC fires on the next audit append after
+// the retention threshold trips, gated by a once-per-minute marker.
+// -----------------------------------------------------------------------------
+
+fn l5_write_audit_entry(
+    home: &std::path::Path,
+    file_stem: &str,
+    id: &str,
+    ts_rfc3339: &str,
+    selector: &str,
+    extras: serde_json::Value,
+) {
+    let dir = home.join("audit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut entry = json!({
+        "schema_version": 1,
+        "id": id,
+        "ts": ts_rfc3339,
+        "user": "tester",
+        "host": "test-host",
+        "verb": "exec",
+        "selector": selector,
+        "exit": 0,
+        "duration_ms": 0,
+    });
+    if let serde_json::Value::Object(extra_map) = extras {
+        let entry_obj = entry.as_object_mut().unwrap();
+        for (k, v) in extra_map {
+            entry_obj.insert(k, v);
+        }
+    }
+    let path = dir.join(format!("{file_stem}.jsonl"));
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let line = format!("{}\n", serde_json::to_string(&entry).unwrap());
+    f.write_all(line.as_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn l5_write_snapshot(home: &std::path::Path, hash_hex: &str, content: &[u8]) {
+    let dir = home.join("audit").join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("sha256-{hash_hex}"));
+    std::fs::write(&path, content).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn l5_iso_days_ago(days: i64) -> String {
+    use chrono::Utc;
+    let ts = Utc::now() - chrono::Duration::days(days);
+    ts.to_rfc3339()
+}
+
+#[test]
+fn l5_gc_dry_run_lists_old_entries_without_deleting() {
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    // Two old entries (>90d), two recent. --dry-run --keep 90d should
+    // report 2 deletions but leave the JSONL intact.
+    l5_write_audit_entry(
+        h,
+        "2024-01-tester",
+        "old-1",
+        &l5_iso_days_ago(120),
+        "arte/foo",
+        json!({}),
+    );
+    l5_write_audit_entry(
+        h,
+        "2024-01-tester",
+        "old-2",
+        &l5_iso_days_ago(100),
+        "arte/bar",
+        json!({}),
+    );
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "new-1",
+        &l5_iso_days_ago(2),
+        "arte/foo",
+        json!({}),
+    );
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "new-2",
+        &l5_iso_days_ago(0),
+        "arte/bar",
+        json!({}),
+    );
+
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "90d", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would delete 2 entries"),
+        "dry-run summary should report 2 deletions: {stdout}"
+    );
+    assert!(
+        stdout.contains("entry  would delete: old-1")
+            && stdout.contains("entry  would delete: old-2"),
+        "dry-run should enumerate the targeted ids: {stdout}"
+    );
+    // JSONL files untouched on dry-run.
+    let jan = std::fs::read_to_string(h.join("audit").join("2024-01-tester.jsonl")).unwrap();
+    assert!(jan.contains("old-1") && jan.contains("old-2"));
+}
+
+#[test]
+fn l5_gc_apply_deletes_old_entries_and_orphan_snapshots() {
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    // Old entry references snapshot `aaaa`. Recent entry references
+    // snapshot `bbbb`. A standalone `cccc` snapshot has no references
+    // anywhere — orphan from day one.
+    l5_write_audit_entry(
+        h,
+        "2024-01-tester",
+        "old-1",
+        &l5_iso_days_ago(200),
+        "arte/foo",
+        json!({"previous_hash": "aaaa"}),
+    );
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "new-1",
+        &l5_iso_days_ago(1),
+        "arte/foo",
+        json!({"previous_hash": "bbbb"}),
+    );
+    l5_write_snapshot(h, "aaaa", b"old-content");
+    l5_write_snapshot(h, "bbbb", b"new-content");
+    l5_write_snapshot(h, "cccc", b"orphan-from-day-one");
+
+    sb.cmd()
+        .args(["audit", "gc", "--keep", "90d"])
+        .assert()
+        .success();
+
+    // old-1 gone from JSONL; new-1 kept.
+    let jan_path = h.join("audit").join("2024-01-tester.jsonl");
+    assert!(
+        !jan_path.exists(),
+        "JSONL file with only deleted entries should be removed entirely"
+    );
+    let dec = std::fs::read_to_string(h.join("audit").join("2024-12-tester.jsonl")).unwrap();
+    assert!(dec.contains("new-1"));
+    assert!(!dec.contains("old-1"));
+
+    // Snapshot `aaaa` (referenced only by deleted old-1) gone; `bbbb`
+    // kept (referenced by retained new-1); `cccc` (orphan) gone.
+    assert!(!h.join("audit/snapshots/sha256-aaaa").exists());
+    assert!(h.join("audit/snapshots/sha256-bbbb").exists());
+    assert!(!h.join("audit/snapshots/sha256-cccc").exists());
+}
+
+#[test]
+fn l5_gc_keeps_snapshot_referenced_by_retained_entry() {
+    // The headline F11 contract: GC must NEVER delete a snapshot still
+    // pinned by an audit entry that survives. This guards a subtle bug
+    // where a snapshot is referenced only by a *retained* entry's
+    // `revert.payload` (state_snapshot kind) — the `previous_hash`
+    // field may be empty.
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "kept-1",
+        &l5_iso_days_ago(1),
+        "arte/foo",
+        json!({
+            "revert": {
+                "kind": "state_snapshot",
+                "payload": "deadbeef",
+                "captured_at": l5_iso_days_ago(1),
+                "preview": "restore /etc/foo"
+            }
+        }),
+    );
+    l5_write_snapshot(h, "deadbeef", b"pinned-by-revert-payload");
+    // Plus an unreferenced orphan to confirm the sweep still runs.
+    l5_write_snapshot(h, "ffffffff", b"actual-orphan");
+
+    sb.cmd()
+        .args(["audit", "gc", "--keep", "90d"])
+        .assert()
+        .success();
+
+    assert!(
+        h.join("audit/snapshots/sha256-deadbeef").exists(),
+        "snapshot pinned by a retained entry's revert.payload must NOT be deleted"
+    );
+    assert!(
+        !h.join("audit/snapshots/sha256-ffffffff").exists(),
+        "actual orphan should be swept"
+    );
+}
+
+#[test]
+fn l5_gc_json_envelope_schema() {
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    l5_write_audit_entry(
+        h,
+        "2024-01-tester",
+        "old-x",
+        &l5_iso_days_ago(120),
+        "arte/foo",
+        json!({}),
+    );
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "new-x",
+        &l5_iso_days_ago(0),
+        "arte/bar",
+        json!({}),
+    );
+
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "90d", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    for key in [
+        "dry_run",
+        "policy",
+        "entries_total",
+        "entries_kept",
+        "deleted_entries",
+        "deleted_snapshots",
+        "freed_bytes",
+        "deleted_ids",
+        "deleted_snapshot_hashes",
+    ] {
+        assert!(
+            v.get(key).is_some(),
+            "JSON envelope missing required L5 field '{key}': {v}"
+        );
+    }
+    assert_eq!(v["dry_run"], false);
+    assert_eq!(v["policy"], "90d");
+    assert_eq!(v["entries_total"], 2);
+    assert_eq!(v["entries_kept"], 1);
+    assert_eq!(v["deleted_entries"], 1);
+    let ids = v["deleted_ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0], "old-x");
+}
+
+#[test]
+fn l5_gc_count_policy_keeps_newest_per_namespace() {
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    // Three entries each in arte and bravo namespaces. --keep 1 keeps
+    // the newest per namespace → 2 retained, 4 deleted.
+    for (ns, days) in &[
+        ("arte", 0i64),
+        ("arte", 5),
+        ("arte", 10),
+        ("bravo", 0),
+        ("bravo", 7),
+        ("bravo", 14),
+    ] {
+        let id = format!("{ns}-d{days}");
+        l5_write_audit_entry(
+            h,
+            "2024-12-tester",
+            &id,
+            &l5_iso_days_ago(*days),
+            &format!("{ns}/svc"),
+            json!({}),
+        );
+    }
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "1", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["entries_total"], 6);
+    assert_eq!(v["entries_kept"], 2);
+    assert_eq!(v["deleted_entries"], 4);
+    let deleted: std::collections::HashSet<String> = v["deleted_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    // Newest in each ns (d0) survives; the other four deleted.
+    assert!(!deleted.contains("arte-d0"));
+    assert!(!deleted.contains("bravo-d0"));
+    assert!(deleted.contains("arte-d5"));
+    assert!(deleted.contains("arte-d10"));
+    assert!(deleted.contains("bravo-d7"));
+    assert!(deleted.contains("bravo-d14"));
+}
+
+#[test]
+fn l5_gc_invalid_keep_value_exits_error_with_hint() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "5y"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("unknown unit") && stderr.contains("hint:"),
+        "invalid --keep should chain a hint: {stderr}"
+    );
+}
+
+#[test]
+fn l5_gc_keep_zero_rejected() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "0"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--keep 0"),
+        "--keep 0 must be rejected loudly: {stderr}"
+    );
+}
+
+#[test]
+fn l5_gc_help_documents_keep_dry_run_and_json() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["audit", "gc", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("--keep"), "{stdout}");
+    assert!(stdout.contains("--dry-run"), "{stdout}");
+    let assert = sb.cmd().args(["audit", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("GC + RETENTION"),
+        "audit --help should document the GC + RETENTION section: {stdout}"
+    );
+    assert!(
+        stdout.contains("[audit] retention") && stdout.contains("config.toml"),
+        "audit --help should document the lazy-trigger config hook: {stdout}"
+    );
+}
+
+#[test]
+fn l5_gc_empty_audit_dir_succeeds_with_zero_counts() {
+    // Operator runs `audit gc` on a fresh install with nothing in
+    // ~/.inspect/audit/. No JSONL files, no snapshots dir. Must
+    // succeed cleanly with all-zero counts.
+    let sb = Sandbox::new(json!([]));
+    let assert = sb
+        .cmd()
+        .args(["audit", "gc", "--keep", "90d", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["entries_total"], 0);
+    assert_eq!(v["deleted_entries"], 0);
+    assert_eq!(v["deleted_snapshots"], 0);
+    assert_eq!(v["freed_bytes"], 0);
+}
+
+#[test]
+fn l5_lazy_gc_marker_prevents_double_scan_within_minute() {
+    // After a manual `audit gc` run, the cheap-path marker
+    // `~/.inspect/audit/.gc-checked` must exist with a recent mtime so
+    // a subsequent verb that triggers `maybe_run_lazy_gc` no-ops
+    // immediately. We exercise the marker existence + freshness here
+    // directly because the lazy trigger is wired into AuditStore::append
+    // which is exercised by every write verb in the existing F1-F17 suite.
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    l5_write_audit_entry(
+        h,
+        "2024-12-tester",
+        "x",
+        &l5_iso_days_ago(0),
+        "arte/foo",
+        json!({}),
+    );
+    sb.cmd()
+        .args(["audit", "gc", "--keep", "90d"])
+        .assert()
+        .success();
+    let marker = h.join("audit").join(".gc-checked");
+    assert!(
+        marker.exists(),
+        "manual gc should touch the cheap-path marker"
+    );
+    let meta = std::fs::metadata(&marker).unwrap();
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(meta.modified().unwrap())
+        .unwrap();
+    assert!(
+        elapsed.as_secs() < 60,
+        "marker mtime should be fresh (< 60s): {}s",
+        elapsed.as_secs()
+    );
+}
+
+#[test]
+fn l5_lazy_gc_triggers_on_audit_append_when_retention_set() {
+    // Configure `[audit] retention = "90d"` and seed an entry whose
+    // file mtime is older than the threshold. Ensure the .gc-checked
+    // marker is absent so the cheap-path doesn't suppress the scan.
+    // Then run any verb that writes an audit entry — `inspect cache
+    // clear --all` is a tidy choice (one audit append per
+    // invocation). The lazy GC should fire and prune the old entry.
+    let sb = Sandbox::new(json!([]));
+    let h = sb.home();
+    std::fs::write(h.join("config.toml"), "[audit]\nretention = \"90d\"\n").unwrap();
+    write_servers_toml(h, &["arte"]);
+
+    // Seed an old entry whose ts is >100d in the past.
+    l5_write_audit_entry(
+        h,
+        "2024-01-tester",
+        "should-be-deleted",
+        &l5_iso_days_ago(150),
+        "arte/foo",
+        json!({}),
+    );
+    // Backdate the file mtime so the cheap-path mtime probe trips.
+    let jan = h.join("audit").join("2024-01-tester.jsonl");
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(150 * 86400);
+    let f = std::fs::OpenOptions::new().write(true).open(&jan).unwrap();
+    f.set_modified(old_time).unwrap();
+    drop(f);
+
+    // Confirm marker absent (fresh sandbox).
+    let marker = h.join("audit").join(".gc-checked");
+    assert!(!marker.exists());
+
+    // Trigger an audit append via cache clear (single-ns form always
+    // writes one entry, regardless of whether the cache was populated).
+    sb.cmd().args(["cache", "clear", "arte"]).assert().success();
+
+    // Lazy GC should have run and deleted the old entry's file (only
+    // entry it had). The new audit entry from `cache clear` lives in
+    // the current month's file.
+    assert!(
+        !jan.exists(),
+        "lazy GC should have pruned the old JSONL file"
+    );
+    assert!(marker.exists(), "lazy GC must touch the .gc-checked marker");
+}
