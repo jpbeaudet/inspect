@@ -32,12 +32,18 @@
 | L3 — Parameterized aliases | ⬜ Open | medium, parser change |
 | L6 — Per-branch rollback in bundle matrix | ✅ Done | new `BranchResult { branch_id, status: Ok\|Failed\|Skipped, matrix_value, matrix_key }` ledger in `src/bundle/exec.rs`; per-branch `bundle_branch` (`<key>=<value>`) + `bundle_branch_status` fields on `AuditEntry` (both `Option<T>` + `skip_serializing_if` for backwards compat). New `StepOutcome { Single \| Matrix(Vec<BranchResult>) }` returned from `run_step`; apply loop tracks `step_branches: BTreeMap<usize, Vec<BranchResult>>` alongside the existing `completed: Vec<usize>`. `do_rollback` rewritten to consult `step_branches`: for matrix steps it iterates only succeeded branches with per-branch matrix interpolation (`{{ matrix.<key> }}` finally resolves correctly — the v0.1.2 empty-matrix bug is fixed); failed/skipped branches log a `bundle.rollback.skip` audit entry explaining why no inverse fired. New `BranchFailureCarrier` thread-local sidecar threads partial-failure ledgers back to apply without widening `Result`'s shape. `run_rollback_action` extended with optional `branch_label` arg + stamps `bundle_branch` / `bundle_branch_status` on rollback audit entries. New `inspect bundle status <id>` subcommand with bundle_id prefix matching (ambiguous exits 2; no-match exits 1 with chained hint), reads audit log + groups by step + renders per-branch ✓/✗/·/↶ markers and `--json` envelope `{bundle_id, entries_total, steps[{step, kind, branches[]}]}` for agent consumption. Composes with existing `on_failure: rollback_to:<id>` (regression-guarded). 6 acceptance tests in `tests/phase_f_v013.rs::l6_*` covering: 4-branch matrix with one failure → only succeeded branches inverted + skipped branches audited; rollback template resolves per-branch (headline regression guard); bundle-status human + json; full-matrix-success-then-later-step-fails (preserves existing checkpoint semantics); status-help discoverability; unknown-bundle-id chained hint. CHANGELOG + MANUAL §11 + RUNBOOK §17 + LONG_BUNDLE help-text updated. |
 | L1 — TUI mode (`inspect tui`) | ⬜ Open | largest, ships last |
+| L8 — Round out the v0.1.3 compose surface (per-service `compose up`/`down`/`pull`/`build`, `compose logs` cursor/since-last/merged) | ⬜ Open | F6 shipped a tightly scoped surface; L8 closes the gaps so operators don't fall back to `inspect logs` for compose log triage and don't have to script `compose up <p>` then narrow manually |
+| L9 — UDP listener probe in `discovery::probes` | ⬜ Open | small; adds `ss -uln` (or netstat fallback) alongside the existing TCP probe, tags `proto: "udp"`, surfaces in `inspect ports` and `inspect status` |
+| L10 — Port-level entries in `DriftDiff` | ⬜ Open | small-medium; parses `docker ps`'s `Ports` column into structured `(host_port, container_port, proto)` tuples and adds a `ports` field to `DriftDiff` so `inspect setup --check-drift` flags port additions/removals between snapshots |
+| L11 — Bidirectional `--stream` + `--stdin-script` composition | ⬜ Open | F14/F16 leave these clap-mutually-exclusive because streaming both directions on the same SSH stdin is a half-duplex protocol problem; L11 designs a real bidirectional transport (likely a multiplex framing on top of the existing channel) so the operator can stream a script in AND tail its output OUT in one verb invocation |
+| L12 — Per-step live streaming under `--steps --stream` | ⬜ Open | F17 forces PTY allocation per dispatch but the per-step output is still buffered+rendered between steps; L12 wires the streaming executor into the per-step boundary so a 10-minute step's output flows live, while preserving per-step audit + the structured `targets[]` JSON shape |
+| L13 — Parallel multi-target fan-out within a single `--steps` step | ⬜ Open | F17 ships sequential per-step across targets; L13 adds opt-in parallel fan-out (`parallel: true` per step) with a designed solution for output interleaving (per-target prefix or interleave buffer) and audit-link-ordering (deterministic `steps_run_id` linkage independent of target completion order) |
 
-**Implementation order:** F1 → F8 → F9 → F11 → F2 → F3 → F4 → F5 → F7 → F10 → F12 → F13 → F14 → F15 → F16 → F17 → F18 → F6 → L4 → L2 → L5 → L7 → L3 → L6 → L1. F1 is the field-reported regression (ship-blocker on its own under the "one critical issue" rule). **F8 lands second** because every diagnostic verb's trustworthiness — including F1's fix and F4's deep-bundle — depends on the cache being either fresh or visibly stale; without F8 the rest of the diagnostic improvements still leave operators unsure whether they're seeing reality or a snapshot. **F9 lands third** because it is a silent-correctness bug on `inspect run` — the workhorse verb — and "exit 0 with `1 ok, 0 failed` while the command got no input" is the worst class of failure a tool can have; it must be fixed before any new feature work lands on top of it. **F11 lands fourth** because it generalizes today's post-hoc `inspect revert <audit-id>` into a verb-time "capture inverse before applying" contract on every write verb — it is the load-bearing safety primitive for agentic callers (4th field user: "the equivalent of `git revert` for production"), and the audit-entry shape it requires must land before v0.2.0 freezes the audit schema. F4 is the load-bearing diagnostic-content request and ships ahead of all L-items because it amplifies every existing diagnostic verb. F5 + F7 are small ergonomic wins that ride along with F4 (same code paths). F10 ships immediately after F7 because both touch the help/error-message + small-flag-add layer and a single editing pass over `src/commands/{why,cat,grep,help}.rs` covers both bundles. **F12 lands after F10** because it is a connect-time configuration change (one-time per-namespace env overlay applied to every later `run` / `exec`) that removes a recurring LLM-driven friction (re-prepending `PATH="$HOME/.local/bin:$PATH"` on every Codespace-style invocation) and shares no code with F6, so it can land before the larger compose surface. **F13 lands immediately after F12** because both touch the connect / SSH-executor layer (env-overlay dispatch and stale-session detection live next to each other in `src/ssh/`), and F13's transparent re-auth on a stale `ControlPersist` socket removes the last "the verb errored, now manually `disconnect` + `connect` and retry" papercut that survives F12. **F14 → F15 → F16 → F17 → F18** form the migration-operator block, ordered by dependency: F14 (script mode) builds on F9's stdin forwarding and is the highest-impact ergonomic in the block (kills cross-layer quoting hell); F15 (file transfer) lands next because F9's error hints already reference `inspect cp` and shipping the actual verb closes that loop; F16 (streaming) is small once F9 + F14 have established the bidirectional-pipe path; F17 (multi-step runner) is the largest of the five and depends on F11's audit-entry shape so each step gets its own `revert.kind` capture; F18 (session transcript) lands last in the block because it observes everything F9–F17 produces and benefits from those features being settled. F6 (compose verbs) is the larger surface and lands after the diagnostic improvements so compose-aware `why` already exists when compose verbs ship. Then the planned L-items in their existing order. TUI last when everything underneath is stable.
+**Implementation order:** F1 → F8 → F9 → F11 → F2 → F3 → F4 → F5 → F7 → F10 → F12 → F13 → F14 → F15 → F16 → F17 → F18 → F6 → L4 → L2 → L8 → L9 → L10 → L11 → L12 → L13 → L3 → L6 → L7 → L5 → L1. (L8–L13 inserted after the original L4 → L2 sequence: L8 extends F6's compose surface so the compose cluster ships complete; L9/L10 are small probe + drift gaps from F2/B4 retrospectives; L11/L12/L13 are the F14/F16/F17 design items that earlier commits had pointed at "v0.1.5" — which is not a confirmed milestone, so they land here. L3 is the parameterized-aliases parser change, which slots after the L8–L13 work because it is contained to the alias subsystem and won't be affected by upstream churn. L1 ships last as the largest item.) F1 is the field-reported regression (ship-blocker on its own under the "one critical issue" rule). **F8 lands second** because every diagnostic verb's trustworthiness — including F1's fix and F4's deep-bundle — depends on the cache being either fresh or visibly stale; without F8 the rest of the diagnostic improvements still leave operators unsure whether they're seeing reality or a snapshot. **F9 lands third** because it is a silent-correctness bug on `inspect run` — the workhorse verb — and "exit 0 with `1 ok, 0 failed` while the command got no input" is the worst class of failure a tool can have; it must be fixed before any new feature work lands on top of it. **F11 lands fourth** because it generalizes today's post-hoc `inspect revert <audit-id>` into a verb-time "capture inverse before applying" contract on every write verb — it is the load-bearing safety primitive for agentic callers (4th field user: "the equivalent of `git revert` for production"), and the audit-entry shape it requires must land before v0.2.0 freezes the audit schema. F4 is the load-bearing diagnostic-content request and ships ahead of all L-items because it amplifies every existing diagnostic verb. F5 + F7 are small ergonomic wins that ride along with F4 (same code paths). F10 ships immediately after F7 because both touch the help/error-message + small-flag-add layer and a single editing pass over `src/commands/{why,cat,grep,help}.rs` covers both bundles. **F12 lands after F10** because it is a connect-time configuration change (one-time per-namespace env overlay applied to every later `run` / `exec`) that removes a recurring LLM-driven friction (re-prepending `PATH="$HOME/.local/bin:$PATH"` on every Codespace-style invocation) and shares no code with F6, so it can land before the larger compose surface. **F13 lands immediately after F12** because both touch the connect / SSH-executor layer (env-overlay dispatch and stale-session detection live next to each other in `src/ssh/`), and F13's transparent re-auth on a stale `ControlPersist` socket removes the last "the verb errored, now manually `disconnect` + `connect` and retry" papercut that survives F12. **F14 → F15 → F16 → F17 → F18** form the migration-operator block, ordered by dependency: F14 (script mode) builds on F9's stdin forwarding and is the highest-impact ergonomic in the block (kills cross-layer quoting hell); F15 (file transfer) lands next because F9's error hints already reference `inspect cp` and shipping the actual verb closes that loop; F16 (streaming) is small once F9 + F14 have established the bidirectional-pipe path; F17 (multi-step runner) is the largest of the five and depends on F11's audit-entry shape so each step gets its own `revert.kind` capture; F18 (session transcript) lands last in the block because it observes everything F9–F17 produces and benefits from those features being settled. F6 (compose verbs) is the larger surface and lands after the diagnostic improvements so compose-aware `why` already exists when compose verbs ship. Then the planned L-items in their existing order. TUI last when everything underneath is stable.
 
 ---
 
-## Backlog (25 items)
+## Backlog (31 items)
 
 ### F1 — `inspect status <ns>` returns 0 services after `--force` discovery (regression)
 **Source:** v0.1.2 field feedback (first reported on a 38-container host; **independently re-confirmed by 2nd field user** debugging a Keycloak deployment on a 37-container host — `inspect setup --force` showed the full inventory, then `inspect status arte` immediately returned `0 services`. `inspect health 'arte/onyx-*'` worked fine on the same data, which made `status` "feel like dead weight").
@@ -873,16 +879,150 @@ Design points:
 
 ---
 
-## Out of scope for v0.1.3
-*(explicitly deferred — do not let scope creep drag these in)*
+### L8 — Round out the v0.1.3 compose surface
+**Source:** F6 retrospective. The first-class compose verb cluster shipped with three deliberate scope cuts: `compose up`/`down`/`pull`/`build` are project-level only (no `<ns>/<project>/<service>` form), `compose logs` is a thin wrapper that lacks the cursor / since-last / merged surface that `inspect logs` carries, and `inspect bundle` has no compose-aware step kind. v0.1.3 must close these so operators don't have to context-switch verbs (or fall back to `inspect run -- 'cd … && docker compose …'`) mid-triage.
+**Severity:** Medium (operator ergonomics; the gaps are visible the moment a multi-service compose stack is in play).
+**Problem:**
+1. **Per-service write narrowing.** `inspect compose up arte/luminary-onyx --apply` brings the whole project up; there is no way to say "bring up only the `onyx-vault` service" without falling back to `inspect run -- 'docker compose -p luminary-onyx up onyx-vault'` and losing the audit / redaction / selector grammar. Same for `down`, `pull`, `build`.
+2. **`compose logs` lacks the F8-shipped log triage surface.** No `--cursor` (resume from last byte), no `--since <duration>`-aware ordering across services in the merged stream, no `--match`/`--exclude`. Operators staring at a multi-service compose project for an error fan back to `inspect logs <ns>/<service>` per-service, losing the project-aggregated view.
+3. **No `inspect bundle` compose step kind.** A bundle that wants to "down → tar volumes → up" today drives compose via `exec:` shell strings; it should have a structured `compose:` step kind that resolves the project + service from the cached profile, captures the compose-file hash, and emits the correct `revert.kind` (compose actions are command_pair-able by definition: `up` ↔ `down`, `pull` has no inverse but `build` cleanly composes with `down --rmi local`).
 
-- **TUI write actions.** Read-only in v0.1.3; `e` / `x` / `apply` from inside TUI is v0.2.0+.
-- **Compose write verbs beyond `restart`.** `inspect compose up` / `down` / `pull` / `build` / `exec` are intentionally deferred (see F6). They need a compose-state-mutation design pass and land in **v0.1.5 at earliest** — v0.1.4 is the Kubernetes release and will not touch compose.
-- **Alias defaults / fallback values** (`${svc:-pulse}`). Parser stays minimal in v0.1.3; defaults land in v0.2.0.
-- **Cross-medium bundles** (Docker + k8s steps in one bundle). v0.2.0 introduces k8s; cross-medium is post-v0.2.0.
-- **CLI surface renames / config schema freeze.** Previously planned for v0.1.4; now the job of **v0.1.5** (the stabilization sweep), because v0.1.4 is reserved for Kubernetes. Resist any rename in v0.1.3 unless it is fixing an outright bug.
-- **kubectl / k8s anything.** **v0.1.4** (was v0.2.0 — accelerated). The entire v0.1.4 release is dedicated to introducing the k8s medium, k8s-aware selectors, and the kubectl-equivalent verb surface.
-- **Themes, plugins, custom layouts in TUI.** Permanent no for v0.1.x.
+**Fix:**
+- **Selector grammar.** `verbs::compose::resolve` already understands `<ns>/<project>/<service>` for `compose restart`. Extend `compose up`/`down`/`pull`/`build` to accept the same form. Project-level form continues to mean "every service"; service-level form narrows to one service. `compose down <ns>/<project>/<service>` is `docker compose -p <p> stop <svc> && docker compose -p <p> rm -f <svc>` (preserves the rest of the project); `--volumes` on a per-service `down` rejects loudly (per-service compose volume removal needs a separate design pass and is not v0.1.3 scope).
+- **`compose logs` surface.** Add `--cursor <path>`, `--match <glob>` / `--exclude <glob>`, and a `--merged` flag that interleaves logs from every service in the project into a single stream tagged `[<service>]` (mirroring the existing `inspect logs --merged` shape from F8). Cursor format reuses `~/.inspect/cursors/<ns>/compose/<project>[/<service>].cursor`.
+- **`inspect bundle` compose step kind.** New step type `compose: { ns, project, action: up|down|pull|build|restart, service: <opt>, flags: <opt> }`. Validates against the cached profile at plan time (project must exist, service if specified must exist on the project); records `[project=…] [compose_file_hash=…]` in the per-step audit; declares `revert.kind = command_pair` for up/down, `revert.kind = unsupported` for pull, `revert.kind = command_pair` (down --rmi local) for build.
+- **Help.** `LONG_COMPOSE` per-sub blocks updated to document the per-service narrowing; `compose.md` editorial topic gains a "Per-service narrowing" section. `LONG_BUNDLE` documents the new `compose:` step kind and its revert taxonomy.
+
+**Test:**
+- `compose up <ns>/<p>/<svc> --apply` brings up only that service; audit shows `verb=compose.up`, args includes `[service=…]`, exit 0; project's other services remain unchanged.
+- `compose down <ns>/<p>/<svc> --apply` stops + rm's only that service; project's other services remain running.
+- `compose down <ns>/<p>/<svc> --volumes --apply` exits 2 with the rejection message (per-service volume removal not v0.1.3 scope, project-level `compose down --volumes` still works).
+- `compose logs <ns>/<p> --merged --tail 200` produces an interleaved stream with `[<service>]` prefixes; `--cursor` resumes from the last byte; `--match 'ERROR'` filters lines.
+- `inspect bundle apply` with a bundle containing a `compose:` step: plan validates the project + service; apply records the per-step audit with `compose_file_hash`; rollback walks the inverse correctly.
+- `compose pull <ns>/<p>/<svc> --apply` pulls only that service's image; `compose build <ns>/<p>/<svc> --apply` builds only that service.
+
+---
+
+### L9 — UDP listener probe in discovery
+**Source:** F2 retrospective + multi-host migration session. The host-listener probe enumerates only TCP listeners today (`ss -tln` / `netstat -tln` via `discovery::probes`); UDP services on managed appliances (DNS forwarders, mDNS responders, syslog receivers, IPSec daemons, WireGuard endpoints) are invisible to `inspect status` / `inspect ports`, even when they are the operator's primary triage target.
+**Severity:** Medium (visibility gap; affects every operator running UDP services on the inspected host).
+**Problem:** When an operator runs `inspect ports arte` on a host that serves DNS on `:53/udp`, the verb returns the TCP listeners only. There is no signal to the operator that UDP listeners exist; the absence reads as "nothing to see" rather than "we don't probe UDP". Worse, `inspect setup --check-drift` cannot flag a UDP listener disappearing because the probe never recorded it.
+**Fix:**
+- Add a UDP probe in `discovery::probes::probe_host_listeners`. Run `ss -uln` (modern; preferred when available) with `netstat -uln` as the legacy fallback (matching the existing TCP probe's preference chain).
+- New `proto: "udp"` tag on `HostListener` records (alongside the existing `proto: "tcp"`); `inspect ports` table gains a `PROTO` column and the `--proto tcp|udp|all` filter (default `all`).
+- `inspect status --json` and `inspect ports --json` emit `proto` for every listener record so agent consumers can filter without re-parsing the human table.
+- Drift detection picks UDP up automatically — port-level diffing is the next item (L10) and will surface UDP additions/removals once it lands.
+- Document the limit explicitly in `discovery.md`: UDP listeners shown by `ss -uln` are *bound sockets*, not "is the service actually receiving traffic". Operators chasing dead UDP services still need to run a real probe (e.g., `dig @host` for DNS).
+
+**Test:**
+- `inspect ports arte` against a mock returning both TCP and UDP listeners shows both, with `PROTO` column populated; `--proto udp` narrows; `--proto tcp` excludes the UDP rows.
+- `inspect status arte --json` emits `"proto": "udp"` on UDP-only listeners.
+- Hosts where `ss` is missing fall back to `netstat -uln` and parse correctly; both unavailable → no UDP records (warn once, do not fail discovery).
+- `inspect setup --check-drift` against a profile where a UDP listener disappeared between snapshots flags the change once L10 lands; until then UDP is visible in inventory but not in the diff.
+
+---
+
+### L10 — Port-level entries in `DriftDiff`
+**Source:** v0.1.2 (B4) drift differ retrospective. The differ surfaces containers added / removed / image-changed but *not* port-level changes. An operator who reorganizes a compose project from `5432:5432` to `5433:5432` (a real-world common change when moving services around port-collisions) sees no drift signal — every container is the same, only the bind changed.
+**Severity:** Medium (false-negative drift on a common operator action; `inspect setup --check-drift` is supposed to be the truth source for "did anything change").
+**Problem:** `DriftDiff` today carries `containers_added`, `containers_removed`, `image_changed`. Adding/removing an exposed port, or changing a host-side bind, mutates the snapshot's per-container ports list but produces no diff entry — the operator's only signal is to manually compare two `inspect ports` outputs, which is exactly the kind of work the drift differ was supposed to eliminate.
+**Fix:**
+- Extend `DriftDiff` with a `port_changes: Vec<PortChange>` field. Each `PortChange { container, kind: Added|Removed|Bind|Proto, before, after }`.
+- Implement a `docker ps` `Ports` column parser. The column format is documented in `docker ps --format '{{.Ports}}'` output; tokens look like `0.0.0.0:5432->5432/tcp` or `5432/tcp` (no host bind) or `[::]:53->53/udp`. The parser must handle: IPv4-only binds, IPv6 binds (`[::]:p`), unbound exposed ports, multiple ports per container (comma-separated), and the rare `0.0.0.0:p1-p2->p1-p2/tcp` range form.
+- `inspect setup --check-drift` text output gains a `Ports:` section listing the changes; `--json` envelope gains a `port_changes[]` array.
+- Once L9 lands, UDP port changes flow through the same path automatically (the parser already supports `/udp`).
+- Parser lives in `src/discovery/ports_parse.rs` with comprehensive unit tests against a corpus of real-world `docker ps` outputs (collected via `docker ps --format '{{.Names}}\t{{.Ports}}' >> corpus.txt` from each field user's host).
+
+**Test:**
+- A 5-container fixture: container A gains a new port (`Added`); container B loses one (`Removed`); container C's host bind changes from `5432:5432` to `5433:5432` (`Bind`); container D's proto changes from `/tcp` to `/udp` after L9 (`Proto`); container E unchanged. `DriftDiff` carries exactly 4 `PortChange` entries.
+- IPv6 bind `[::]:53->53/udp` parses to `(host=::, host_port=53, container_port=53, proto=udp)`.
+- Range form `0.0.0.0:8000-8002->8000-8002/tcp` produces 3 distinct `Port` entries (one per port in the range).
+- Malformed `Ports` token (e.g., a future format we don't recognize) is logged as a warning and skipped — never panics, never silently mutates the diff.
+- `inspect setup --check-drift --json` envelope schema includes `port_changes[]`; agents consuming the schema get a stable shape with per-change before/after payloads.
+
+---
+
+### L11 — Bidirectional `--stream` + `--stdin-script` composition
+**Source:** F14 + F16 implementation retrospectives. `inspect run --stream` and `inspect run --stdin-script` are clap-mutually-exclusive today because streaming both directions on the same SSH stdin is a half-duplex protocol problem: the inbound script body and the outbound live output share one channel, so naïve interleaving deadlocks (script reads block on the executor's stdout writes, or vice versa).
+**Severity:** Medium (a real and recurring operator pain — the migration-operator's destructive-migration smoke test wanted "stream a 200-line setup script in and tail its output live" and had to be split into two invocations).
+**Problem:** The migration-operator's workflow is:
+1. Pipe a generated SQL/bash setup script into `inspect run` via stdin.
+2. Watch the remote command's output flow live (so a 10-minute migration's progress is visible, not held until exit).
+
+Today step 1 requires `--stdin-script`, step 2 requires `--stream`, and clap rejects the combination. The operator's workaround is `inspect run --file <path> --stream` (write the script to disk first), which loses the "compose this from a heredoc / pipeline" ergonomic and makes pipeline-driven script generation awkward.
+
+**Fix:**
+- Design a real bidirectional protocol on top of the existing single SSH channel. Likely shape: a small framing layer where each frame carries a 1-byte direction tag (`I` = inbound script byte run, `O` = outbound stdout, `E` = outbound stderr) + a 4-byte length-prefix. Protocol negotiated via a deterministic preamble line so dumb shells (no inspect helper) cleanly fall back to half-duplex.
+- The remote helper is a small `bash -s` script (kept under 80 lines) that reads the inbound frames into a temp file and `tee`s the outbound stream through the framing wrapper. No new remote dependencies.
+- Local executor uses two threads (one writer for inbound script bytes, one reader for outbound output frames) talking through a single `ChildStdin`/`ChildStdout` pair, with an `epoll`-style select to avoid deadlock on either direction.
+- Audit captures `script_sha256` (existing F14 field) AND `streamed: true` (existing F16 field). New `bidirectional: true` audit-entry flag (Option<bool>, skip-empty) so post-mortem can identify L11-protocol invocations.
+- Drop the clap mutex on `--stream` ↔ `--stdin-script`. Add an integration test that streams a 1 MiB script in while a long-running remote command produces 1 MiB of output, and verifies neither direction starves.
+
+**Test:**
+- `cat ./long-script.sh | inspect run arte --stream --stdin-script` streams the script in and the output live; both arrive in correct order; final exit code is the script's.
+- A 10-MiB inbound script + 10-MiB outbound output completes without deadlock and without corruption (CRC32 of inbound at remote matches local; CRC32 of outbound at local matches remote).
+- A remote that is missing the L11 helper (older bash, no /tmp write access) falls back to clean half-duplex with a clear `note: bidirectional protocol unavailable; falling back to half-duplex` and refuses the combo gracefully (exit 2).
+- Audit entry records `bidirectional: true`, `streamed: true`, and the inbound `script_sha256`.
+- Ctrl-C from local kills both directions cleanly; no zombie processes on the remote.
+
+---
+
+### L12 — Per-step live streaming under `--steps --stream`
+**Source:** F17 implementation retrospective. `inspect run --steps <manifest> --stream` today forces PTY allocation on every per-step dispatch (the F17 ships F16 composition for free), but the per-step output is still buffered, captured into the per-step audit entry, and rendered between steps. A 10-minute step's output is silent until the step exits; the operator can't see progress within a step.
+**Severity:** Medium (visible gap on the multi-step destructive-migration use case; the migration-operator wanted "tail step 3's output live, then move to step 4").
+**Problem:** F17's per-step dispatch wraps `runner.run_streaming_capturing` (which captures output for the audit) but emits the captured output only on step boundary. Inside a step, no characters reach the operator's terminal until the step exits. This is correct for the audit-shape contract but wrong for live visibility: a 10-minute migration step looks identical to a hung one until it exits.
+**Fix:**
+- Add a live-tee path: per-step output streams to local stdout AS IT ARRIVES (matching the F16 `inspect run --stream` rendering), AND continues to be captured into the per-step audit entry (matching the F17 `targets[]` JSON shape). The two are not mutually exclusive — capture is a tee, not a buffer.
+- Step-boundary delimiters render to local stdout: `── step 3 of 5: tar-volumes ──` before the first byte of step 3's output, `── exit=0 duration=12.4s audit_id=… ──` after the last byte. Boundaries match the F18 transcript header format so transcripts and live tail tell the same story.
+- The 10 MiB per-(step, target) capture cap stays in effect on the audit-entry side; live output is not capped (operator's terminal is the bound).
+- `--json` output is unchanged — captured per-step output remains in the `targets[].stdout` / `.stderr` strings; the live stream is purely for the operator's terminal.
+- Composes with L11: `--stream --steps --stdin-script` works once L11 ships (bidirectional script body + per-step live tail).
+
+**Test:**
+- A 3-step manifest where step 2 prints one line per second for 30 seconds: `inspect run --steps --stream` shows the lines live as they arrive, with step boundaries between steps; the per-step audit entry captures all 30 lines.
+- `--json` output's `targets[].stdout` matches the live-stream content byte-for-byte.
+- Capture cap fires correctly when a single step exceeds 10 MiB: the audit entry shows `output_truncated: true` but the live stream displayed every byte.
+- Ctrl-C inside step 2 forwards SIGINT to the remote (F16 contract) AND records the partial step output in the audit entry; subsequent steps are not run.
+- Multi-target fan-out (sequential per L13's pre-state): live output is per-target labeled `[<target>]` so streams from different targets don't intermix unreadably.
+
+---
+
+### L13 — Parallel multi-target fan-out within a single `--steps` step
+**Source:** F17 implementation retrospective. Multi-target dispatch within a step is sequential today: a step that runs against 5 targets executes them one after another. Operators running the same migration across a fleet (a primary scale axis for inspect's value proposition) wait for `5 × T` instead of `~T`, which kills the migration-operator workflow on >2-target invocations.
+**Severity:** Medium-High (scale axis for the migration-operator use case; sequential fan-out turns a 10-minute migration into a 50-minute one on a 5-target fleet).
+**Problem:** F17's runner walks targets in a `for target in resolved_targets` loop per step. Each target's dispatch is wrapped in F13 auto-reauth, audit logged with the shared `steps_run_id`, and the step's status aggregates across targets — but the loop is sequential. The reason the loop is sequential is two real design problems, not arbitrary scoping:
+1. **Output interleaving.** Two parallel targets writing to stdout interleave per-line in unreadable orders. Per-line lock + per-target prefix is the obvious fix, but breaks the F16 `--stream` line-buffered contract.
+2. **Audit-link ordering.** Per-target audit entries share `steps_run_id` and currently land in the audit log in target completion order. A post-mortem walking entries in log order assumes *manifest order* — parallel completion breaks that assumption silently.
+
+**Fix:**
+- New `parallel: true` per-step manifest field (default `false` — sequential remains the explicit default). Parallel only applies to the multi-target axis within a step; steps themselves remain sequential.
+- New `parallel_max: <int>` per-step cap (default 8, matching the existing fleet-mode cap).
+- **Output interleaving.** Each parallel target's output goes through a per-target labeled prefix (`[<target>]`). When `--stream` is active, the F16 line-buffered render is replaced with a per-target buffer that flushes at every newline, with a global mutex on the local writer so per-line writes are atomic. Trade-off: under sustained burst output from 8 targets the operator sees lines interleaved by target rather than per-target contiguous; this is the documented contract.
+- **Audit-link ordering.** Per-target audit entries gain a `target_idx: usize` field (Option, skip-empty) recording the manifest's target-list index. Post-mortem walks consult `target_idx` rather than file order. Existing `steps_run_id` linkage is unchanged; agents reading the structured `targets[]` JSON envelope are unaffected (it was always indexed by manifest order).
+- **Status aggregation.** Step `status: failed` if any target fails; `status: ok` only when every target succeeds. Stop-on-failure semantics: when one target fails AND `on_failure: "stop"`, in-flight parallel targets are cancelled (SIGINT forwarded), and the step is marked failed. `on_failure: "continue"` lets every parallel target finish.
+- **Auto-revert composition.** F11 composite-revert ordering walks per-(step, target) records in reverse manifest order — already supported by `target_idx`.
+- Document the contract in `LONG_RUN` (the steps section) and in MANUAL §7.9 with a worked example showing the per-target prefix + the parallel-cap behavior.
+
+**Test:**
+- A 3-step manifest with `parallel: true` on step 2 against 5 targets: step 2's wall-clock is roughly `max(target_durations)`, not `sum`; per-target audit entries all share `steps_run_id` and have distinct `target_idx` values 0..4; the `targets[]` JSON array is in manifest order regardless of target-completion order.
+- `parallel_max: 2` against 5 targets: at most 2 targets run concurrently; subsequent targets queue; total wall-clock is roughly `ceil(5/2) × T`.
+- Output interleaving: 5 parallel targets each printing 100 lines → operator sees 500 lines total, each prefixed with `[<target>]`, lines never split across targets.
+- `on_failure: "stop"` with one target failing mid-step: in-flight targets receive SIGINT and surface a partial output in the audit entry; subsequent steps are not run.
+- `--revert-on-failure` against a failed parallel step walks per-target inverses in reverse manifest order (regression guard for F11 composite-revert behavior).
+- `parallel: true` composes with `--steps --stream` (L12): the live stream shows per-target prefixed lines; the per-step audit entry captures every line.
+
+---
+
+## Not part of the v0.1.3 contract
+*(items that explicitly belong to a later confirmed release, or are permanent design boundaries — not silent deferrals)*
+
+- **TUI write actions.** Read-only in v0.1.3; `e` / `x` / `apply` from inside TUI is **v0.2.0+** (contract freeze).
+- **Alias defaults / fallback values** (`${svc:-pulse}`). Parser stays minimal in v0.1.3; defaults land in **v0.2.0**.
+- **Cross-medium bundles** (Docker + k8s steps in one bundle). **v0.1.4** introduces k8s; cross-medium composition is **v0.2.0+**.
+- **kubectl / k8s anything.** **v0.1.4.** The entire v0.1.4 release is dedicated to introducing the k8s medium, k8s-aware selectors, and the kubectl-equivalent verb surface; v0.1.3 must ship clean and full-fledged before the K8s work begins.
+- **Themes, plugins, custom layouts in TUI.** Permanent design boundary — not on the roadmap.
+
+(F6's compose write verbs — `up` / `down` / `pull` / `build` / `exec` — DID ship in v0.1.3 even though they were originally scoped out; the per-service narrowing of those verbs is L8 above. The previous "CLI surface renames / config schema freeze" entry has been removed: v0.1.5 is not a confirmed milestone, and any actual rename or schema-freeze decision belongs to v0.2.0. The previous entry's "v0.1.5" framing was a placeholder for "we don't want to think about this now", which the no-silent-deferrals policy explicitly forbids.)
 
 ---
 
@@ -891,7 +1031,7 @@ Design points:
 
 ---
 
-## Running total: 20 / 25 — **OPEN, FROZEN. F1–F5 ✅, F7–F18 ✅, L5 ✅, L6 ✅, L7 ✅ landed; F6 / L4 / L2 / L3 / L1 remaining.**
+## Running total: 21 / 31 — **OPEN. F1–F18 ✅, F6 ✅, L4 ✅, L5 ✅, L6 ✅, L7 ✅ landed; L2 / L3 / L1 / L8 / L9 / L10 / L11 / L12 / L13 remaining.** Backlog expanded from 25 → 31 mid-release after the no-silent-deferrals policy surfaced six features that earlier F-item commits had documented as "deferred to v0.1.5" — but v0.1.5 is not a confirmed milestone, and v0.1.4 is K8s-only, so these must land in v0.1.3 to keep the docker/compose/SSH surface complete before the K8s release.
 
 **Why ship the entire backlog, not just F1:** v0.1.4 is now dedicated to Kubernetes. That means the docker / compose / SSH surface — every L-item and every F-item in this backlog — gets no further attention until **v0.1.5 at the earliest**. Slipping any item out of v0.1.3 effectively pushes it past two intervening releases (v0.1.4 k8s + v0.1.5 stabilization) into v0.2.0+ territory. The docker-host install base is the entire current user base of the tool, so leaving their backlog half-shipped while spending a release on k8s would be the wrong call. Ship all 25.
 
