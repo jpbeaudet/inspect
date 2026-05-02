@@ -46,25 +46,51 @@ Two consequences shape every policy below:
 
 ## No silent deferrals
 
-Never stub a function with a "deferred to vX" message without
-explicit approval. If a feature is in the current backlog,
-implement it fully.
+Never stub a function or paper over a feature gap with a "deferred
+to vX" / "out of scope" / "out-of-scope" / "postponed" / "punted"
+message without explicit approval. If a feature is in the current
+backlog (any status row not yet `✅ Done`), implement it fully —
+sequencing it later in the same release is **not** the same as
+deferring it.
+
+Phrases like "out of scope for v0.1.3" are particularly tempting
+escape hatches because they read as scoping decisions rather than
+deferrals. They are deferrals. Treat them the same way.
 
 Run before every commit (alongside the fmt / clippy / test gates):
 
 ```sh
-grep -rE "defer|stub|todo|unimplemented|exit\(2\)" src/
+grep -rEi "defer|stub|todo|unimplemented|exit\(2\)|out of scope|out-of-scope|postponed|punted" src/ docs/ CHANGELOG.md INSPECT_v0.1.3_BACKLOG.md
 ```
 
 Inspect every hit. Legitimate matches (e.g. `std::process::exit(2)`
 on a clap usage-error path, the existing `exit-code 2` documentation
-in `LONG_*` help constants) are fine — but a `// deferred to v0.1.5`
-or an `unimplemented!()` in a backlog-scoped code path is a policy
-violation, not a follow-up.
+in `LONG_*` help constants, "out of scope for v0.1.5" pointing at a
+*future* release that is not the current one, doc-comment `stub`
+referring to the help system's intentional fallback rendering) are
+fine. But a `// deferred to v0.1.5` in a v0.1.3-backlog code path,
+an `unimplemented!()` in an L<n> sub-feature, or a CHANGELOG
+"Out of scope for v0.1.3" line about an item that is in the v0.1.3
+backlog is a policy violation, not a follow-up.
 
-Approved deferrals are tracked here. Adding an entry requires the
-maintainer's explicit "ok defer X" in the conversation; agents do
-not self-authorize.
+**Sequencing inside a release is not deferring.** L2 ships after L4
+in v0.1.3 because L4 is its prerequisite — that is sequencing.
+Writing "OS keychain is out of scope for v0.1.3" while L2 is
+unticked in the backlog is a deferral, and dishonest besides.
+Don't do it. If a sequencing note is genuinely useful for a
+reader, write "L2 lands in a follow-up commit (next in the
+implementation order)" — accurate and not a deferral claim.
+
+Any line that implies a deferral — in code, in CHANGELOG, in
+MANUAL, in the BACKLOG Notes column — must either:
+
+1. point at a future release that is not the current one
+   (`v0.1.5+`, `v0.2.0+`), or
+2. correspond to an entry in the **Authorized deferrals** registry
+   below.
+
+Adding a registry entry requires the maintainer's explicit "ok
+defer X" in the conversation; agents do not self-authorize.
 
 ### Authorized deferrals
 
