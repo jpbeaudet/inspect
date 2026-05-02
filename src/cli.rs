@@ -619,10 +619,15 @@ STREAMING (F16, v0.1.3)
   `streamed: true` (and the usual `failure_class`, `rendered_cmd`,
   `duration_ms`); non-streaming runs omit the `streamed` field.
 
-  Mutex with `--stdin-script` (clap-rejected; the half-duplex case
-  of streaming both directions on the same SSH stdin is deferred
-  to v0.1.5). `--stream --file <script>` is fine — the script body
-  is delivered in one shot, then output streams back.
+  L11 (v0.1.3): `--stream --stdin-script` composes via two-phase
+  dispatch — phase 1 cats the script body into a remote temp file
+  (no PTY), phase 2 runs `bash <tempfile>` with PTY for streaming
+  output and cleans up via `rm -f` after the script exits. The
+  remote temp path is per-(SHA, pid) so concurrent runs never
+  collide. Audit entries for L11 invocations carry
+  `bidirectional: true` so post-mortem queries can identify them.
+  `--stream --file <script>` works the same way (script delivered
+  as a unit; output streams back).
 
   See `inspect logs --follow` for the dedicated log-tailing verb;
   F16 is for non-logs streaming commands.
@@ -677,10 +682,14 @@ MULTI-STEP (F17, v0.1.3)
   Steps with no declared `revert_cmd` are skipped with a
   warning rather than aborting the unwind.
 
-  Mutex with `--file` / `--stdin-script` / `--stream` (clap
-  rejected). Single-target only — fanout selectors exit 2 with a
-  chained hint. YAML input (`--steps-yaml`) and per-step live
-  streaming under `--steps --stream` are deferred to v0.1.5.
+  Mutex with `--file` / `--stdin-script` / `--steps-yaml` (clap
+  rejected; pick one script source). Composes with `--stream`
+  (forces PTY on every per-step dispatch). Single-target only —
+  fanout selectors exit 2 with a chained hint. Per-step live
+  streaming (each step's output flows live as it arrives, not
+  buffered until the step exits) is L12 in this release; until
+  L12 ships, `--steps --stream` forces PTY but renders per-step
+  output between steps.
 
 EXAMPLES
   $ inspect run arte/atlas -- env
@@ -2650,10 +2659,16 @@ pub struct RunArgs {
     /// stdin and ship it as the remote command body via `bash -s`.
     /// Stdin must NOT be a tty; the heredoc form
     /// `inspect run arte --stdin-script <<'BASH' ... BASH` is the
-    /// canonical use. Mutually exclusive with `--no-stdin`,
-    /// `--file`, and `--stream` (streaming + script-on-stdin is a
-    /// half-duplex protocol headache deferred to v0.1.5).
-    #[arg(long, conflicts_with_all = ["no_stdin", "stream"])]
+    /// canonical use. Mutually exclusive with `--no-stdin` and
+    /// `--file`.
+    ///
+    /// L11 (v0.1.3): composes with `--stream`. The combo takes a
+    /// two-phase dispatch path (write the script to a remote temp
+    /// file in one ssh round-trip without a PTY, then run with
+    /// PTY for line-streaming output) so the half-duplex
+    /// PTY ⨯ stdin-bytes conflict never arises. Audit captures
+    /// `bidirectional: true` to identify L11 invocations.
+    #[arg(long, conflicts_with_all = ["no_stdin"])]
     pub stdin_script: bool,
     /// F16 (v0.1.3): line-stream remote stdout/stderr to local
     /// stdout instead of buffering until the remote command exits.

@@ -971,14 +971,50 @@ recoverable from the audit log alone. Non-streaming runs
 `skip_serializing_if = "is_false"`), so audit tooling that filters
 on `streamed` catches only the long-running invocations.
 
-**Composes with `--file` (script mode); mutex with
-`--stdin-script`.** `--stream --file <script>` is fine — the script
-body is delivered in one shot via `bash -s`, then the running
-script's output streams back. `--stream --stdin-script` is rejected
-at the clap level (the half-duplex case of streaming both directions
-on the same SSH stdin is a protocol headache deferred to v0.1.5);
-the operator gets a clean message naming both flags, not a hung
-pipe.
+**Composes with `--file` (F14) and `--stdin-script` (L11, v0.1.3).**
+Both script-mode sources work alongside `--stream`. `--stream
+--file <script>` delivers the script body in one shot via `bash
+-s`, then the running script's output streams back.
+
+L11 (v0.1.3): `--stream --stdin-script` now composes via two-phase
+dispatch — pre-L11 the combo was clap-rejected because feeding
+the script body via SSH stdin and forcing `-tt` PTY for streaming
+output put both directions through the same tty layer (line-
+discipline echo, cooked-mode munging, interactive bash prompts on
+a non-tty stdin). L11 splits the dispatch in two so the
+directions never interleave:
+
+  Phase 1 (write).   ssh + `cat > /tmp/.inspect-l11-<sha>-<pid>.sh
+                     && chmod 700 <…>` with the script body piped
+                     via stdin. No PTY; one ssh round-trip;
+                     `umask 077` ensures the file is operator-only.
+  Phase 2 (run).     ssh -tt + `<interp> <tempfile> -- <args>` with
+                     PTY for line-streaming output. No stdin
+                     payload (already on disk).
+  Phase 3 (cleanup). ssh + `rm -f <tempfile>`. Runs unconditionally
+                     after phase 2 so a non-zero script exit leaves
+                     no orphan; failures here are warnings (the
+                     verb has already produced its output).
+
+The remote temp filename includes the script's SHA-256 prefix +
+the local PID, so concurrent `inspect run` invocations on the
+same script never collide. Container selectors take the same
+shape with `docker exec -i <ctr> sh -c '…'` wrapping each phase.
+
+```sh
+$ cat ./long-script.sh | inspect run arte --stream --stdin-script
+# phase 1: writes /tmp/.inspect-l11-ab1c2d3e-12345.sh
+# phase 2: streams the script's output line-by-line
+# phase 3: cleans up the temp file
+```
+
+The audit entry stamps `bidirectional: true` alongside the
+existing `streamed: true` and `script_sha256` fields so post-
+mortem queries can identify L11 invocations:
+`inspect audit ls --bidirectional`. `--stream --file <script>`
+also takes the L11 path when the file would otherwise need to be
+piped via stdin (see `inspect run --help` for the full
+flag-composition matrix).
 
 **`inspect logs --follow` interop (no overlap).** F16 does **not**
 replace `inspect logs --follow` — the dedicated logs verb keeps its

@@ -229,6 +229,17 @@ pub struct AuditEntry {
     /// in the same audit log without parsing the args text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub streamed: bool,
+    /// L11 (v0.1.3): `true` when this `inspect run` invocation
+    /// composed `--stream` with `--stdin-script` (or `--file`)
+    /// and took the L11 two-phase dispatch path — phase 1 cats
+    /// the script body into a remote temp file (no PTY), phase 2
+    /// runs `bash <tempfile>` with PTY for streaming. The remote
+    /// temp path is per-(SHA, pid) so concurrent runs don't
+    /// collide. `false` (or absent on read) on every other run,
+    /// including non-streaming script invocations and bare
+    /// `--stream` runs without a script source.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bidirectional: bool,
     /// F17 (v0.1.3): UUID-shaped identifier linking a parent
     /// `run --steps` invocation to the per-step audit entries it
     /// produced. Stamped on the parent entry and on every per-step
@@ -420,6 +431,7 @@ impl AuditEntry {
             transfer_bytes: None,
             transfer_sha256: None,
             streamed: false,
+            bidirectional: false,
             steps_run_id: None,
             step_name: None,
             manifest_sha256: None,

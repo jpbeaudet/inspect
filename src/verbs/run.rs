@@ -168,6 +168,18 @@ pub(crate) struct ScriptSource {
 /// in the script and F14 honors it.
 const DEFAULT_SCRIPT_INTERP: &str = "bash";
 
+/// L11 (v0.1.3): build the per-(SHA, pid) remote temp path for the
+/// two-phase script delivery. The pid suffix prevents two
+/// concurrent `inspect run` invocations on the same script from
+/// stomping on each other's temp file (rare but real on shared
+/// developer hosts). The leading `.` keeps it out of plain `ls
+/// /tmp` output.
+fn build_remote_script_temp_path(sha256: &str) -> String {
+    let sha_short: String = sha256.chars().take(8).collect();
+    let pid = std::process::id();
+    format!("/tmp/.inspect-l11-{sha_short}-{pid}.sh")
+}
+
 /// F14 (v0.1.3): parse the first line of a script for `#!` and pick
 /// the interpreter. Recognizes `#!/usr/bin/env <interp>` and
 /// `#!/path/to/<interp>` forms. Falls back to [`DEFAULT_SCRIPT_INTERP`]
@@ -575,6 +587,17 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     };
     let mut truncated_lines = 0usize;
 
+    // L11 (v0.1.3): bidirectional dispatch is `--stream` + a script
+    // source. Pre-L11 this combo was clap-rejected because feeding
+    // the script body via SSH stdin and forcing `-tt` PTY for
+    // streaming put both directions through the same tty layer
+    // (line-discipline echo, cooked-mode munging, interactive bash
+    // prompts on a non-tty stdin). L11 splits the dispatch in two:
+    // phase 1 cats the script body into a remote temp file with no
+    // PTY (buffered), phase 2 runs the temp file with PTY for
+    // line-streaming. The directions never interleave.
+    let bidirectional = args.stream && script.is_some();
+
     for s in &steps {
         if crate::exec::cancel::is_cancelled() {
             break;
@@ -582,6 +605,68 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let svc_label = s.service().map(|x| format!("/{x}")).unwrap_or_default();
         let label = format!("{}{}", s.ns.namespace, svc_label);
         let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
+
+        // L11 (v0.1.3): if bidirectional, do phase 1 (write the
+        // script bytes to a remote temp file) before constructing
+        // the streaming command. The temp file's lifecycle is
+        // bounded by phase 3 (cleanup, after the streaming
+        // dispatch) so a Ctrl-C between phases leaves at most one
+        // orphaned `.inspect-l11-<sha>-<pid>.sh` file per
+        // namespace — bounded, signed (the SHA in the name maps
+        // back to the audit entry), and cheap to manually clean.
+        let bidir_temp_path: Option<String> = if bidirectional {
+            let sc = script
+                .as_ref()
+                .expect("bidirectional implies script.is_some()");
+            let path = build_remote_script_temp_path(&sc.sha256);
+            // Phase 1 command shape differs between host and
+            // container selectors:
+            //   host       : umask 077; cat > <p> && chmod 700 <p>
+            //   container  : docker exec -i <ctr> sh -c 'umask 077; cat > <p> && chmod 700 <p>'
+            // Both pipe the script body via SSH stdin in a single
+            // round-trip (no PTY).
+            let host_cmd = format!("umask 077; cat > {p} && chmod 700 {p}", p = shquote(&path),);
+            let phase1_cmd = match s.container() {
+                Some(container) => format!(
+                    "docker exec -i {} sh -c {}",
+                    shquote(container),
+                    shquote(&host_cmd),
+                ),
+                None => host_cmd,
+            };
+            let phase1_opts =
+                crate::ssh::exec::RunOpts::with_timeout(60).with_stdin(sc.body.clone());
+            let phase1_out =
+                match runner
+                    .as_ref()
+                    .run(&s.ns.namespace, &s.ns.target, &phase1_cmd, phase1_opts)
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        crate::error::emit(format!(
+                            "L11 phase 1 (script write) on {ns} failed: {e}. \
+                         hint: check /tmp writability and disk space; \
+                         `inspect put` (F15) writes scripts as a separate verb.",
+                            ns = s.ns.namespace,
+                        ));
+                        return Ok(ExitKind::Error);
+                    }
+                };
+            if !phase1_out.ok() {
+                crate::error::emit(format!(
+                    "L11 phase 1 (script write) on {ns} exited {ec}: {err}. \
+                     hint: check /tmp writability and disk space; \
+                     `inspect put` (F15) writes scripts as a separate verb.",
+                    ns = s.ns.namespace,
+                    ec = phase1_out.exit_code,
+                    err = phase1_out.stderr.trim(),
+                ));
+                return Ok(ExitKind::Error);
+            }
+            Some(path)
+        } else {
+            None
+        };
 
         // Wrap in `docker exec` when the selector points at a container.
         // Apply server-side line filter (--filter-line-pattern) by piping
@@ -591,7 +676,38 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // `<interp> -s -- <args>` (or `<interp> - <args>` for non-bash
         // interpreters). The container variant adds `-i` so docker
         // exec keeps stdin attached for the script body to flow in.
-        let inner = if let Some(sc) = &script {
+        //
+        // L11 (v0.1.3): when bidirectional, the remote command instead
+        // runs the temp file written in phase 1. No stdin payload is
+        // forwarded in phase 2 — the body is already on disk on the
+        // remote.
+        let inner = if let Some(temp_path) = bidir_temp_path.as_deref() {
+            let interp = &script.as_ref().unwrap().interp;
+            let positional: Vec<String> = args.cmd.iter().map(|a| shquote(a)).collect();
+            let body = if positional.is_empty() {
+                format!("{interp} {temp}", temp = shquote(temp_path))
+            } else {
+                format!(
+                    "{interp} {temp} -- {}",
+                    positional.join(" "),
+                    temp = shquote(temp_path),
+                )
+            };
+            // Phase 3 is a separate dispatch after the streaming
+            // run returns; we deliberately do NOT chain `; rm -f`
+            // into the streaming command because (a) under PTY a
+            // mid-stream Ctrl-C may bypass the cleanup and (b) the
+            // cleanup's own output would tail-end the operator's
+            // streaming view. Cleanup runs unconditionally below.
+            match s.container() {
+                Some(container) => format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&body)
+                ),
+                None => body,
+            }
+        } else if let Some(sc) = &script {
             let invocation = render_script_invocation(&sc.interp, &args.cmd);
             match s.container() {
                 Some(container) => {
@@ -660,8 +776,16 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 policy,
                 || {
                     let mut opts_call = RunOpts::with_timeout(timeout_secs);
-                    if let Some(bytes) = stdin_payload_ref {
-                        opts_call = opts_call.with_stdin(bytes.clone());
+                    // L11 (v0.1.3): in bidirectional mode the script
+                    // body was already shipped in phase 1; phase 2
+                    // must NOT also pipe it via stdin (would re-feed
+                    // it as input to the running script and corrupt
+                    // semantics). Only forward stdin in non-
+                    // bidirectional script mode (existing F14 path).
+                    if !bidirectional {
+                        if let Some(bytes) = stdin_payload_ref {
+                            opts_call = opts_call.with_stdin(bytes.clone());
+                        }
                     }
                     // F16 (v0.1.3): force PTY allocation for --stream
                     // so the remote process line-buffers and SIGINT
@@ -786,6 +910,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         e.rendered_cmd = Some(cmd.clone());
                         e.secrets_masked_kinds = collect_kinds(&redactor);
                         e.streamed = args.stream;
+                        e.bidirectional = bidirectional;
                         let class = if code == 0 { "ok" } else { "command_failed" };
                         stamp_audit(&mut e, Some(class));
                         let _ = store.append(&e);
@@ -819,6 +944,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     entry.rendered_cmd = Some(cmd.clone());
                     entry.secrets_masked_kinds = collect_kinds(&redactor);
                     entry.streamed = args.stream;
+                    entry.bidirectional = bidirectional;
                     stamp_audit(&mut entry, Some(class.as_str()));
                     let _ = store.append(&entry);
                 }
@@ -845,8 +971,52 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         entry.rendered_cmd = Some(cmd.clone());
                         entry.secrets_masked_kinds = collect_kinds(&redactor);
                         entry.streamed = args.stream;
+                        entry.bidirectional = bidirectional;
                         let _ = store.append(&entry);
                     }
+                }
+            }
+        }
+
+        // L11 (v0.1.3): phase 3 — clean up the remote temp file
+        // unconditionally after the streaming dispatch returns.
+        // Failures here are warnings, not errors — the operator's
+        // verb has already run; an orphaned `.inspect-l11-*.sh`
+        // file is a small, signed (the SHA in the name maps back
+        // to the audit entry) bounded leak.
+        if let Some(temp_path) = bidir_temp_path.as_deref() {
+            let host_cmd = format!("rm -f {p}", p = shquote(temp_path));
+            let phase3_cmd = match s.container() {
+                Some(container) => format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&host_cmd),
+                ),
+                None => host_cmd,
+            };
+            let phase3_opts = crate::ssh::exec::RunOpts::with_timeout(15);
+            match runner
+                .as_ref()
+                .run(&s.ns.namespace, &s.ns.target, &phase3_cmd, phase3_opts)
+            {
+                Ok(o) if o.ok() => {}
+                Ok(o) => {
+                    crate::tee_eprintln!(
+                        "warning: L11 phase 3 (script cleanup) on {ns} exited {ec}: \
+                         {temp} may be orphaned. {err}",
+                        ns = s.ns.namespace,
+                        ec = o.exit_code,
+                        temp = temp_path,
+                        err = o.stderr.trim(),
+                    );
+                }
+                Err(e) => {
+                    crate::tee_eprintln!(
+                        "warning: L11 phase 3 (script cleanup) on {ns} failed: {e}; \
+                         {temp} may be orphaned",
+                        ns = s.ns.namespace,
+                        temp = temp_path,
+                    );
                 }
             }
         }

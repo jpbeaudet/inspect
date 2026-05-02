@@ -14,6 +14,88 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L11 — Bidirectional `--stream` + `--stdin-script` composition via
+  two-phase dispatch.** F14 (`--stdin-script`) and F16 (`--stream`)
+  were clap-mutually-exclusive in v0.1.3 because feeding the script
+  body via SSH stdin while forcing `-tt` PTY for streaming output
+  put both directions through the same tty layer — line-discipline
+  echo, cooked-mode munging, interactive bash prompts on a non-tty
+  stdin. The clap rejection produced a clean error but blocked the
+  migration-operator workflow ("stream a 200-line setup script in
+  and tail its output live"); the workaround was `--file <path>
+  --stream`, which loses the heredoc / pipeline ergonomic. L11 ships
+  the composition without a custom framing protocol.
+  - **Two-phase dispatch.** When `--stream` is set with a script
+    source (`--stdin-script` or `--file`), the verb takes a new
+    path that splits the directions in time:
+    - Phase 1 (`cat > /tmp/.inspect-l11-<sha>-<pid>.sh && chmod 700
+      <…>`): writes the script body to a remote temp file via SSH
+      stdin in a single round-trip with NO PTY. `umask 077`
+      ensures the file is operator-only. Errors here surface as
+      "L11 phase 1 failed" with chained hints (check /tmp
+      writability + disk space + `inspect put` as alternative).
+    - Phase 2 (`<interp> <tempfile> -- <args>`): runs the temp
+      script with `-tt` PTY for line-streaming output. No stdin
+      payload (already on disk).
+    - Phase 3 (`rm -f <tempfile>`): runs unconditionally after
+      phase 2 so a non-zero script exit leaves no orphan. Failures
+      here are warnings (the verb has already produced its
+      output); `tee_eprintln!` so transcripts capture the warning.
+  - **Per-(SHA, pid) temp filename.** `/tmp/.inspect-l11-<8 chars
+    of SHA-256>-<local PID>.sh`. The SHA prefix maps the file back
+    to the audit entry; the PID prevents concurrent
+    `inspect run --stream --stdin-script` invocations on the same
+    script from stomping on each other's temp.
+  - **Container selectors take the same shape**, wrapping each
+    phase in `docker exec -i <ctr> sh -c '…'` (phase 1 + 3) /
+    `docker exec <ctr> sh -c '…'` (phase 2). Three round-trips
+    per `--stream --stdin-script` invocation against a container
+    selector — negligible for the migration-operator workflow
+    (one invocation, many minutes of runtime).
+  - **`bidirectional: true` audit field.** New `Option<bool>`
+    field on `AuditEntry` (`#[serde(default,
+    skip_serializing_if = "is_false")]` so pre-L11 entries
+    deserialize unchanged). Stamped on every L11 invocation;
+    pre-L11 paths leave it false. Lets a post-mortem query
+    (`inspect audit ls --bidirectional` / `inspect audit grep
+    bidirectional=true`) pull the L11 invocations apart from
+    bare `--stream` runs.
+  - **`--file <path> --stream` also routes through L11** for
+    consistency. The old direct path under `--stream --file`
+    technically piped the script body via the same PTY tty layer
+    that L11 was designed to avoid; the docs claimed it worked
+    but the underlying half-duplex conflict was the same. Two
+    extra round-trips per invocation; one-time cost for a
+    multi-minute script. Strictly more correct than the pre-L11
+    path.
+  - **No new framing protocol.** The L11 spec proposed a custom
+    1-byte-tag + 4-byte-length-prefix multiplexing protocol over
+    a single SSH channel. Two-phase dispatch achieves the same
+    operator-visible contract with no remote helper script, no
+    client-side framing layer, no fallback negotiation. The
+    spec's "Likely shape" was a hypothesis; this is a simpler
+    implementation that meets every acceptance test in the
+    spec's contract list.
+  - **Help surface.** `LONG_RUN`'s `STREAMING (F16, v0.1.3)`
+    section gains an "L11 (v0.1.3)" paragraph documenting the
+    two-phase dispatch + per-(SHA, pid) temp filename. The
+    `--stdin-script` flag docstring drops the "deferred to
+    v0.1.5" wording and replaces it with the L11 composition
+    note. `MANUAL.md` §7.8 (streaming) gains a sub-section
+    walking phase 1 / phase 2 / phase 3 with an end-to-end
+    example.
+  - **Tests.** 5 acceptance tests in
+    `tests/phase_f_v013.rs::l11_*`: clap accepts `--stream
+    --stdin-script` together (no longer rejected as mutex); the
+    rendered phase 1 command shape matches `cat > /tmp/.inspect-
+    l11-<sha>-<pid>.sh && chmod 700`; phase 2 shape invokes the
+    temp file; phase 3 cleanup runs after phase 2; `bidirectional`
+    audit field set when both flags compose. Full suite green: 28
+    suites, 0 failed. Real bidirectional dispatch against a live
+    host is exercised by the field-validation gate (the same
+    release-time smoke that L7 PEM streaming and L4 password
+    prompts rely on).
+
 - **L10 — Port-level entries in `DriftDiff` (`port_changes` array
   with `Added` / `Removed` / `Bind` / `Proto` kinds).** The B4
   drift differ surfaced container-level changes only — an operator
