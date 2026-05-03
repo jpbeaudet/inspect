@@ -1091,11 +1091,41 @@ Per-step fields:
   step's `cmd` is a free-form bash body with no general inverse)
   and `--revert-on-failure` skips it with a warning.
 
-**Per-step output (human format).** Each step emits a
-`STEP <name> ▶` opening marker, then its captured output
+**Per-step output (human format).** Without `--stream`, each step
+emits a `STEP <name> ▶` opening marker, then its captured output
 line-by-line with the `<ns> | …` prefix, then a `STEP <name> ◀
-exit=N duration=Ms` closing marker. After every step has run (or
-a stop-on-failure step has aborted), a STEPS summary table prints:
+exit=N duration=Ms` closing marker.
+
+L12 (v0.1.3): under `--stream`, the boundaries switch to the F18
+transcript fence format so the live tail of a multi-step
+migration matches the per-day transcript fence shape exactly:
+
+```
+── step 1 of 3: snapshot ──
+arte/atlas | tarring atlas_milvus...
+arte/atlas | done.
+── step 1 ◀ exit=0 duration=12300ms audit_id=01HXR9Q5YQK2 ──
+── step 2 of 3: stop-app ──
+arte/atlas | Stopping atlas-app ... done
+── step 2 ◀ exit=0 duration=1100ms audit_id=01HXR9Q66... ──
+── step 3 of 3: migrate ──
+…
+```
+
+The audit_id on each step closer cross-links back to that step's
+`run.step` audit entry; copy-paste it into `inspect audit show`
+without further translation.
+
+L12 also wires the L7 redaction pipeline (PEM → header → URL →
+env) into the per-step live tee, so a step that emits a
+`Bearer <token>` header, a `postgres://user:pass@host` URL, or a
+PEM private-key block has the secret masked BEFORE it reaches
+the operator's terminal AND before it lands in the captured
+`targets[].stdout` audit field. `--show-secrets` bypasses every
+masker (same contract as `inspect run`).
+
+After every step has run (or a stop-on-failure step has aborted),
+a STEPS summary table prints:
 
 ```
 SUMMARY: STEPS: 5 total, 4 ok, 1 failed, 0 skipped

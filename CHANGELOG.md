@@ -14,6 +14,83 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L12 — Per-step live streaming under `--steps --stream` with L7
+  redaction + F18-style step boundaries.** F17's per-step dispatch
+  already emits lines via `tee_println!` as `run_streaming_capturing`
+  fires its per-line callback, so the spec's headline concern
+  ("buffered until step exits") was a misread of the F17 implementation.
+  The actual gaps L12 closes:
+  - **F17's live tee bypassed L7 redaction.** A step that emitted a
+    `Bearer <token>` HTTP header, a `postgres://user:pass@host` URL,
+    or a PEM private-key block leaked the secret BOTH to the
+    operator's terminal AND into the captured `targets[].stdout`
+    audit field. `inspect run` (without `--steps`) has applied the
+    L7 four-masker pipeline (PEM → header → URL → env) since L7
+    shipped; the F17 multi-step path silently bypassed it.
+  - **F17 boundaries (`STEP <name> ▶/◀`) didn't match the F18
+    transcript fence format**, so an operator skimming the live
+    tail of a multi-step migration saw a different shape than what
+    `inspect history show` would render for the same blocks.
+  - **Per-step audit entries had no `secrets_masked_kinds` field**,
+    so `inspect audit grep secrets_masked` wouldn't surface
+    multi-step invocations even when secrets had been redacted.
+
+  L12 fixes all three.
+  - **L7 redaction in the per-step closure.** New per-(step, target)
+    `OutputRedactor` (one per pair so PEM-block gate state can't leak
+    across steps or targets). Every line goes through `mask_line`
+    BEFORE both the live `tee_println!` and the captured
+    `step_stdout` push. Lines inside a PEM block return `None` and
+    are suppressed (single `[REDACTED PEM KEY]` marker on the BEGIN
+    line, same contract as bare `inspect run`). `--show-secrets`
+    bypasses everything (same flag, same path).
+  - **F18-style step boundaries under `--stream`.** The opener is
+    `── step N of M: <name> ──`; the closer is `── step N ◀
+    exit=… duration=…ms audit_id=… ──`. The `audit_id` on the
+    closer cross-links back to that step's `run.step` audit entry,
+    so an operator copy-pasting a fence pair from the live tail
+    into `inspect audit show <audit_id>` works without further
+    translation. Multi-target form keeps the per-target sub-line
+    inside the same step block, with the audit_id on each
+    sub-line. Without `--stream`, the legacy `STEP <name> ▶/◀`
+    form remains (non-streaming runs are typically short and
+    don't benefit from the F18 fence's extra horizontal real
+    estate).
+  - **`secrets_masked_kinds` on per-step audit entries.** When the
+    redactor for a (step, target) pair fired, the per-step
+    `run.step` audit entry now carries the list of kinds that
+    fired (canonical order: `pem`, `header`, `url`, `env`).
+    `inspect audit grep` queries that already match against bare
+    `inspect run` entries now match per-step entries too.
+  - **Capture cap unchanged.** The 10 MiB per-(step, target) cap
+    on `step_stdout` stays in effect — live output is uncapped
+    (the operator's terminal is the bound), but the captured copy
+    that lands in the `targets[].stdout` JSON field is still
+    capped with the existing `[OUTPUT CAPTURE TRUNCATED AT 10
+    MIB]` marker on overflow. Capture happens AFTER masking so
+    the captured copy contains masked content only.
+  - **Composes with L11.** `--steps --stream --stdin-script` works
+    end-to-end: the manifest is read normally, `cmd_file` script
+    bodies still ride F14's `bash -s` stdin path (no L11 two-phase
+    needed because manifest steps don't take stdin from the
+    operator's tty). The bare `--stdin-script` flag (the manifest
+    body coming from stdin) is mutex with `--steps` per F17, so
+    the L11 path doesn't apply to the steps mode.
+  - **Help surface.** `LONG_RUN`'s MULTI-STEP section gains an
+    "L12 (v0.1.3)" paragraph documenting the F18 fence format,
+    the L7 redaction pipeline, and the audit_id cross-link
+    contract. `MANUAL.md` §7.9 multi-step section gains a worked
+    example showing the F18-style fence with the audit_id on each
+    closer.
+  - **Tests.** 5 acceptance tests in `tests/phase_f_v013.rs::l12_*`:
+    `--steps --stream` renders F18-style step boundaries; the
+    legacy `STEP <name> ▶/◀` form still appears without
+    `--stream`; PEM block in step output is masked to a single
+    marker (live-tee redaction working); URL credentials in step
+    output are masked; per-step audit entry carries
+    `secrets_masked_kinds` when a step emitted a PEM block.
+    Full suite green: 28 suites, 0 failed.
+
 - **L11 — Bidirectional `--stream` + `--stdin-script` composition via
   two-phase dispatch.** F14 (`--stdin-script`) and F16 (`--stream`)
   were clap-mutually-exclusive in v0.1.3 because feeding the script

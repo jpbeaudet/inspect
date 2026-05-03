@@ -685,11 +685,19 @@ MULTI-STEP (F17, v0.1.3)
   Mutex with `--file` / `--stdin-script` / `--steps-yaml` (clap
   rejected; pick one script source). Composes with `--stream`
   (forces PTY on every per-step dispatch). Single-target only —
-  fanout selectors exit 2 with a chained hint. Per-step live
-  streaming (each step's output flows live as it arrives, not
-  buffered until the step exits) is L12 in this release; until
-  L12 ships, `--steps --stream` forces PTY but renders per-step
-  output between steps.
+  fanout selectors exit 2 with a chained hint.
+
+  L12 (v0.1.3): under `--steps --stream`, per-step output flows
+  live as it arrives (no buffering between step boundaries) and
+  is masked through the L7 redaction pipeline (PEM → header →
+  URL → env) before reaching the operator's terminal AND the
+  captured `targets[].stdout` audit field. Step boundaries are
+  rendered in the F18 transcript fence format (`── step N of M:
+  <name> ──` ... `── step N ◀ exit=… duration=…ms audit_id=… ──`)
+  so a copy-paste from the live tail into `inspect audit show
+  <audit_id>` works without further translation. The 10 MiB
+  per-(step, target) capture cap stays in effect on the audit
+  side; live output is uncapped.
 
 EXAMPLES
   $ inspect run arte/atlas -- env

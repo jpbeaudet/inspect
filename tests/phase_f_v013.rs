@@ -8543,3 +8543,218 @@ fn l11_help_run_documents_bidirectional_composition() {
         "run --help must not advertise a v0.1.5 deferral: {stdout}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// L12 — Per-step live streaming under `--steps --stream`.
+//
+// F17's headline "buffered until step exits" was a misread of the
+// implementation — `tee_println!` already fires per-line. L12 closes
+// three actual gaps: (1) F17's live tee + capture bypassed L7
+// redaction (secrets leaked to terminal AND captured `targets[].stdout`);
+// (2) F17's `STEP <name> ▶/◀` boundaries didn't match F18 transcript
+// fence shape — under `--stream` the boundaries become
+// `── step N of M: <name> ──` / `── step N ◀ exit=… duration=…ms
+// audit_id=… ──`; (3) per-step audit entries gain
+// `secrets_masked_kinds` so `inspect audit grep` catches multi-step
+// invocations.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn l12_stream_renders_f18_step_boundaries() {
+    // With --stream, step opener becomes `── step N of M: <name> ──`
+    // and closer becomes `── step N ◀ exit=… duration=…ms audit_id=…
+    // ──`. Without --stream, the legacy form remains.
+    let mock = json!([
+        { "match": "echo a", "stdout": "a-output\n", "exit": 0 },
+        { "match": "echo b", "stdout": "b-output\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "first",  "cmd": "echo a"},
+                {"name": "second", "cmd": "echo b"}
+            ]
+        }),
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--stream",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("── step 1 of 2: first ──"),
+        "expected F18-style step opener: {stdout}"
+    );
+    assert!(
+        stdout.contains("── step 2 of 2: second ──"),
+        "expected F18-style step opener for step 2: {stdout}"
+    );
+    assert!(
+        stdout.contains("── step 1 ◀ exit=0 duration="),
+        "expected F18-style step closer with exit + duration: {stdout}"
+    );
+    assert!(
+        stdout.contains("audit_id=") && stdout.contains("──"),
+        "step closer must include audit_id cross-link: {stdout}"
+    );
+    // Legacy STEP markers must NOT appear under --stream.
+    assert!(
+        !stdout.contains("STEP first ▶") && !stdout.contains("STEP second ▶"),
+        "legacy STEP markers must not coexist with F18 fences: {stdout}"
+    );
+}
+
+#[test]
+fn l12_no_stream_preserves_legacy_step_markers() {
+    // Without --stream, the legacy `STEP <name> ▶/◀` form stays
+    // (the F18 fence's extra horizontal real estate isn't worth
+    // it on short non-streaming runs).
+    let mock = json!([
+        { "match": "echo a", "stdout": "a-output\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({"steps": [{"name": "only", "cmd": "echo a"}]}),
+    );
+    let assert = sb
+        .cmd()
+        .args(["run", "arte", "--steps", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("STEP only ▶"),
+        "legacy STEP opener must remain without --stream: {stdout}"
+    );
+    assert!(
+        !stdout.contains("── step 1 of 1"),
+        "F18 fence must NOT appear without --stream: {stdout}"
+    );
+}
+
+#[test]
+fn l12_per_step_pem_block_is_redacted_in_live_tee() {
+    // A step that emits a PEM private-key block must have it
+    // collapsed to a single `[REDACTED PEM KEY]` marker in the
+    // live-tee output AND in the captured stdout. Pre-L12, F17
+    // bypassed L7 entirely.
+    let pem_body = "before-marker\n\
+                    -----BEGIN RSA PRIVATE KEY-----\n\
+                    MIIEowIBAAKCAQEAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\
+                    yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n\
+                    -----END RSA PRIVATE KEY-----\n\
+                    after-marker\n";
+    let mock = json!([
+        { "match": "cat /etc/key.pem", "stdout": pem_body, "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({"steps": [{"name": "leak", "cmd": "cat /etc/key.pem"}]}),
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--stream",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[REDACTED PEM KEY]"),
+        "PEM block must collapse to a single marker: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MIIEowIBAAKCAQEA"),
+        "PEM body bytes must NOT leak through the live tee: {stdout}"
+    );
+    assert!(
+        !stdout.contains("BEGIN RSA"),
+        "PEM BEGIN line must NOT leak: {stdout}"
+    );
+    // Surrounding context lines pass through unchanged.
+    assert!(
+        stdout.contains("before-marker") && stdout.contains("after-marker"),
+        "non-secret context lines must pass through: {stdout}"
+    );
+}
+
+#[test]
+fn l12_per_step_url_credentials_are_redacted_in_live_tee() {
+    let mock = json!([
+        {
+            "match": "echo url",
+            "stdout": "DB_URL=postgres://admin:hunter2@db.internal:5432/atlas\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({"steps": [{"name": "url", "cmd": "echo url"}]}),
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--stream",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("hunter2"),
+        "URL password must NOT leak: {stdout}"
+    );
+    // The env-var key=value masker is the L7 chain's last step;
+    // it catches `DB_URL=...` even after the URL masker has
+    // already stripped the password.
+    assert!(
+        stdout.contains("admin") || stdout.contains("DB_URL"),
+        "expected the row to still appear (just redacted): {stdout}"
+    );
+}
+
+#[test]
+fn l12_help_run_documents_l12_fence_and_redaction() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["run", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("L12 (v0.1.3)") || stdout.contains("F18 transcript fence"),
+        "run --help must document the L12 contract: {stdout}"
+    );
+    assert!(
+        stdout.contains("L7 redaction") || stdout.contains("PEM"),
+        "run --help must document the L12 redaction wiring: {stdout}"
+    );
+}

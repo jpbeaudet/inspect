@@ -43,10 +43,8 @@
 //! overran its `timeout_s`. `on_failure: "stop"` applies globally — any
 //! target's failure aborts the next manifest step on every target. Each
 //! (step, target) pair writes its own `run.step` audit entry, all
-//! sharing the parent's `steps_run_id`. Multi-target is sequential
-//! within each step; parallel fan-out is intentionally not supported in
-//! v0.1.3 (output interleaving + audit-link-ordering races would need a
-//! separate design pass).
+//! sharing the parent's `steps_run_id`. Parallel fan-out within a
+//! single step is L13 in this release.
 
 use std::time::Instant;
 
@@ -383,8 +381,15 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     let mut results: Vec<StepResult> = Vec::with_capacity(manifest.steps.len());
     let mut composite_payload_items: Vec<serde_json::Value> = Vec::new();
     let mut stopped_at: Option<String> = None;
+    // L12 (v0.1.3): pre-compute total step count for the F18-style
+    // step-boundary headers (`── step 3 of 5: <name> ──`). The
+    // dispatch path can still abort early via stop-on-failure, but
+    // the headers always render against the manifest's full size so
+    // an operator skimming the live tail can tell at a glance how
+    // far into the manifest they are.
+    let manifest_step_count = manifest.steps.len();
 
-    for spec in manifest.steps.iter() {
+    for (step_idx, spec) in manifest.steps.iter().enumerate() {
         // Pipeline already aborted by a stop-on-failure step: every
         // remaining step is marked skipped (per target) without
         // dispatching.
@@ -452,11 +457,30 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
 
         let timeout_secs = spec.timeout_s.unwrap_or(DEFAULT_STEP_TIMEOUT_SECS);
 
-        // Print the STEP opener once per step. With multi-target,
-        // include the target count so the operator knows to expect
-        // N sub-blocks.
+        // L12 (v0.1.3): print the step-boundary opener in the F18
+        // transcript header format (`── step N of M: <name> ──`)
+        // when streaming, so an operator skimming the live tail of
+        // a multi-step migration sees the same fence shape they'd
+        // see when extracting blocks from the per-day transcript
+        // file. Without `--stream`, the legacy `STEP <name> ▶` form
+        // stays — non-streaming runs are typically short and the
+        // F18 fence's extra horizontal real estate isn't worth it.
         if !json {
-            if target_count == 1 {
+            let step_n = step_idx + 1;
+            if args.stream {
+                if target_count == 1 {
+                    crate::tee_println!(
+                        "── step {step_n} of {manifest_step_count}: {} ──",
+                        spec.name
+                    );
+                } else {
+                    crate::tee_println!(
+                        "── step {step_n} of {manifest_step_count}: {} (across {} target(s)) ──",
+                        spec.name,
+                        target_count
+                    );
+                }
+            } else if target_count == 1 {
                 crate::tee_println!("STEP {} ▶", spec.name);
             } else {
                 crate::tee_println!("STEP {} ▶ (across {} target(s))", spec.name, target_count);
@@ -502,6 +526,21 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             let mut output_truncated = false;
             let started = Instant::now();
 
+            // L12 (v0.1.3): per-(step, target) L7 redactor. Pre-L12,
+            // the F17 per-line callback wrote streamed lines and
+            // captured them into `step_stdout` with NO redaction —
+            // a step that emitted a Bearer token, PEM block, or
+            // `postgres://user:pass@host` URL would leak the secret
+            // BOTH to the operator's terminal AND into the
+            // captured `targets[].stdout` audit field. L12 wires
+            // the same masker pipeline `inspect run` uses (PEM →
+            // header → URL → env) so streamed output is masked
+            // identically to a bare `inspect run`. `--show-secrets`
+            // bypasses everything as it does for `inspect run`.
+            // One redactor per (step, target) so PEM-block gate
+            // state can't leak across steps or across targets.
+            let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
+
             // F13 (v0.1.3): wrap the dispatch in dispatch_with_reauth
             // so a stale-socket failure mid-step triggers transparent
             // reauth + retry. F16 (v0.1.3): forward args.stream as
@@ -536,26 +575,42 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                         cmd_ref,
                         opts,
                         &mut |line| {
+                            // L12 (v0.1.3): mask each line through the
+                            // L7 four-masker pipeline (PEM → header →
+                            // URL → env) BEFORE both the live tee and
+                            // the captured copy. Lines inside a PEM
+                            // private-key block return `None` and are
+                            // suppressed entirely (same contract as
+                            // `inspect run`'s streamed output). The
+                            // single `[REDACTED PEM KEY]` marker
+                            // emitted by the gate is the only output
+                            // for the block; that marker is what the
+                            // operator sees AND what gets captured
+                            // into the audit's `targets[].stdout`.
+                            let masked = match redactor.mask_line(line) {
+                                Some(m) => m,
+                                None => return,
+                            };
                             // Live print every line (uncapped).
                             if !json {
-                                crate::tee_println!("{label_for_step} | {line}");
+                                crate::tee_println!("{label_for_step} | {masked}");
                             } else {
                                 JsonOut::write(
                                     &Envelope::new(&label_for_step, "run", "step")
                                         .put("steps_run_id", steps_run_id.as_str())
                                         .put("step_name", spec.name.as_str())
                                         .put("target", label_for_step.as_str())
-                                        .put("line", line),
+                                        .put("line", masked.as_ref()),
                                 );
                             }
                             // Cap the captured copy so a step that
                             // emits gigabytes doesn't OOM the local
                             // process.
-                            let line_with_nl_bytes = line.len() + 1;
+                            let line_with_nl_bytes = masked.len() + 1;
                             if !output_truncated
                                 && step_stdout.len() + line_with_nl_bytes <= MAX_STEP_CAPTURE_BYTES
                             {
-                                step_stdout.push_str(line);
+                                step_stdout.push_str(masked.as_ref());
                                 step_stdout.push('\n');
                             } else if !output_truncated {
                                 output_truncated = true;
@@ -647,6 +702,20 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 if args.stream {
                     e.streamed = true;
                 }
+                // L12 (v0.1.3): record which L7 maskers fired
+                // during this (step, target). Mirrors the bare
+                // `inspect run` audit-shape so a post-mortem
+                // query like `inspect audit grep secrets_masked`
+                // catches per-step entries too.
+                if redactor.was_active() {
+                    e.secrets_masked_kinds = Some(
+                        redactor
+                            .active_kinds()
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                    );
+                }
                 e.revert = Some(match &spec.revert_cmd {
                     Some(cmd) if !cmd.trim().is_empty() => Revert::command_pair(
                         cmd.clone(),
@@ -697,45 +766,98 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             StepStatus::Ok
         };
 
-        // STEP closer: per-target sub-line for each, plus an
-        // aggregate line when N>1.
+        // L12 (v0.1.3): step-closer in the F18 transcript fence
+        // format when streaming (`── step N ◀ exit=… duration=…ms
+        // audit_id=… ──`), so the live tail's per-step boundaries
+        // match the per-day transcript fence shape exactly. The
+        // closer carries the audit_id so an operator copy-pasting
+        // a fence pair from the live tail into `inspect audit
+        // show <audit_id>` works without further translation.
+        let step_n = step_idx + 1;
         if !json {
             for tr in &per_target_results {
                 if target_count == 1 {
-                    crate::tee_println!(
-                        "STEP {} ◀ exit={} duration={}ms",
-                        spec.name,
-                        tr.exit,
-                        tr.duration_ms
-                    );
+                    if args.stream {
+                        let aid = tr
+                            .audit_id
+                            .as_deref()
+                            .map(|s| format!(" audit_id={s}"))
+                            .unwrap_or_default();
+                        crate::tee_println!(
+                            "── step {step_n} ◀ exit={} duration={}ms{aid} ──",
+                            tr.exit,
+                            tr.duration_ms,
+                        );
+                    } else {
+                        crate::tee_println!(
+                            "STEP {} ◀ exit={} duration={}ms",
+                            spec.name,
+                            tr.exit,
+                            tr.duration_ms
+                        );
+                    }
                 } else {
-                    crate::tee_println!(
-                        "  ◀ {}: exit={} duration={}ms{}",
-                        tr.label,
-                        tr.exit,
-                        tr.duration_ms,
-                        if tr.retried {
-                            " (retried after reauth)"
-                        } else {
-                            ""
-                        }
-                    );
+                    // Multi-target: per-target sub-line under one
+                    // shared step block. Same fence shape under
+                    // --stream; legacy `◀` form otherwise.
+                    if args.stream {
+                        let aid = tr
+                            .audit_id
+                            .as_deref()
+                            .map(|s| format!(" audit_id={s}"))
+                            .unwrap_or_default();
+                        crate::tee_println!(
+                            "  ◀ {}: exit={} duration={}ms{aid}{}",
+                            tr.label,
+                            tr.exit,
+                            tr.duration_ms,
+                            if tr.retried {
+                                " (retried after reauth)"
+                            } else {
+                                ""
+                            }
+                        );
+                    } else {
+                        crate::tee_println!(
+                            "  ◀ {}: exit={} duration={}ms{}",
+                            tr.label,
+                            tr.exit,
+                            tr.duration_ms,
+                            if tr.retried {
+                                " (retried after reauth)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
                 }
                 if tr.output_truncated {
                     crate::tee_println!("  ⚠ {}: stdout capture truncated at 10 MiB", tr.label);
                 }
             }
             if target_count > 1 {
-                crate::tee_println!(
-                    "STEP {} ◀ status={} ({}/{} targets ok)",
-                    spec.name,
-                    aggregate.label(),
-                    per_target_results
-                        .iter()
-                        .filter(|t| matches!(t.status, StepStatus::Ok))
-                        .count(),
-                    target_count
-                );
+                if args.stream {
+                    crate::tee_println!(
+                        "── step {step_n} ◀ status={} ({}/{} targets ok) ──",
+                        aggregate.label(),
+                        per_target_results
+                            .iter()
+                            .filter(|t| matches!(t.status, StepStatus::Ok))
+                            .count(),
+                        target_count
+                    );
+                } else {
+                    crate::tee_println!(
+                        "STEP {} ◀ status={} ({}/{} targets ok)",
+                        spec.name,
+                        aggregate.label(),
+                        per_target_results
+                            .iter()
+                            .filter(|t| matches!(t.status, StepStatus::Ok))
+                            .count(),
+                        target_count
+                    );
+                }
             }
         } else {
             JsonOut::write(
