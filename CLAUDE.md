@@ -94,7 +94,21 @@ defer X" in the conversation; agents do not self-authorize.
 
 ### Authorized deferrals
 
-*(none yet for v0.1.3)*
+- **L1 — TUI mode (`inspect tui`).** Authorized deferral to v0.5*
+  (or whenever a strong human-operator use case surfaces). The
+  inspect user base today is LLM-driven; a read-only `ratatui`
+  dashboard is keyboard-driven interactive by design and offers
+  no value to agentic callers — every L1 capability (status pane,
+  log follow, drill-into-why, service detail card) is already
+  exposed as a composable JSON-emitting verb that's strictly
+  better for an agent than scraping screen output. The few
+  human operators who do use inspect work via JSON envelopes +
+  shell scrollback rather than a dashboard. Authorized on
+  2026-05-03 in conversation; re-open if a real human-operator
+  complaint about interactive triage ergonomics surfaces. The
+  L1 row in `INSPECT_v0.1.3_BACKLOG.md` is preserved for
+  traceability with status "🟦 Deferred (authorized)" rather
+  than being deleted.
 
 ---
 

@@ -5,12 +5,17 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.1.3 (in progress)
+## [Unreleased] — v0.1.3 (release prep)
 
-Closes the v0.1.3 patch backlog (`INSPECT_v0.1.3_BACKLOG.md`). Field
-feedback from four independent v0.1.2 users plus a multi-hour
-destructive migration session by the primary operator. Implementation
-is in progress; this section grows as items land.
+Closes the v0.1.3 patch backlog (`INSPECT_v0.1.3_BACKLOG.md`): 30 of
+30 in-scope items shipped. Field feedback from four independent
+v0.1.2 users plus a multi-hour destructive migration session by the
+primary operator. **L1 (TUI mode)** was authorized-deferred to v0.5\*
+mid-release once the maintainer confirmed the user base is
+LLM-driven and a `ratatui` dashboard offers no value to agentic
+callers — see `CLAUDE.md` "Authorized deferrals" registry for the
+full rationale. This is the one explicit deferral out of v0.1.3;
+every other backlog item shipped.
 
 ### Added
 
