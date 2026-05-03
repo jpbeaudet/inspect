@@ -1031,7 +1031,7 @@ Today step 1 requires `--stdin-script`, step 2 requires `--stream`, and clap rej
 
 ---
 
-## Running total: 28 / 31 — **OPEN. F1–F18 ✅, F6 ✅, L2 ✅, L4 ✅, L5 ✅, L6 ✅, L7 ✅, L8 ✅, L9 ✅, L10 ✅, L11 ✅, L12 ✅, L13 ✅ landed; L3 / L1 remaining.** Backlog expanded from 25 → 31 mid-release after the no-silent-deferrals policy surfaced six features that earlier F-item commits had documented as "deferred to v0.1.5" — but v0.1.5 is not a confirmed milestone, and v0.1.4 is K8s-only, so these must land in v0.1.3 to keep the docker/compose/SSH surface complete before the K8s release.
+## Running total: 29 / 31 — **OPEN. F1–F18 ✅, L2 ✅, L4 ✅, L5 ✅, L6 ✅, L7 ✅, L8 ✅, L9 ✅, L10 ✅, L11 ✅, L12 ✅, L13 ✅ landed; L3 / L1 remaining.** Backlog expanded from 25 → 31 mid-release after the no-silent-deferrals policy surfaced six features that earlier F-item commits had documented as "deferred to v0.1.5" — but v0.1.5 is not a confirmed milestone, and v0.1.4 is K8s-only, so these must land in v0.1.3 to keep the docker/compose/SSH surface complete before the K8s release.
 
 **Why ship the entire backlog, not just F1:** v0.1.4 is now dedicated to Kubernetes. That means the docker / compose / SSH surface — every L-item and every F-item in this backlog — gets no further attention until **v0.1.5 at the earliest**. Slipping any item out of v0.1.3 effectively pushes it past two intervening releases (v0.1.4 k8s + v0.1.5 stabilization) into v0.2.0+ territory. The docker-host install base is the entire current user base of the tool, so leaving their backlog half-shipped while spending a release on k8s would be the wrong call. Ship all 25.
 
