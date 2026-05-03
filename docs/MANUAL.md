@@ -1868,12 +1868,110 @@ underlying verbs do. For more detail: `inspect help recipes`.
 Save a selector under a short name and reuse it everywhere:
 
 ```sh
-inspect alias add @plogs 'arte/pulse,atlas/_:/var/log/*.log'
-inspect alias ls
+inspect alias add plogs 'arte/pulse,atlas/_:/var/log/*.log'
+inspect alias list
 inspect logs @plogs --since 1h
 ```
 
 Aliases work both as raw arguments and inside LogQL queries.
+
+### Parameterized aliases (L3, v0.1.3)
+
+Alias bodies may contain `$<ident>` placeholders bound at call time
+via `@name(key=val,key=val)`. Bare `@name` continues to work for
+parameterless aliases — every pre-L3 alias keeps working
+byte-identically.
+
+```sh
+# Define once with a placeholder
+$ inspect alias add svc-logs '{server="arte", service="$svc", source="logs"}'
+
+# Bind at call time
+$ inspect search '@svc-logs(svc=pulse) |= "error"'
+$ inspect search '@svc-logs(svc=atlas) |= "timeout"'
+
+# Aliases may chain other aliases
+$ inspect alias add prod-pulse '@svc-logs(svc=pulse) |= "$pat"'
+$ inspect search '@prod-pulse(pat=ERROR)'
+```
+
+Rules:
+
+- **Placeholder syntax.** `$<ident>` matches `[a-zA-Z_][a-zA-Z0-9_]*`.
+  `$$` is a literal-`$` escape. Placeholders are recognized everywhere
+  in the body, including inside double-quoted strings (so the
+  canonical LogQL example `{service="$svc"}` works as expected).
+- **Call-site syntax.** `@name`, `@name()`, `@name(k=v)`, or
+  `@name(k=v,k=v)`. Param values may be double-quoted to embed commas
+  or whitespace: `@a(pat="foo,bar")`. Standard escapes (`\"`, `\\`,
+  `\n`, `\t`) work inside quoted values.
+- **Missing or extra params** at the call site → exit 2 with the
+  declared param list quoted back in the error so an agent can
+  correct without a separate help lookup. Example:
+
+  ```text
+  alias '@svc-logs' requires param 'svc'
+  (declared params: svc, lvl; call as @svc-logs(svc=...,lvl=...))
+  ```
+
+- **Chain depth cap.** Aliases may chain other aliases up to depth
+  5 (i.e. five levels of `@other(...)` references). Depth 6 errors
+  with the full chain printed (`a -> b -> c -> d -> e -> f`).
+  Definitional cycles are rejected at `alias add` time with the cycle
+  printed back (`a -> b -> a`).
+- **Defaults.** A placeholder may declare a default value via
+  `${name:-default}`. When the call site omits the param, the default
+  is substituted; when the call site provides the param, the provided
+  value wins. Defaults make a param optional — they are not in the
+  required-params validation. Defaults may not contain `}` directly;
+  use `\}` to embed a literal closing brace.
+
+  ```sh
+  $ inspect alias add svc-default '{server="arte", service="${svc:-pulse}"}'
+  $ inspect search '@svc-default |= "error"'           # uses default
+  $ inspect search '@svc-default(svc=atlas) |= "x"'    # overrides
+  ```
+
+### Agent discovery for aliases
+
+`inspect alias show <name> --json` and `inspect alias list --json`
+include a `parameters: []` array per entry so an LLM-driven wrapper
+can enumerate every parameterized alias and its required parameter
+names without trial-and-error:
+
+```sh
+$ inspect alias show svc-logs --json
+{
+  "name": "svc-logs",
+  "selector": "{server=\"arte\", service=\"$svc\", source=\"logs\"}",
+  "kind": "logql",
+  "parameters": ["svc"],
+  "description": null
+}
+```
+
+The text-side `alias list` output adds a parenthesized
+`(svc, lvl)` tag after parameterized aliases, and `alias show`
+prints a `parameters = [svc, lvl]` data line for the same. Aliases
+without parameters render byte-identical to v0.1.2.
+
+### On-disk schema
+
+`~/.inspect/aliases.toml` (mode 0600) gained an optional
+`parameters: []` cache field per entry. Pre-L3 entries (no
+`parameters` field) deserialize unchanged and re-serialize unchanged
+unless the alias is re-`add`ed.
+
+```toml
+# Pre-L3 (still works exactly as before)
+[aliases.plogs]
+selector = "arte/pulse"
+
+# L3-aware
+[aliases.svc-logs]
+selector = '{server="arte", service="$svc", source="logs"}'
+parameters = ["svc"]
+```
 
 ### Groups
 

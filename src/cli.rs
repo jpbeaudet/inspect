@@ -366,10 +366,33 @@ const LONG_ALIAS: &str = "\
 Manage saved selector aliases (`@name`). Subcommands: add, list, \
 remove, show.
 
+PARAMETERIZED ALIASES (L3, v0.1.3)
+  Alias bodies may contain placeholders. Three forms are recognized:
+
+  $svc                   required placeholder
+  ${svc}                 required placeholder (alternate brace form)
+  ${svc:-pulse}          optional placeholder with default \"pulse\"
+
+  Call sites bind values via `@name(key=val,key=val)`. Bare `@name` \
+  continues to work for parameterless aliases. `$$` escapes a literal `$`.
+
+  Aliases may chain other aliases up to depth 5 (deeper chains error \
+  at expansion time with the chain printed). Definitional cycles are \
+  rejected at `alias add` time.
+
+  `inspect alias show <name> --json` includes `parameters: []` and \
+  `parameter_defaults: {}` for agent discovery. `inspect alias list \
+  --json` includes the same `parameters` field per entry.
+
 EXAMPLES
   $ inspect alias add plogs '{server=\"arte\", service=\"pulse\", source=\"logs\"}'
+  $ inspect alias add svc-logs '{server=\"arte\", service=\"$svc\", source=\"logs\"}'
+  $ inspect search '@svc-logs(svc=pulse) |= \"error\"'
+  $ inspect alias add prod-pulse '@svc-logs(svc=pulse) |= \"$pat\"'
+  $ inspect search '@prod-pulse(pat=ERROR)'
   $ inspect alias add storage-prod 'prod-*/storage'
-  $ inspect alias list";
+  $ inspect alias list
+  $ inspect alias show svc-logs --json";
 
 const LONG_RESOLVE: &str = "\
 Resolve a selector against discovered profiles and print the target \
@@ -2013,12 +2036,7 @@ pub struct ProfileArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    long_about = "Manage saved selector aliases (`@name`). Subcommands: add, \
-list, remove, show.\n\n\
-EXAMPLES\n  \
-  $ inspect alias add plogs '{server=\"arte\", service=\"pulse\", source=\"logs\"}'\n  \
-  $ inspect alias add storage-prod 'prod-*/storage'\n  \
-  $ inspect alias list",
+    long_about = LONG_ALIAS,
     after_help = SEE_ALSO_ALIAS,
 )]
 pub struct AliasArgs {
@@ -2042,7 +2060,11 @@ pub enum AliasCommand {
 pub struct AliasAddArgs {
     /// Alias name (without the leading '@').
     pub name: String,
-    /// Selector text to save (verb-style or LogQL `{...}` form).
+    /// Selector text to save (verb-style or LogQL `{...}` form). May
+    /// contain `$<ident>` placeholders bound at call time via
+    /// `@name(key=val,key=val)` (L3, v0.1.3). May reference other
+    /// aliases (chain depth cap 5; cycles rejected here at definition
+    /// time). Use `$$` for a literal `$`.
     pub selector: String,
     /// Optional description shown by `alias list`.
     #[arg(long)]

@@ -14,6 +14,129 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L3 — Parameterized aliases.** Aliases were static strings; a
+  recipe that wanted "logs for *any* service on arte" had to either
+  define one alias per service or fall back to writing the full
+  selector each time. Agentic callers couldn't compose aliases
+  programmatically. L3 adds `$<ident>` placeholders in alias bodies,
+  bound at call time via `@name(key=val,key=val)`. Bare `@name`
+  still works for parameterless aliases, so every pre-L3 alias keeps
+  working byte-identically. Aliases may chain other aliases up to
+  depth 5; definitional cycles are rejected at `alias add` time
+  with the cycle printed back. The on-disk `aliases.toml` schema
+  gained an optional `parameters: []` cache field that pre-L3
+  entries simply omit (deserializes unchanged).
+  - **`$<ident>` syntax.** Placeholder names are
+    `[a-zA-Z_][a-zA-Z0-9_]*`. `$$` is a literal-`$` escape for
+    operators that genuinely want a `$` in the body (rare, but
+    free to support). Placeholders are recognized everywhere in the
+    body — including inside `"..."` quoting — so the canonical
+    LogQL example `{server="arte", service="$svc"}` works exactly
+    as expected. Extraction is one byte-walk; no full-grammar
+    re-lex.
+  - **`@name(k=v,k=v)` call sites.** A small parser handles
+    `@name`, `@name()`, `@name(k=v)`, `@name(k=v,k=v)`, and
+    `@name(k="v with spaces and, commas")`. Quoted values support
+    `\"` / `\\` / `\n` / `\t` escapes; unquoted values stop at the
+    next top-level comma or `)`. Param values that contain commas
+    must be quoted. Same param twice → exit 2. Empty param name
+    → exit 2. Missing `)` → exit 2. The error messages quote the
+    alias name and the offending param so an agentic caller can
+    correct without a separate help lookup.
+  - **Chain expansion.** An alias body may reference other aliases
+    via `@other(...)`. `expand_recursive` walks the references with
+    a depth cap of 5; depth 6 errors with the full chain printed
+    (`a -> b -> c -> d -> e -> f`) so the operator can see exactly
+    which level overflowed. Definitional cycles are caught at
+    `alias add` time by a depth-first walk over the would-be alias
+    graph; the cycle is reported `a -> b -> a` and the alias is
+    not written to disk. The runtime depth-cap is a belt-and-
+    suspenders guard against hand-edited `aliases.toml` files that
+    bypass the add-time check.
+  - **Error envelope.** Five new `AliasError` variants —
+    `MissingParam`, `ExtraParam`, `CircularReference`,
+    `ChainDepthExceeded`, `BadCallSyntax` — each rendering with
+    the alias name and the declared params so an agent gets
+    `requires param 'svc' (declared params: svc, lvl; call as
+    @svc-logs(svc=...,lvl=...))` rather than a generic "missing
+    param" string. `MissingParam` and `ExtraParam` exit 2 (usage
+    error) consistently with the existing alias-error pattern.
+  - **`parameters: []` discovery.** `inspect alias show <name>
+    --json` and `inspect alias list --json` include a
+    `parameters` array per entry — the same names L3 extracts at
+    `alias add` time. An agent can enumerate `inspect alias list
+    --json | jq '.[] | {name, parameters}'` and discover every
+    parameterized alias without trial-and-error. The text-side
+    `alias list` and `alias show` output gain a parenthesized
+    `(svc, lvl)` tag and a `parameters = [...]` data line
+    respectively, on aliases that take params (parameterless
+    aliases render unchanged so existing scripts/recipes parse
+    byte-identically).
+  - **Schema cache (`parameters: Option<Vec<String>>`).** Stored
+    as `Option` with `skip_serializing_if = Option::is_none` so
+    pre-L3 `aliases.toml` files (no `parameters` field) deserialize
+    unchanged and re-serialize unchanged unless the alias is
+    re-`add`ed. `Some(empty)` and `None` are operationally
+    equivalent for parameterless aliases — the field is a cache,
+    not a flag.
+  - **LogQL pipeline integration.** `src/logql/alias_subst.rs`
+    grew a parameter-aware resolver signature
+    (`Fn(&str, &BTreeMap<String, String>) -> ResolverResult`); the
+    default resolver in `src/logql/mod.rs` delegates to
+    `alias::expand_recursive` so chain unwinding + `$param`
+    substitution + cycle detection happen once before the LogQL
+    parser sees the substituted text. Span tracking (audit §1.7)
+    extended so a `@svc-logs(svc=pulse)` call site's downstream
+    parse errors point at the **whole** call site, not just the
+    `@svc-logs` prefix.
+  - **Verb-side integration.** `src/selector/resolve.rs` already
+    delegated to `alias::expand_for_verb`; that function now
+    parses the call-site `(...)` group internally so every read
+    and write verb's selector argument accepts parameterized
+    aliases without per-verb wiring changes. A `MissingParam`
+    error from the alias layer surfaces as the same exit-2 chain
+    every other selector error already produces.
+  - **Help-text discoverability.** New PARAMETERIZED ALIASES
+    section in `LONG_ALIAS` and `src/help/content/aliases.md` with
+    worked examples (define + use + chain + show), the
+    placeholder-syntax rules, the cycle / depth-cap policy, and
+    explicit guidance on how `parameters: []` is used for agent
+    discovery. The `LONG_ALIAS` constant is now the single source
+    of truth — the previous duplicated `AliasArgs.long_about`
+    inline string was replaced with a `long_about = LONG_ALIAS`
+    reference. `AliasAddArgs.selector` clap docstring updated to
+    document the L3 contract on `--help`.
+  - **Defaults via `${ident:-default}`.** A placeholder may declare
+    a default value; when the call site omits the param the default
+    is substituted, when the call site provides the param the
+    provided value wins. Defaults make the param optional — they
+    are not part of the required-params validation. The original
+    L3 backlog spec scoped defaults out of v0.1.3 ("deferred to
+    v0.2.0 to keep the parser minimal"); during the L3 commit
+    review the maintainer flagged this as a self-authorized
+    deferral that the no-silent-deferrals policy explicitly
+    forbids, and defaults shipped as part of L3. Implementation
+    is ~80 LOC of additional scanner state in `scan_placeholders`
+    and `parse_braced_placeholder` (both private to `src/alias.rs`)
+    plus `extract_defaults` (public, used by `alias show --json` to
+    expose the per-parameter `parameter_defaults: {name: default}`
+    map for agent discovery). Default values may not contain `}`
+    directly; use `\}` to embed a literal closing brace.
+  - **Test coverage.** 13 inline unit tests in
+    `src/alias.rs::tests::l3_*` (extract / substitute / call-site
+    parser / chain happy path / self-cycle / pre-L3
+    deserialization) and 12 acceptance tests in
+    `tests/phase_f_v013.rs::l3_*` (parameters in `show --json`,
+    `list --json`, bare `@name` round-trip, `$param` resolves at
+    verb time, missing-param error format, extra-param error
+    format, chain depth 5 succeeds, chain depth 6 errors with
+    chain printed, definitional cycle rejected at add time,
+    `$$` escape, quoted comma in param value, `--help`
+    discoverability). Pre-L3 invariants kept: the
+    `phase3_selector::alias_*` integration tests pass after
+    swapping the obsolete `alias_rejects_chaining` for an L3
+    `alias_rejects_definitional_cycle` (chains are valid now;
+    cycles are still rejected, with a tighter error message).
 - **L13 — Parallel multi-target fan-out within a single `--steps`
   step.** F17 ships sequential per-target dispatch: a step against 5
   targets runs them one after another. For the migration-operator

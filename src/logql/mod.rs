@@ -34,19 +34,43 @@ mod tests;
 pub use ast::Query;
 pub use error::ParseError;
 
-/// Parse a query string into a typed AST. Aliases (`@name`) are
-/// expanded before parsing using `alias_resolver`.
+/// Parse a query string into a typed AST. Aliases (`@name` or
+/// `@name(k=v,...)`) are expanded before parsing.
 ///
-/// `alias_resolver` is invoked for each `@name` reference. Returning
-/// `None` produces an "unknown alias" diagnostic.
+/// The default resolver delegates to `crate::alias::expand_recursive`,
+/// which handles parameter substitution, chain unwinding (depth cap
+/// 5), and `MissingParam`/`ExtraParam` errors. Tests that want a
+/// stub resolver use [`parse_with_aliases`] directly.
 pub fn parse(input: &str) -> Result<Query, ParseError> {
-    parse_with_aliases(input, |_| None)
+    parse_with_aliases(input, default_alias_resolver)
 }
 
-/// Same as [`parse`] but with a custom alias resolver.
+/// L3-aware default resolver: looks each call site up in
+/// `~/.inspect/aliases.toml` and returns the fully chain-unwound
+/// substituted body. Errors from the alias layer (missing param,
+/// chain depth, circular reference) are wrapped as `ParseError` so
+/// they render with the original `@name(...)` span.
+pub fn default_alias_resolver(
+    name: &str,
+    params: &std::collections::BTreeMap<String, String>,
+) -> alias_subst::ResolverResult {
+    let mut chain = vec![name.to_string()];
+    match crate::alias::expand_recursive(name, params, 0, &mut chain) {
+        Ok((body, _kind)) => Ok(Some(body)),
+        Err(crate::alias::AliasError::Unknown(_)) => Ok(None),
+        Err(e) => Err(ParseError::new(format!("{e}"), 0..0)),
+    }
+}
+
+/// Same as [`parse`] but with a custom alias resolver. The resolver
+/// signature takes the parsed call-site name and parameter map and
+/// returns either the substituted body, `None` (unknown alias), or
+/// a `ParseError` (e.g. missing param). The resolver owns chain
+/// unwinding — `alias_subst::expand` only walks the top-level query
+/// and splices substituted bodies in.
 pub fn parse_with_aliases<F>(input: &str, alias_resolver: F) -> Result<Query, ParseError>
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str, &std::collections::BTreeMap<String, String>) -> alias_subst::ResolverResult,
 {
     let (expanded, expansions) = alias_subst::expand_with_map(input, &alias_resolver)?;
     let frame = |e: ParseError| frame_alias_error(e, &expansions);
@@ -73,10 +97,11 @@ fn frame_alias_error(mut e: ParseError, expansions: &[alias_subst::Expansion]) -
 
 /// Expand aliases in `input` without parsing. The returned string is
 /// suitable to pass to [`parse`] (which won't see any `@name` tokens)
-/// and to slice with AST spans.
+/// and to slice with AST spans. The resolver follows the same
+/// signature contract as [`parse_with_aliases`].
 pub fn expand_aliases<F>(input: &str, alias_resolver: F) -> Result<String, ParseError>
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str, &std::collections::BTreeMap<String, String>) -> alias_subst::ResolverResult,
 {
     alias_subst::expand(input, &alias_resolver)
 }

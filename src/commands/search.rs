@@ -7,7 +7,6 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::alias;
 use crate::cli::SearchArgs;
 use crate::error::ExitKind;
 use crate::exec::{self, ExecOutput};
@@ -21,10 +20,11 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // Parse-only first so we can emit precise diagnostics with carets.
-    if let Err(e) = logql::parse_with_aliases(query, |name| {
-        alias::get(name).ok().flatten().map(|e| e.selector)
-    }) {
+    // L3: the resolver delegates to `alias::expand_recursive` so a
+    // parameterized `@svc-logs(svc=pulse)` call site, including
+    // multi-level chains, expands once before the LogQL parser sees
+    // the result.
+    if let Err(e) = logql::parse_with_aliases(query, logql::default_alias_resolver) {
         if args.format.is_json() {
             let env = json!({
                 "schema_version": 1,

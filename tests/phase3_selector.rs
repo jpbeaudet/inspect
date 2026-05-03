@@ -178,13 +178,20 @@ fn alias_classifies_logql() {
 }
 
 #[test]
-fn alias_rejects_chaining() {
+fn alias_rejects_definitional_cycle() {
+    // L3 (v0.1.3): chaining is supported up to depth 5, but a
+    // definitional cycle in the alias graph is rejected at
+    // `alias add` time with the cycle printed back.
     let sb = Sandbox::new();
     sb.cmd()
-        .args(["alias", "add", "a", "@b"])
+        .args(["alias", "add", "a", "@b(x=1)"])
+        .assert()
+        .success();
+    sb.cmd()
+        .args(["alias", "add", "b", "@a(y=2)"])
         .assert()
         .failure()
-        .stderr(contains("chaining is not supported"));
+        .stderr(contains("circular alias reference"));
 }
 
 #[test]

@@ -16,13 +16,29 @@ pub fn run(args: AliasArgs) -> anyhow::Result<ExitKind> {
 fn add(a: crate::cli::AliasAddArgs) -> anyhow::Result<ExitKind> {
     alias::add(&a.name, &a.selector, a.description, a.force)?;
     let kind = alias::classify(&a.selector);
+    let params = alias::extract_parameters(&a.selector);
     println!(
         "SUMMARY: alias '@{}' saved ({}-style)",
         a.name,
         kind.label()
     );
     println!("DATA:    selector = {}", a.selector);
-    println!("NEXT:    use '@{}' wherever a selector is accepted", a.name);
+    if !params.is_empty() {
+        println!("         parameters = [{}]", params.join(", "));
+    }
+    if params.is_empty() {
+        println!("NEXT:    use '@{}' wherever a selector is accepted", a.name);
+    } else {
+        let example = params
+            .iter()
+            .map(|p| format!("{p}=..."))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "NEXT:    call as @{}({example}) wherever a selector is accepted",
+            a.name
+        );
+    }
     Ok(ExitKind::Success)
 }
 
@@ -32,11 +48,16 @@ fn list(a: crate::cli::AliasListArgs) -> anyhow::Result<ExitKind> {
         let arr: Vec<_> = entries
             .iter()
             .map(|(n, e)| {
+                let params = e
+                    .parameters
+                    .clone()
+                    .unwrap_or_else(|| alias::extract_parameters(&e.selector));
                 serde_json::json!({
                     "name": n,
                     "selector": e.selector,
                     "description": e.description,
                     "kind": alias::classify(&e.selector).label(),
+                    "parameters": params,
                 })
             })
             .collect();
@@ -56,12 +77,24 @@ fn list(a: crate::cli::AliasListArgs) -> anyhow::Result<ExitKind> {
     println!("DATA:");
     for (name, entry) in &entries {
         let kind = alias::classify(&entry.selector).label();
+        let params = entry
+            .parameters
+            .clone()
+            .unwrap_or_else(|| alias::extract_parameters(&entry.selector));
+        let params_tag = if params.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", params.join(","))
+        };
         let desc = entry
             .description
             .as_deref()
             .map(|d| format!(" — {d}"))
             .unwrap_or_default();
-        println!("  @{name} [{kind}] = {}{}", entry.selector, desc);
+        println!(
+            "  @{name}{params_tag} [{kind}] = {}{}",
+            entry.selector, desc
+        );
     }
     println!("NEXT:    'inspect alias show <name>' for full detail");
     Ok(ExitKind::Success)
@@ -90,21 +123,43 @@ fn show(a: crate::cli::AliasShowArgs) -> anyhow::Result<ExitKind> {
         return Ok(ExitKind::Error);
     };
     let kind = alias::classify(&entry.selector);
+    let params = entry
+        .parameters
+        .clone()
+        .unwrap_or_else(|| alias::extract_parameters(&entry.selector));
     if a.format.is_json() {
+        let defaults = alias::extract_defaults(&entry.selector);
         let v = serde_json::json!({
             "name": a.name,
             "selector": entry.selector,
             "description": entry.description,
             "kind": kind.label(),
+            "parameters": params,
+            "parameter_defaults": defaults,
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(ExitKind::Success);
     }
     println!("SUMMARY: alias '@{}' ({}-style)", a.name, kind.label());
     println!("DATA:    selector    = {}", entry.selector);
+    if !params.is_empty() {
+        println!("         parameters  = [{}]", params.join(", "));
+    }
     if let Some(d) = entry.description {
         println!("         description = {d}");
     }
-    println!("NEXT:    use '@{}' wherever a selector is accepted", a.name);
+    if params.is_empty() {
+        println!("NEXT:    use '@{}' wherever a selector is accepted", a.name);
+    } else {
+        let example = params
+            .iter()
+            .map(|p| format!("{p}=..."))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "NEXT:    call as @{}({example}) wherever a selector is accepted",
+            a.name
+        );
+    }
     Ok(ExitKind::Success)
 }
