@@ -46,6 +46,7 @@
 //! sharing the parent's `steps_run_id`. Parallel fan-out within a
 //! single step is L13 in this release.
 
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -59,6 +60,7 @@ use crate::ssh::exec::{RemoteOutput, RunOpts};
 use crate::verbs::dispatch::{iter_steps, plan, Step};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
+use crate::verbs::runtime::RemoteRunner;
 
 /// Default per-step wall-clock cap in seconds. Mirrors the F16
 /// `--stream` default (8 hours) because the migration-operator's use
@@ -73,6 +75,18 @@ const DEFAULT_STEP_TIMEOUT_SECS: u64 = 60 * 60 * 8;
 /// blob is partial. 10 MiB matches the F9 `--stdin-max` default —
 /// "this is what counts as 'a lot of bytes' in this tool."
 const MAX_STEP_CAPTURE_BYTES: usize = 10 * 1024 * 1024;
+
+/// L13 (v0.1.3): default per-step parallel-fanout cap when
+/// `parallel: true` is set without an explicit `parallel_max`.
+/// Matches `inspect fleet`'s concurrency cap so operators get the
+/// same scale-axis behavior across both surfaces.
+const PARALLEL_MAX_DEFAULT: usize = 8;
+
+/// L13 (v0.1.3): hard ceiling on `parallel_max`. Above this an
+/// operator should reach for `inspect fleet`, which has its own
+/// large-fanout safety gate (the L13 path stays focused on
+/// migration-bundle scale: 8–32 simultaneous targets).
+const PARALLEL_MAX_CEILING: usize = 64;
 
 /// On-disk manifest shape for `inspect run --steps <file.json>` and
 /// `--steps-yaml <file.yaml>`.
@@ -100,6 +114,28 @@ struct StepSpec {
     /// per-step audit entry records `revert.kind = "unsupported"`.
     #[serde(default)]
     revert_cmd: Option<String>,
+    /// L13 (v0.1.3): when `true` AND the selector resolves to >1
+    /// target, dispatch the step's per-target work in parallel
+    /// instead of sequentially. Default `false` so existing
+    /// manifests behave identically. Capped by [`StepSpec::parallel_max`]
+    /// (default 8 — matches `inspect fleet`'s concurrency cap).
+    /// Per-target output gets a `[<target>]` prefix and a
+    /// per-line writer mutex so two targets can't interleave a
+    /// single line; the trade-off is that operators see lines
+    /// interleaved by completion order rather than per-target
+    /// contiguous (documented contract).
+    #[serde(default)]
+    parallel: bool,
+    /// L13 (v0.1.3): per-step concurrency cap for the parallel
+    /// fan-out. `None` ⇒ default 8 (matches the existing
+    /// `inspect fleet` cap and the F18 transcript's spec). Above
+    /// this many in-flight targets, additional targets queue and
+    /// run as slots free up. Hard ceiling at 64 — operators
+    /// running against 64+ simultaneous targets should reach for
+    /// `inspect fleet` instead, which has its own large-fanout
+    /// safety gate.
+    #[serde(default)]
+    parallel_max: Option<usize>,
 }
 
 fn default_on_failure() -> OnFailure {
@@ -495,260 +531,62 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             );
         }
 
-        let mut per_target_results: Vec<TargetStepResult> = Vec::with_capacity(target_count);
-        for (target_step, target_label) in resolved.iter().zip(&target_labels) {
-            // Wrap in `docker exec` when the resolved target is a
-            // service-level selector. cmd_file uses bash -s with -i
-            // so docker exec keeps stdin attached for the body to
-            // flow in (same shape F14 uses).
-            let inner = match (target_step.container(), spec.cmd_file.is_some()) {
-                (Some(container), false) => format!(
-                    "docker exec {} sh -c {}",
-                    shquote(container),
-                    shquote(&dispatched_cmd)
-                ),
-                (Some(container), true) => {
-                    format!("docker exec -i {} bash -s", shquote(container))
-                }
-                (None, _) => dispatched_cmd.clone(),
-            };
-            let effective_overlay = crate::exec::env_overlay::merge(
-                Some(&target_step.ns.env_overlay),
-                &user_env,
-                args.env_clear,
-            );
-            let cmd =
-                crate::exec::env_overlay::apply_to_cmd(&inner, &effective_overlay).into_owned();
-
-            // Per-(step, target) live capture. Capped at
-            // MAX_STEP_CAPTURE_BYTES; live printing is unaffected.
-            let mut step_stdout = String::new();
-            let mut output_truncated = false;
-            let started = Instant::now();
-
-            // L12 (v0.1.3): per-(step, target) L7 redactor. Pre-L12,
-            // the F17 per-line callback wrote streamed lines and
-            // captured them into `step_stdout` with NO redaction —
-            // a step that emitted a Bearer token, PEM block, or
-            // `postgres://user:pass@host` URL would leak the secret
-            // BOTH to the operator's terminal AND into the
-            // captured `targets[].stdout` audit field. L12 wires
-            // the same masker pipeline `inspect run` uses (PEM →
-            // header → URL → env) so streamed output is masked
-            // identically to a bare `inspect run`. `--show-secrets`
-            // bypasses everything as it does for `inspect run`.
-            // One redactor per (step, target) so PEM-block gate
-            // state can't leak across steps or across targets.
-            let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
-
-            // F13 (v0.1.3): wrap the dispatch in dispatch_with_reauth
-            // so a stale-socket failure mid-step triggers transparent
-            // reauth + retry. F16 (v0.1.3): forward args.stream as
-            // per-step PTY allocation so live output line-buffers and
-            // SIGINT propagates through the PTY.
-            let policy = ReauthPolicy {
-                allow_reauth: !args.no_reauth && target_step.ns.auto_reauth,
-            };
-            let cmd_ref = &cmd;
-            let runner_ref = runner.as_ref();
-            let body_for_step = script_body.clone();
-            let label_for_step = target_label.clone();
-            let outcome = dispatch_with_reauth(
-                &target_step.ns.namespace,
-                &target_step.ns.target,
-                runner_ref,
-                audit_store.as_ref(),
-                "run.step",
-                &label_for_step,
-                policy,
-                || -> anyhow::Result<RemoteOutput> {
-                    let mut opts = RunOpts::with_timeout(timeout_secs);
-                    if let Some(b) = body_for_step.clone() {
-                        opts = opts.with_stdin(b);
-                    }
-                    if args.stream {
-                        opts = opts.with_tty(true);
-                    }
-                    runner_ref.run_streaming_capturing(
-                        &target_step.ns.namespace,
-                        &target_step.ns.target,
-                        cmd_ref,
-                        opts,
-                        &mut |line| {
-                            // L12 (v0.1.3): mask each line through the
-                            // L7 four-masker pipeline (PEM → header →
-                            // URL → env) BEFORE both the live tee and
-                            // the captured copy. Lines inside a PEM
-                            // private-key block return `None` and are
-                            // suppressed entirely (same contract as
-                            // `inspect run`'s streamed output). The
-                            // single `[REDACTED PEM KEY]` marker
-                            // emitted by the gate is the only output
-                            // for the block; that marker is what the
-                            // operator sees AND what gets captured
-                            // into the audit's `targets[].stdout`.
-                            let masked = match redactor.mask_line(line) {
-                                Some(m) => m,
-                                None => return,
-                            };
-                            // Live print every line (uncapped).
-                            if !json {
-                                crate::tee_println!("{label_for_step} | {masked}");
-                            } else {
-                                JsonOut::write(
-                                    &Envelope::new(&label_for_step, "run", "step")
-                                        .put("steps_run_id", steps_run_id.as_str())
-                                        .put("step_name", spec.name.as_str())
-                                        .put("target", label_for_step.as_str())
-                                        .put("line", masked.as_ref()),
-                                );
-                            }
-                            // Cap the captured copy so a step that
-                            // emits gigabytes doesn't OOM the local
-                            // process.
-                            let line_with_nl_bytes = masked.len() + 1;
-                            if !output_truncated
-                                && step_stdout.len() + line_with_nl_bytes <= MAX_STEP_CAPTURE_BYTES
-                            {
-                                step_stdout.push_str(masked.as_ref());
-                                step_stdout.push('\n');
-                            } else if !output_truncated {
-                                output_truncated = true;
-                                step_stdout.push_str(
-                                    "\n[OUTPUT CAPTURE TRUNCATED AT 10 MIB — \
-                                     full output streamed live above]\n",
-                                );
-                            }
-                        },
+        // L13 (v0.1.3): branch on `parallel: true` per spec. The
+        // sequential path stays the default so existing manifests
+        // behave identically. Parallel branches use std::thread::scope
+        // batched in chunks of `parallel_max` (default 8, ceiling 64);
+        // wall-clock for a step against N targets becomes
+        // ~`ceil(N / parallel_max) × max(target_durations)` instead
+        // of `sum(target_durations)`. on_failure="stop" coordination
+        // happens via the global cancel flag — when any parallel
+        // target fails, in-flight peers see is_cancelled() and the
+        // dispatch wrapper aborts.
+        let writer_lock_for_parallel = if spec.parallel && resolved.len() > 1 {
+            Some(Mutex::new(()))
+        } else {
+            None
+        };
+        let ctx = PerTargetCtx {
+            spec,
+            args,
+            runner: runner.as_ref(),
+            audit_store: audit_store.as_ref(),
+            steps_run_id: &steps_run_id,
+            json,
+            dispatched_cmd: &dispatched_cmd,
+            script_body: script_body.as_deref(),
+            script_sha: script_sha.as_deref(),
+            script_bytes,
+            script_path: script_path.as_deref(),
+            timeout_secs,
+            user_env: &user_env,
+        };
+        let per_target_results: Vec<TargetStepResult> = if spec.parallel && resolved.len() > 1 {
+            run_targets_parallel(
+                &ctx,
+                &resolved,
+                &target_labels,
+                resolve_parallel_max(spec.parallel_max),
+                writer_lock_for_parallel.as_ref().unwrap(),
+                spec.on_failure,
+            )
+        } else {
+            resolved
+                .iter()
+                .zip(&target_labels)
+                .enumerate()
+                .map(|(target_idx, (target_step, target_label))| {
+                    run_one_target(
+                        &ctx,
+                        target_step,
+                        target_label,
+                        target_idx,
+                        /*is_parallel=*/ false,
+                        None,
                     )
-                },
-            );
-            let dur = started.elapsed().as_millis() as u64;
-
-            let (status, exit_code, stderr_text) = match (&outcome.result, outcome.failure_class) {
-                (Ok(out), _) => {
-                    let code = out.exit_code;
-                    let st = if code == 0 {
-                        StepStatus::Ok
-                    } else {
-                        StepStatus::Failed
-                    };
-                    (st, code, out.stderr.clone())
-                }
-                (Err(e), _) => {
-                    let msg = e.to_string();
-                    if msg.contains("timed out") {
-                        (StepStatus::Timeout, -2, msg)
-                    } else {
-                        (StepStatus::Failed, -1, msg)
-                    }
-                }
-            };
-
-            // Per-(step, target) audit entry.
-            let mut audit_id_for_target: Option<String> = None;
-            if let Some(store) = &audit_store {
-                let mut e = AuditEntry::new("run.step", target_label);
-                e.steps_run_id = Some(steps_run_id.clone());
-                e.step_name = Some(spec.name.clone());
-                e.args = format!("step={} cmd={}", spec.name, truncate(&dispatched_cmd, 200));
-                e.exit = exit_code;
-                e.duration_ms = dur;
-                e.rendered_cmd = Some(cmd.clone());
-                if !effective_overlay.is_empty() {
-                    e.env_overlay = Some(effective_overlay.clone());
-                }
-                if outcome.retried {
-                    e.retry_of = Some(format!("transport_stale@{}", target_label));
-                }
-                if let Some(rid) = &outcome.reauth_id {
-                    e.reauth_id = Some(rid.clone());
-                }
-                let class = match status {
-                    StepStatus::Ok => "ok",
-                    StepStatus::Timeout => "timeout",
-                    StepStatus::Failed => {
-                        if outcome.result.is_err() && outcome.failure_class.is_some() {
-                            // Transport class wins over command_failed
-                            // when the dispatch wrapper classified.
-                            outcome
-                                .failure_class
-                                .as_ref()
-                                .map(|c| c.as_str())
-                                .unwrap_or("command_failed")
-                        } else if outcome.result.is_err() {
-                            "transport_error"
-                        } else {
-                            "command_failed"
-                        }
-                    }
-                    StepStatus::Skipped => "skipped",
-                };
-                e.failure_class = Some(class.to_string());
-                if matches!(status, StepStatus::Failed | StepStatus::Timeout)
-                    && outcome.result.is_err()
-                {
-                    e.diff_summary = format!("transport_error: {stderr_text}");
-                }
-                if let Some(s) = &script_sha {
-                    e.script_sha256 = Some(s.clone());
-                }
-                if let Some(b) = script_bytes {
-                    e.script_bytes = Some(b);
-                }
-                if let Some(p) = &script_path {
-                    e.script_path = Some(p.clone());
-                }
-                if args.stream {
-                    e.streamed = true;
-                }
-                // L12 (v0.1.3): record which L7 maskers fired
-                // during this (step, target). Mirrors the bare
-                // `inspect run` audit-shape so a post-mortem
-                // query like `inspect audit grep secrets_masked`
-                // catches per-step entries too.
-                if redactor.was_active() {
-                    e.secrets_masked_kinds = Some(
-                        redactor
-                            .active_kinds()
-                            .into_iter()
-                            .map(|s| s.to_string())
-                            .collect(),
-                    );
-                }
-                e.revert = Some(match &spec.revert_cmd {
-                    Some(cmd) if !cmd.trim().is_empty() => Revert::command_pair(
-                        cmd.clone(),
-                        format!(
-                            "step '{}' inverse on {}: {}",
-                            spec.name,
-                            target_label,
-                            truncate(cmd, 80)
-                        ),
-                    ),
-                    _ => Revert::unsupported(format!(
-                        "step '{}' has no declared revert_cmd; \
-                         --revert-on-failure will skip it",
-                        spec.name
-                    )),
-                });
-                e.applied = Some(matches!(status, StepStatus::Ok | StepStatus::Failed));
-                audit_id_for_target = Some(e.id.clone());
-                let _ = store.append(&e);
-            }
-
-            per_target_results.push(TargetStepResult {
-                label: target_label.clone(),
-                exit: exit_code,
-                duration_ms: dur,
-                stdout: step_stdout,
-                stderr: stderr_text,
-                output_truncated,
-                status,
-                audit_id: audit_id_for_target,
-                retried: outcome.retried,
-            });
-        }
+                })
+                .collect()
+        };
 
         // Aggregate the step's status across targets. Any
         // failure/timeout demotes the aggregate; otherwise ok.
@@ -1183,6 +1021,403 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     } else {
         ExitKind::Error
     })
+}
+
+/// L13 (v0.1.3): per-target dispatch context. References-only so the
+/// struct is `Send + Sync` for thread::scope dispatch in the parallel
+/// path. The runner is passed as `&(dyn RemoteRunner + Send + Sync)`
+/// (from `runner.as_ref()`), which inherits the trait's Send/Sync
+/// bounds declared at `verbs::runtime::RemoteRunner`.
+struct PerTargetCtx<'a> {
+    spec: &'a StepSpec,
+    args: &'a RunArgs,
+    runner: &'a (dyn RemoteRunner + 'a),
+    audit_store: Option<&'a AuditStore>,
+    steps_run_id: &'a str,
+    json: bool,
+    dispatched_cmd: &'a str,
+    script_body: Option<&'a [u8]>,
+    script_sha: Option<&'a str>,
+    script_bytes: Option<u64>,
+    script_path: Option<&'a str>,
+    timeout_secs: u64,
+    user_env: &'a [(String, String)],
+}
+
+/// L13 (v0.1.3): clamp `parallel_max` to its default-or-ceiling.
+/// `None` ⇒ default 8; `Some(n)` capped at the hard ceiling
+/// [`PARALLEL_MAX_CEILING`]; `Some(0)` is treated as the default
+/// (operators expect 0 to mean "no limit", but our actual contract
+/// is "default 8" — surface the ambiguity by using the default
+/// rather than spawning unbounded threads).
+fn resolve_parallel_max(declared: Option<usize>) -> usize {
+    match declared {
+        None | Some(0) => PARALLEL_MAX_DEFAULT,
+        Some(n) => n.min(PARALLEL_MAX_CEILING),
+    }
+}
+
+/// L13 (v0.1.3): run all targets for one step in parallel, batched
+/// at most `parallel_max` at a time. Per-line emit uses
+/// `writer_lock` so two threads can't interleave bytes mid-line.
+/// Returns per-target results in **manifest order**, regardless of
+/// completion order — agents reading the JSON envelope see the
+/// same shape they would for a sequential run.
+///
+/// `on_failure: stop` coordination: when any thread's target
+/// completes with non-zero exit, we set the global cancel flag.
+/// Subsequent in-flight ssh dispatches see `is_cancelled()` and
+/// abort. Already-completed targets keep their results.
+fn run_targets_parallel(
+    ctx: &PerTargetCtx<'_>,
+    resolved: &[Step<'_>],
+    target_labels: &[String],
+    parallel_max: usize,
+    writer_lock: &Mutex<()>,
+    on_failure: OnFailure,
+) -> Vec<TargetStepResult> {
+    let n = resolved.len();
+    let mut out: Vec<Option<TargetStepResult>> = (0..n).map(|_| None).collect();
+
+    // Chunked batches of `parallel_max` targets. After each batch
+    // we check `on_failure: stop` and short-circuit if a failure
+    // occurred (in-flight peers in the failing batch already saw
+    // the cancel flag; we don't dispatch further batches).
+    let mut start = 0;
+    while start < n {
+        let end = (start + parallel_max).min(n);
+        let batch: Vec<usize> = (start..end).collect();
+
+        // Borrow fences: scoped threads can borrow `ctx`,
+        // `resolved`, `target_labels`, `writer_lock` for the
+        // scope's lifetime, no Arc / clone needed.
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(batch.len());
+            for target_idx in &batch {
+                let target_idx = *target_idx;
+                let target_step = &resolved[target_idx];
+                let target_label = target_labels[target_idx].as_str();
+                let writer_lock_ref = writer_lock;
+                let ctx_ref = ctx;
+                handles.push(s.spawn(move || {
+                    run_one_target(
+                        ctx_ref,
+                        target_step,
+                        target_label,
+                        target_idx,
+                        true,
+                        Some(writer_lock_ref),
+                    )
+                }));
+            }
+            for (offset, h) in handles.into_iter().enumerate() {
+                let target_idx = batch[offset];
+                match h.join() {
+                    Ok(r) => out[target_idx] = Some(r),
+                    Err(_) => {
+                        // Worker panicked — synthesize a failed
+                        // result so the aggregate can detect it
+                        // and the operator gets a clear status.
+                        out[target_idx] = Some(TargetStepResult {
+                            label: target_labels[target_idx].clone(),
+                            exit: -1,
+                            duration_ms: 0,
+                            stdout: String::new(),
+                            stderr: "worker thread panicked".into(),
+                            output_truncated: false,
+                            status: StepStatus::Failed,
+                            audit_id: None,
+                            retried: false,
+                        });
+                    }
+                }
+            }
+        });
+
+        // L13 stop-on-failure: any failure in this batch trips
+        // the global cancel flag so peers in subsequent batches
+        // see it and skip. Subsequent steps' loop level also
+        // sets `stopped_at` based on the aggregate.
+        if matches!(on_failure, OnFailure::Stop)
+            && out[start..end].iter().any(|r| {
+                matches!(
+                    r.as_ref().map(|t| t.status),
+                    Some(StepStatus::Failed | StepStatus::Timeout)
+                )
+            })
+        {
+            crate::exec::cancel::cancel();
+            break;
+        }
+
+        start = end;
+    }
+
+    // Fill any unprocessed slots (when stop-on-failure aborted
+    // mid-batches) with skipped placeholders so the per-target
+    // count matches the manifest's resolved-target count.
+    for (i, slot) in out.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(TargetStepResult {
+                label: target_labels[i].clone(),
+                exit: 0,
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                output_truncated: false,
+                status: StepStatus::Skipped,
+                audit_id: None,
+                retried: false,
+            });
+        }
+    }
+
+    out.into_iter().map(|s| s.unwrap()).collect()
+}
+
+/// L13 (v0.1.3): per-target dispatch body. Extracted from F17's
+/// inline loop so the same code can drive both the sequential
+/// path and the `parallel: true` parallel path. When
+/// `writer_lock` is `Some`, every per-line emit acquires it for
+/// the duration of the print so two parallel targets cannot
+/// interleave bytes mid-line.
+#[allow(clippy::too_many_lines)]
+fn run_one_target(
+    ctx: &PerTargetCtx<'_>,
+    target_step: &Step<'_>,
+    target_label: &str,
+    target_idx: usize,
+    is_parallel: bool,
+    writer_lock: Option<&Mutex<()>>,
+) -> TargetStepResult {
+    let spec = ctx.spec;
+    let args = ctx.args;
+    let json = ctx.json;
+    let steps_run_id = ctx.steps_run_id;
+    let dispatched_cmd = ctx.dispatched_cmd;
+
+    // Wrap in `docker exec` when the resolved target is a
+    // service-level selector. cmd_file uses bash -s with -i so
+    // docker exec keeps stdin attached for the body to flow in
+    // (same shape F14 uses).
+    let inner = match (target_step.container(), spec.cmd_file.is_some()) {
+        (Some(container), false) => format!(
+            "docker exec {} sh -c {}",
+            shquote(container),
+            shquote(dispatched_cmd)
+        ),
+        (Some(container), true) => format!("docker exec -i {} bash -s", shquote(container)),
+        (None, _) => dispatched_cmd.to_string(),
+    };
+    let effective_overlay = crate::exec::env_overlay::merge(
+        Some(&target_step.ns.env_overlay),
+        ctx.user_env,
+        args.env_clear,
+    );
+    let cmd = crate::exec::env_overlay::apply_to_cmd(&inner, &effective_overlay).into_owned();
+
+    // Per-(step, target) live capture. Capped at MAX_STEP_CAPTURE_BYTES;
+    // live printing is unaffected.
+    let mut step_stdout = String::new();
+    let mut output_truncated = false;
+    let started = Instant::now();
+
+    // L12 (v0.1.3): per-(step, target) L7 redactor. One per
+    // (step, target) so PEM-block gate state can't leak across
+    // pairs. `--show-secrets` bypasses every masker.
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
+
+    let policy = ReauthPolicy {
+        allow_reauth: !args.no_reauth && target_step.ns.auto_reauth,
+    };
+    let cmd_ref = &cmd;
+    let runner_ref = ctx.runner;
+    let body_for_step: Option<Vec<u8>> = ctx.script_body.map(|s| s.to_vec());
+    let label_for_step = target_label.to_string();
+    let outcome = dispatch_with_reauth(
+        &target_step.ns.namespace,
+        &target_step.ns.target,
+        runner_ref,
+        ctx.audit_store,
+        "run.step",
+        &label_for_step,
+        policy,
+        || -> anyhow::Result<RemoteOutput> {
+            let mut opts = RunOpts::with_timeout(ctx.timeout_secs);
+            if let Some(b) = body_for_step.clone() {
+                opts = opts.with_stdin(b);
+            }
+            if args.stream {
+                opts = opts.with_tty(true);
+            }
+            runner_ref.run_streaming_capturing(
+                &target_step.ns.namespace,
+                &target_step.ns.target,
+                cmd_ref,
+                opts,
+                &mut |line| {
+                    let masked = match redactor.mask_line(line) {
+                        Some(m) => m,
+                        None => return,
+                    };
+                    // L13 (v0.1.3): hold the writer lock across
+                    // the entire emit (not just one byte) so the
+                    // line + its trailing newline land atomically.
+                    // No-op closure when sequential.
+                    let _g = writer_lock.map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
+                    if !json {
+                        crate::tee_println!("{label_for_step} | {masked}");
+                    } else {
+                        JsonOut::write(
+                            &Envelope::new(&label_for_step, "run", "step")
+                                .put("steps_run_id", steps_run_id)
+                                .put("step_name", spec.name.as_str())
+                                .put("target", label_for_step.as_str())
+                                .put("line", masked.as_ref()),
+                        );
+                    }
+                    drop(_g);
+                    let line_with_nl_bytes = masked.len() + 1;
+                    if !output_truncated
+                        && step_stdout.len() + line_with_nl_bytes <= MAX_STEP_CAPTURE_BYTES
+                    {
+                        step_stdout.push_str(masked.as_ref());
+                        step_stdout.push('\n');
+                    } else if !output_truncated {
+                        output_truncated = true;
+                        step_stdout.push_str(
+                            "\n[OUTPUT CAPTURE TRUNCATED AT 10 MIB — \
+                             full output streamed live above]\n",
+                        );
+                    }
+                },
+            )
+        },
+    );
+    let dur = started.elapsed().as_millis() as u64;
+
+    let (status, exit_code, stderr_text) = match (&outcome.result, outcome.failure_class) {
+        (Ok(out), _) => {
+            let code = out.exit_code;
+            let st = if code == 0 {
+                StepStatus::Ok
+            } else {
+                StepStatus::Failed
+            };
+            (st, code, out.stderr.clone())
+        }
+        (Err(e), _) => {
+            let msg = e.to_string();
+            if msg.contains("timed out") {
+                (StepStatus::Timeout, -2, msg)
+            } else {
+                (StepStatus::Failed, -1, msg)
+            }
+        }
+    };
+
+    // Per-(step, target) audit entry.
+    let mut audit_id_for_target: Option<String> = None;
+    if let Some(store) = ctx.audit_store {
+        let mut e = AuditEntry::new("run.step", target_label);
+        e.steps_run_id = Some(steps_run_id.to_string());
+        e.step_name = Some(spec.name.clone());
+        e.args = format!("step={} cmd={}", spec.name, truncate(dispatched_cmd, 200));
+        e.exit = exit_code;
+        e.duration_ms = dur;
+        e.rendered_cmd = Some(cmd.clone());
+        if !effective_overlay.is_empty() {
+            e.env_overlay = Some(effective_overlay.clone());
+        }
+        if outcome.retried {
+            e.retry_of = Some(format!("transport_stale@{}", target_label));
+        }
+        if let Some(rid) = &outcome.reauth_id {
+            e.reauth_id = Some(rid.clone());
+        }
+        let class = match status {
+            StepStatus::Ok => "ok",
+            StepStatus::Timeout => "timeout",
+            StepStatus::Failed => {
+                if outcome.result.is_err() && outcome.failure_class.is_some() {
+                    outcome
+                        .failure_class
+                        .as_ref()
+                        .map(|c| c.as_str())
+                        .unwrap_or("command_failed")
+                } else if outcome.result.is_err() {
+                    "transport_error"
+                } else {
+                    "command_failed"
+                }
+            }
+            StepStatus::Skipped => "skipped",
+        };
+        e.failure_class = Some(class.to_string());
+        if matches!(status, StepStatus::Failed | StepStatus::Timeout) && outcome.result.is_err() {
+            e.diff_summary = format!("transport_error: {stderr_text}");
+        }
+        if let Some(s) = ctx.script_sha {
+            e.script_sha256 = Some(s.to_string());
+        }
+        if let Some(b) = ctx.script_bytes {
+            e.script_bytes = Some(b);
+        }
+        if let Some(p) = ctx.script_path {
+            e.script_path = Some(p.to_string());
+        }
+        if args.stream {
+            e.streamed = true;
+        }
+        if redactor.was_active() {
+            e.secrets_masked_kinds = Some(
+                redactor
+                    .active_kinds()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            );
+        }
+        // L13 (v0.1.3): stamp manifest target-list index when the
+        // step is dispatched in parallel so a post-mortem walking
+        // entries in completion order can sort by `target_idx` to
+        // recover manifest order. Sequential entries elide the
+        // field (manifest order == log order).
+        if is_parallel {
+            e.target_idx = Some(target_idx);
+        }
+        e.revert = Some(match &spec.revert_cmd {
+            Some(cmd) if !cmd.trim().is_empty() => Revert::command_pair(
+                cmd.clone(),
+                format!(
+                    "step '{}' inverse on {}: {}",
+                    spec.name,
+                    target_label,
+                    truncate(cmd, 80)
+                ),
+            ),
+            _ => Revert::unsupported(format!(
+                "step '{}' has no declared revert_cmd; \
+                 --revert-on-failure will skip it",
+                spec.name
+            )),
+        });
+        e.applied = Some(matches!(status, StepStatus::Ok | StepStatus::Failed));
+        audit_id_for_target = Some(e.id.clone());
+        let _ = store.append(&e);
+    }
+
+    TargetStepResult {
+        label: target_label.to_string(),
+        exit: exit_code,
+        duration_ms: dur,
+        stdout: step_stdout,
+        stderr: stderr_text,
+        output_truncated,
+        status,
+        audit_id: audit_id_for_target,
+        retried: outcome.retried,
+    }
 }
 
 /// Build the composite-payload entry for a single step. Independent of

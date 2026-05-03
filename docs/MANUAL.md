@@ -1240,22 +1240,67 @@ OOM on a step that emits many GB. Cap matches the F9
 `--stdin-max` default for consistency.
 
 **Multi-target dispatch (v0.1.3).** When the selector resolves to
-N>1 targets, each manifest step fans out across all N targets
-**sequentially within the step**. The step's aggregate `status`
-is `ok` only if every target succeeded; `failed` if any target's
-exit was non-zero; `timeout` if any target overran `timeout_s`.
-`on_failure: "stop"` applies globally — any target's failure
-aborts the next manifest step on every target. Each (step,
-target) pair writes its own `run.step` audit entry with the
-target's label as the entry's `selector`; `--revert-on-failure`
-fans the inverse out across every target the step ran on. The
-JSON output's per-step record has a `targets[]` array (with
-`label`, `exit`, `duration_ms`, `stdout`, `stderr`,
-`output_truncated`, `status`, `audit_id`, `retried`); the
-summary's `target_count` exposes N. Multi-target is sequential
-within each step in v0.1.3; parallel fan-out within a step is
-intentionally out of scope (output interleaving + audit-link-
-ordering races would need a separate design pass).
+N>1 targets, each manifest step fans out across all N targets.
+The step's aggregate `status` is `ok` only if every target
+succeeded; `failed` if any target's exit was non-zero; `timeout`
+if any target overran `timeout_s`. `on_failure: "stop"` applies
+globally — any target's failure aborts the next manifest step on
+every target. Each (step, target) pair writes its own `run.step`
+audit entry with the target's label as the entry's `selector`;
+`--revert-on-failure` fans the inverse out across every target
+the step ran on. The JSON output's per-step record has a
+`targets[]` array (with `label`, `exit`, `duration_ms`, `stdout`,
+`stderr`, `output_truncated`, `status`, `audit_id`, `retried`);
+the summary's `target_count` exposes N.
+
+**Parallel fan-out per step (L13, v0.1.3).** Default behavior is
+sequential: each target runs after the previous one finishes.
+Setting `parallel: true` on a step makes its per-target work run
+in parallel batches:
+
+```yaml
+steps:
+  - name: snapshot-volumes
+    parallel: true            # all 5 targets snapshot in parallel
+    parallel_max: 8           # optional; default 8, hard ceiling 64
+    cmd: "tar czf - /data > /tmp/snap-$(hostname).tgz"
+    on_failure: stop
+```
+
+Wall-clock for an N-target step becomes
+~`ceil(N / parallel_max) × max(target_durations)` instead of
+`sum(target_durations)`. On a 5-target migration where each
+snapshot takes 60 s, sequential is 5 minutes; parallel finishes
+in ~60 s.
+
+The trade-off is **output interleaving**. Every line gets a
+`<target> | …` prefix and a per-line writer mutex serializes
+emits so two targets never interleave bytes mid-line. But lines
+from different targets DO interleave between newlines — under
+sustained burst output from 8 targets, the operator sees lines
+in completion order, not per-target contiguous. The
+`<target> |` prefix is what an agent uses to demultiplex.
+
+**Audit-link ordering.** Per-(step, target) audit entries land
+in the audit log in completion order, NOT manifest order. To
+let a post-mortem walk recover manifest order, every per-(step,
+target) entry produced by a parallel step gains a `target_idx:
+N` field carrying the manifest's target-list index. Sort by
+`target_idx` to recover the original sequence. Sequential
+entries elide the field (log order == manifest order).
+
+**`on_failure: stop` semantics under parallel.** When any
+parallel target completes with a failure, the global cancel
+flag is tripped. Subsequent batches' targets see `is_cancelled()`
+at dispatch start and skip without running. In-flight peers in
+the SAME batch as the failing target run to completion (their
+results are still captured). Subsequent steps are not run.
+`--revert-on-failure` walks the inverse normally — already
+supported by `target_idx`.
+
+Above 64 parallel targets per step, reach for `inspect fleet`
+instead — it has its own large-fanout safety gate. The L13 path
+is sized for migration-bundle scale (8–32 simultaneous targets).
 
 **Mutex with `--file` / `--stdin-script` / `--steps-yaml` ↔
 `--steps`** — clap rejected. Mixing `--steps` with `--file` would

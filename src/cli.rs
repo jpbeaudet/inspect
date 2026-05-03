@@ -62,9 +62,10 @@ const SEE_ALSO_ALIAS: &str =
     "See also: inspect help aliases, inspect help selectors, inspect help search";
 const SEE_ALSO_HELP: &str = "See also: inspect help quickstart, inspect help examples";
 // F6 (v0.1.3): the compose verb cluster cross-links into the safety
-// + write topics for the audited `compose restart`, the formats topic
-// for the per-sub `--json` schemas, and the dedicated `compose`
-// editorial topic for the deferred-verb policy.
+// + write topics for the audited write sub-verbs (`restart`, `up`,
+// `down`, `pull`, `build`), the formats topic for the per-sub
+// `--json` schemas, and the dedicated `compose` editorial topic for
+// the per-sub-verb cluster reference.
 const SEE_ALSO_COMPOSE: &str =
     "See also: inspect help compose, inspect help safety, inspect help formats";
 
@@ -684,8 +685,26 @@ MULTI-STEP (F17, v0.1.3)
 
   Mutex with `--file` / `--stdin-script` / `--steps-yaml` (clap
   rejected; pick one script source). Composes with `--stream`
-  (forces PTY on every per-step dispatch). Single-target only —
-  fanout selectors exit 2 with a chained hint.
+  (forces PTY on every per-step dispatch). Multi-target selectors
+  are supported.
+
+  L13 (v0.1.3): per-step parallel multi-target fan-out. Set
+  `parallel: true` on a step in the manifest and that step's
+  per-target work runs in parallel batches of `parallel_max`
+  (default 8, hard ceiling 64). Wall-clock for an N-target step
+  becomes ~`ceil(N / parallel_max) × max(target_durations)` instead
+  of `sum(target_durations)`. Output is emitted with a `<target> |`
+  prefix on every line and serialised through a per-line writer
+  mutex so two parallel targets never interleave bytes mid-line
+  (lines from different targets do interleave between newlines —
+  that's the documented contract). `on_failure: stop` aborts
+  subsequent batches when any target fails; in-flight peers in
+  the failing batch run to completion (their results are still
+  captured). Per-(step, target) audit entries gain `target_idx`
+  recording the manifest's target-list index so a post-mortem
+  walking entries in completion order can sort by `target_idx`
+  to recover manifest order. Sequential entries elide the field
+  (manifest order == log order).
 
   L12 (v0.1.3): under `--steps --stream`, per-step output flows
   live as it arrives (no buffering between step boundaries) and

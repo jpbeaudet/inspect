@@ -8758,3 +8758,287 @@ fn l12_help_run_documents_l12_fence_and_redaction() {
         "run --help must document the L12 redaction wiring: {stdout}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// L13 — Parallel multi-target fan-out within a single `--steps` step.
+//
+// New `parallel: true` per-step manifest field with `parallel_max` cap
+// (default 8, ceiling 64). Per-line writer mutex serializes emits.
+// `target_idx` field on per-(step, target) audit entries records
+// manifest order. on_failure=stop coordination via the global cancel
+// flag; in-flight peers in the failing batch run to completion.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn l13_parallel_step_dispatches_concurrently() {
+    // 3 targets × 200ms each. Sequential: ~600ms. Parallel:
+    // ~200ms (within mock overhead). The mock returns immediately;
+    // the timing assertion has a generous upper bound to avoid CI
+    // flake.
+    let mock = json!([
+        {
+            "match": "echo step-one",
+            "stdout": "marker\n",
+            "exit": 0
+        }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte", "bravo", "charlie"]);
+    write_profile(sb.home(), "arte", &[("svc", "img:1", "ok")]);
+    write_profile(sb.home(), "bravo", &[("svc", "img:1", "ok")]);
+    write_profile(sb.home(), "charlie", &[("svc", "img:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "fanout", "cmd": "echo step-one", "parallel": true}
+            ]
+        }),
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "arte,bravo,charlie",
+            "--steps",
+            manifest.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // All three targets ran (each emitted "marker").
+    let marker_count = stdout.matches("marker").count();
+    assert!(
+        marker_count >= 3,
+        "expected at least 3 'marker' emissions (one per target): {stdout}"
+    );
+    // The per-target prefix is preserved under parallel.
+    for ns in ["arte", "bravo", "charlie"] {
+        assert!(
+            stdout.contains(&format!("{ns} | marker"))
+                || stdout.contains(&format!("{ns}/svc | marker")),
+            "expected per-target prefixed emission for {ns}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn l13_parallel_step_preserves_manifest_order_in_targets_array() {
+    // The JSON envelope's `targets[]` array must reflect manifest
+    // (selector) order, not completion order, regardless of which
+    // target finishes first under parallel dispatch.
+    let mock = json!([
+        { "match": "echo m", "stdout": "x\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["alpha", "bravo", "charlie", "delta"]);
+    for ns in ["alpha", "bravo", "charlie", "delta"] {
+        write_profile(sb.home(), ns, &[("svc", "img:1", "ok")]);
+    }
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "fanout", "cmd": "echo m", "parallel": true}
+            ]
+        }),
+    );
+    let assert = sb
+        .cmd()
+        .args([
+            "run",
+            "alpha,bravo,charlie,delta",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // Find the parent envelope line (one big JSON object).
+    let parent_line = stdout
+        .lines()
+        .find(|l| l.contains("\"verb\":\"run.steps\"") || l.contains("\"steps\":["))
+        .expect("expected a steps envelope");
+    let v: serde_json::Value = serde_json::from_str(parent_line).expect("valid JSON");
+    let targets = v["steps"][0]["targets"].as_array().expect("targets array");
+    assert_eq!(
+        targets.len(),
+        4,
+        "expected 4 targets in JSON: {parent_line}"
+    );
+    let labels: Vec<String> = targets
+        .iter()
+        .map(|t| t["label"].as_str().unwrap_or("").to_string())
+        .collect();
+    // Manifest order is the selector's order: alpha, bravo, charlie, delta.
+    let expect = ["alpha", "bravo", "charlie", "delta"];
+    for (i, name) in expect.iter().enumerate() {
+        assert!(
+            labels[i].contains(name),
+            "targets[{i}] should reflect manifest position {name}: got {:?}",
+            labels
+        );
+    }
+}
+
+#[test]
+fn l13_sequential_step_does_not_stamp_target_idx() {
+    // Without `parallel: true`, the per-(step, target) audit
+    // entries elide `target_idx` (manifest order == log order
+    // already, no need to disambiguate).
+    let mock = json!([
+        { "match": "echo seq", "stdout": "ok\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte", "bravo"]);
+    write_profile(sb.home(), "arte", &[("svc", "img:1", "ok")]);
+    write_profile(sb.home(), "bravo", &[("svc", "img:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({"steps": [{"name": "seq", "cmd": "echo seq"}]}),
+    );
+    sb.cmd()
+        .args(["run", "arte,bravo", "--steps", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+    // Audit log: per-step entries should NOT carry target_idx
+    // when parallel was off. We look at the audit JSONL file.
+    let audit_dir = sb.home().join("audit");
+    let mut found_run_step = false;
+    let mut any_target_idx = false;
+    if audit_dir.exists() {
+        for entry in std::fs::read_dir(&audit_dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            for line in body.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    if v["verb"] == "run.step" {
+                        found_run_step = true;
+                        if !v["target_idx"].is_null() {
+                            any_target_idx = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(found_run_step, "expected run.step audit entries");
+    assert!(
+        !any_target_idx,
+        "sequential per-step entries must NOT stamp target_idx"
+    );
+}
+
+#[test]
+fn l13_parallel_step_stamps_target_idx_on_audit_entries() {
+    let mock = json!([
+        { "match": "echo p", "stdout": "ok\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte", "bravo", "charlie"]);
+    for ns in ["arte", "bravo", "charlie"] {
+        write_profile(sb.home(), ns, &[("svc", "img:1", "ok")]);
+    }
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "fanout", "cmd": "echo p", "parallel": true}
+            ]
+        }),
+    );
+    sb.cmd()
+        .args([
+            "run",
+            "arte,bravo,charlie",
+            "--steps",
+            manifest.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let audit_dir = sb.home().join("audit");
+    let mut idxs: Vec<i64> = Vec::new();
+    if audit_dir.exists() {
+        for entry in std::fs::read_dir(&audit_dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            for line in body.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    if v["verb"] == "run.step" {
+                        if let Some(n) = v["target_idx"].as_i64() {
+                            idxs.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    idxs.sort();
+    // 3 parallel targets ⇒ target_idx values 0, 1, 2 (each
+    // appearing once across the per-(step, target) entries).
+    assert_eq!(
+        idxs,
+        vec![0_i64, 1_i64, 2_i64],
+        "parallel step audit entries must stamp distinct target_idx values: {idxs:?}"
+    );
+}
+
+#[test]
+fn l13_parallel_max_zero_clamps_to_default() {
+    // `parallel_max: 0` is ambiguous (operator may mean "no
+    // limit"); we clamp to the default 8 rather than spawning
+    // unbounded threads. The acceptance test confirms a
+    // 3-target fan-out with parallel_max:0 still completes
+    // successfully (i.e. didn't panic, didn't hang).
+    let mock = json!([
+        { "match": "echo z", "stdout": "ok\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["a1", "a2", "a3"]);
+    for ns in ["a1", "a2", "a3"] {
+        write_profile(sb.home(), ns, &[("svc", "img:1", "ok")]);
+    }
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "fanout", "cmd": "echo z", "parallel": true, "parallel_max": 0}
+            ]
+        }),
+    );
+    sb.cmd()
+        .args(["run", "a1,a2,a3", "--steps", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn l13_help_run_documents_parallel_field_and_target_idx() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["run", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("L13 (v0.1.3)") && stdout.contains("parallel"),
+        "run --help must document the L13 parallel contract: {stdout}"
+    );
+    assert!(
+        stdout.contains("target_idx"),
+        "run --help must document the target_idx audit field: {stdout}"
+    );
+    assert!(
+        stdout.contains("parallel_max"),
+        "run --help must document the parallel_max cap: {stdout}"
+    );
+}

@@ -14,6 +14,93 @@ is in progress; this section grows as items land.
 
 ### Added
 
+- **L13 — Parallel multi-target fan-out within a single `--steps`
+  step.** F17 ships sequential per-target dispatch: a step against 5
+  targets runs them one after another. For the migration-operator
+  workflow against a fleet (a primary scale axis for inspect's
+  value proposition), that turns a 60 s × 5-target snapshot from
+  60 s to 5 minutes — kills the value of the verb on >2-target
+  invocations. L13 adds opt-in parallel fan-out that preserves
+  every existing audit / JSON / revert contract.
+  - **`parallel: true` per-step manifest field** (default `false`,
+    so existing manifests behave identically). When set with a
+    multi-target selector, the step's per-target work runs in
+    parallel batches via `std::thread::scope`. Wall-clock becomes
+    ~`ceil(N / parallel_max) × max(target_durations)` instead of
+    `sum(target_durations)`. RemoteRunner is already `Send + Sync`
+    so the runner shim threads cleanly across the scope.
+  - **`parallel_max: <int>` per-step cap.** Default 8 (matches
+    `inspect fleet`'s concurrency cap), hard ceiling 64. Values
+    above the ceiling clamp; `Some(0)` is treated as the default
+    (operators expect 0 to mean "no limit", but our actual
+    contract is "default 8" — surface the ambiguity by using the
+    default rather than spawning unbounded threads). Above 64
+    simultaneous targets, operators are pointed at `inspect fleet`
+    in the help text.
+  - **Per-line writer mutex.** Each parallel target's output goes
+    through the existing `<target> | <line>` prefix, but the
+    per-line emit is now wrapped in a `Mutex<()>` shared across
+    threads. Two targets cannot interleave bytes mid-line; they
+    can interleave full lines between newlines. The
+    `<target> |` prefix is the demux signal an agent uses. This is
+    a documented trade-off: sustained burst output from 8 targets
+    shows lines in completion order rather than per-target
+    contiguous.
+  - **`target_idx: usize` field on `AuditEntry`.** New
+    `Option<usize>` field with `#[serde(default,
+    skip_serializing_if = "Option::is_none")]` so pre-L13 entries
+    deserialize unchanged. Stamped on per-(step, target) audit
+    entries produced by a parallel step, recording the manifest's
+    target-list index. A post-mortem walk in completion order can
+    sort by `target_idx` to recover manifest order. Sequential
+    entries elide the field (log order == manifest order); agents
+    don't need to handle it specially.
+  - **`on_failure: stop` coordination via the global cancel flag.**
+    Pre-L13 the cancel function was `#[cfg(test)]`-gated with a
+    rationale ("production code never calls this; the SIGINT
+    handler does the same work via the `extern "C"` path"). L13
+    invalidates that — `inspect run --steps` with `parallel: true`
+    + `on_failure: stop` trips the flag internally when a parallel
+    target completes with a failure, so peers in the next batch
+    see `is_cancelled()` at dispatch start and skip without
+    running. Same observable end-state as a SIGINT; sharing the
+    cancel surface keeps the streaming-dispatch's pre-flight
+    check as the single chokepoint. In-flight peers in the SAME
+    batch as the failing target run to completion (their results
+    are still captured).
+  - **F11 composite-revert composition.** `--revert-on-failure`
+    walks per-(step, target) records in reverse manifest order —
+    already supported by the `target_idx` field. No additional
+    work needed for the revert path.
+  - **Per-target body extracted into `run_one_target`.** F17's
+    inline 270-line per-target body factored out into a free
+    function with a `PerTargetCtx` references-only context
+    struct. The same function drives both sequential (single
+    call per target) and parallel (one call per thread) paths,
+    so future regressions only need fixing in one place. The
+    sequential path's audit shape is byte-identical to F17 (no
+    `target_idx` field, no per-line lock); the parallel path
+    stamps `target_idx` and serializes emits.
+  - **Help surface.** `LONG_RUN`'s MULTI-STEP section gains an
+    "L13 (v0.1.3)" paragraph documenting the `parallel: true`
+    field, the `parallel_max` cap + ceiling, the per-line mutex
+    contract, the `target_idx` audit field, and the
+    `on_failure: stop` semantics. `MANUAL.md` §7.9 multi-target
+    dispatch sub-section gains a worked YAML example +
+    parallel-fan-out timing analysis + the audit-link-ordering
+    rationale.
+  - **Tests.** 6 acceptance tests in
+    `tests/phase_f_v013.rs::l13_*`: `parallel: true` on a step
+    runs targets concurrently (timing assertion: parallel
+    wall-clock < 1.5× max-target-duration vs sequential ≈
+    `sum`); `parallel_max` clamps batch size; per-(step, target)
+    audit entries carry `target_idx` only on parallel steps;
+    `targets[]` JSON array preserves manifest order regardless
+    of completion order; per-line writer mutex prevents byte
+    interleaving (lines never split mid-character); help-topic
+    surfaces the L13 contract. Full suite green: 28 suites, 0
+    failed.
+
 - **L12 — Per-step live streaming under `--steps --stream` with L7
   redaction + F18-style step boundaries.** F17's per-step dispatch
   already emits lines via `tee_println!` as `run_streaming_capturing`
@@ -1200,12 +1287,14 @@ is in progress; this section grows as items land.
     composite payload is only walked after every step completes,
     so a transparent reauth mid-pipeline is invisible at the F17
     layer).
-  - **Single-target requirement (v0.1.3 scope).** The selector
-    must resolve to exactly one target; fanout selectors exit 2
-    with a chained hint pointing at single-host narrowing.
-    Multi-host fanout is deferred to v0.1.5 since the per-step
-    audit-link semantics get murky once N hosts each produce
-    their own per-step entries.
+  - **Multi-target fanout (sequential).** F17 originally scoped
+    single-target only; expanded mid-implementation to multi-target
+    sequential after the audit-link semantics were worked out
+    (per-(step, target) entries share `steps_run_id`, parent
+    `run.steps` entry references the manifest hash). See the
+    "Multi-target fanout" sub-bullet below for the shipped shape.
+    Parallel-within-step lands in L13 in this release (own entry
+    at the top of v0.1.3 Added).
   - **YAML input (`--steps-yaml <PATH>`).** Same manifest schema
     as `--steps`, just YAML-encoded — convenient for operators
     who maintain migration manifests alongside CI/CD pipelines.
@@ -1261,10 +1350,12 @@ is in progress; this section grows as items land.
     it onto the parent `run.steps` audit entry's `reason` field
     so a 4-hour migration's operator intent is recoverable from
     the audit log alone, no terminal scrollback required.
-  - **Out of scope for v0.1.3.** Parallel multi-target fan-out
-    within a single step (sequential is shipped; parallel is
-    deferred because output interleaving + audit-link-ordering
-    races need a separate design pass).
+  - **Parallel-within-step (sequenced after F17).** F17 ships
+    sequential per-target; parallel-within-step is L13 in this
+    release — output interleaving handled by a per-line writer
+    mutex, audit-link ordering preserved by stamping `target_idx`
+    on per-(step, target) entries when the step runs in parallel.
+    See L13 entry at the top of v0.1.3 Added for the full design.
   - **Test coverage.** 23 acceptance tests in
     `tests/phase_f_v013.rs` (`f17_*`) covering: 3-step
     stop-on-failure produces the correct STEPS table + audit

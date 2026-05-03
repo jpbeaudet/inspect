@@ -45,10 +45,19 @@ pub fn signal_count() -> u32 {
     SIGNAL_COUNT.load(Ordering::Relaxed)
 }
 
-/// Manually trip the cancel flag (and bump the counter). Test-only.
-/// Production code never calls this; the SIGINT/SIGTERM handler does
-/// the same work via the `extern "C"` path.
-#[cfg(test)]
+/// Manually trip the cancel flag (and bump the counter).
+///
+/// Originally (v0.1.3 pre-L13) gated to `#[cfg(test)]` with the
+/// rationale "production code never calls this; the SIGINT/SIGTERM
+/// handler does the same work via the `extern "C"` path". L13
+/// invalidates that — `inspect run --steps` with a step's
+/// `parallel: true` AND `on_failure: stop` now trips the flag
+/// internally when a parallel target completes with a failure so
+/// peers in the next batch see `is_cancelled()` and skip without
+/// dispatch. This is the same observable end-state the SIGINT
+/// handler produces; sharing the cancel surface keeps the
+/// streaming-dispatch's pre-flight check (`if is_cancelled() { … }`)
+/// as the single chokepoint.
 pub fn cancel() {
     CANCELLED.store(true, Ordering::Relaxed);
     SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);

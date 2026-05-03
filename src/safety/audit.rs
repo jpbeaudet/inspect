@@ -240,6 +240,17 @@ pub struct AuditEntry {
     /// `--stream` runs without a script source.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bidirectional: bool,
+    /// L13 (v0.1.3): manifest-target-list index for per-(step,
+    /// target) audit entries produced by `inspect run --steps`
+    /// when the step's `parallel: true` was set. `None` (and
+    /// elided on serialize) for every other entry, including
+    /// sequential per-target entries. Recorded so a post-mortem
+    /// query can reconstruct manifest order regardless of the
+    /// audit log's natural completion-order ordering — agents
+    /// reading the log in time order can sort by `target_idx`
+    /// to recover the manifest's target list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_idx: Option<usize>,
     /// F17 (v0.1.3): UUID-shaped identifier linking a parent
     /// `run --steps` invocation to the per-step audit entries it
     /// produced. Stamped on the parent entry and on every per-step
@@ -432,6 +443,7 @@ impl AuditEntry {
             transfer_sha256: None,
             streamed: false,
             bidirectional: false,
+            target_idx: None,
             steps_run_id: None,
             step_name: None,
             manifest_sha256: None,
