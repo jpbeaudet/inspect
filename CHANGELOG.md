@@ -72,6 +72,28 @@ tagging.
   host-shaped token; embedded `@`s in the password are consumed
   as data. Three new unit tests cover the §5.4 case, three-`@`
   pathological input, and pass-through for non-URL `@` patterns.
+- **S6/S7 — Threat model documented in `inspect help safety`.**
+  The audit pass surfaced four areas where inspect explicitly does
+  not add a privilege boundary, but where the boundary's absence
+  was not previously documented for operators: (1) path arguments
+  to `inspect put` / `inspect cp` are not validated against `..`
+  traversal — the threat surface is identical to running `scp`
+  directly; (2) bundle YAML is trusted code and matrix
+  interpolation is literal substitution, not shell-escape — a
+  matrix entry like `volume: "$(rm -rf /)"` will execute as a
+  subshell on the target; (3) bundle rollback runs with the same
+  authority as the forward block — bundle authors are responsible
+  for idempotent / bounded rollback; (4) local executor (F19)
+  has no SSH gate — namespaces with `type = "local"` dispatch
+  directly under the operator's UID, so the `--apply` gate +
+  audit log are the only safety boundary. New "THREAT MODEL —
+  OPERATOR AUTHORITY PASS-THROUGH" section under `inspect help
+  safety` makes all four explicit. No code change — the
+  audit also positively verified that audit / transcript / home
+  / snapshots / sockets / scripts / cursors / profile-cache all
+  enforce 0700 / 0600 (§6.3) and that password auth (L4) never
+  passes the secret on the cmdline (`SSH_ASKPASS` mechanism with
+  3-attempt cap; §10.1 / §10.2 / §10.3).
 
 ### Fixed (pre-release pain-point audit)
 

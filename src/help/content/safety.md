@@ -147,6 +147,67 @@ LIMITATIONS
   in regulated environments, forward audit entries to an external
   log system.
 
+THREAT MODEL — OPERATOR AUTHORITY PASS-THROUGH
+  inspect is an operator tool, not a sandbox. Every command it
+  dispatches runs with the operator's full authority on the
+  target — same SSH key, same docker socket, same kubectl
+  credentials. inspect adds three guard rails over a raw shell
+  (audit log, dry-run-by-default `--apply` gate, L7 redaction);
+  it does NOT add a privilege boundary. Several consequences
+  follow that are documented here so operators run with eyes
+  open.
+
+  1. PATH ARGUMENTS ARE NOT VALIDATED.
+     `inspect put foo.cfg arte/svc:/../../../etc/shadow --apply`
+     is honored — the path is whatever the remote shell
+     interprets it as. inspect does not reject `..` in paths
+     because doing so would block legitimate writes to
+     well-known absolute paths. The threat surface is identical
+     to running `scp` or `docker cp` directly: an operator who
+     can dispatch can already write anywhere their target
+     credentials allow.
+
+  2. BUNDLE YAML IS TRUSTED CODE.
+     Bundles are operator-authored YAML; their `command:` strings
+     are passed verbatim to the remote shell. `{{ matrix.<k> }}`
+     and `{{ vars.<k> }}` interpolations substitute the value
+     literally — no shell-escape, no quoting. A matrix entry like
+     `volume: "$(rm -rf /)"` will execute as a subshell on the
+     target. Treat a bundle the same as any executable script:
+     read it before running, never run a bundle from an
+     untrusted source.
+
+  3. ROLLBACK CAN BE DESTRUCTIVE.
+     A bundle's `rollback:` block runs with the same authority
+     as the forward block. A malicious bundle can intentionally
+     corrupt data on rollback; a buggy rollback can corrupt
+     data on a legitimate failure. Bundle authors are
+     responsible for making rollback idempotent and bounded.
+     `inspect bundle … --no-rollback` opts out of rollback at
+     dispatch time when the operator wants to inspect the
+     half-applied state manually.
+
+  4. LOCAL EXECUTOR (F19) HAS NO SSH GATE.
+     `type = "local"` namespaces dispatch directly under the
+     operator's UID — there is no SSH key, no passphrase prompt,
+     no ControlMaster lifecycle. The `--apply` gate, audit
+     logging, and snapshot capture still fire identically; the
+     authority boundary is the operator's local shell. Use
+     local executors for the operator's own machine; do not
+     install inspect under a service account whose process
+     should not be running operator-authored shell.
+
+  5. CONFIG IS A CREDENTIAL STORE.
+     ~/.inspect/ contains the audit log (every command run
+     against every server), session transcripts (full output
+     of those commands, post-redaction), the snapshot store
+     (pre-mutation file contents), and the profile cache
+     (resolved namespace metadata). Protect this directory
+     with the same care as ~/.ssh/. The directory is mode 0700
+     and every file inside is mode 0600; the profile lock-file
+     contention check is deliberately strict to surface
+     unexpected concurrent access.
+
 SESSION TRANSCRIPTS (F18, v0.1.3)
   Per-namespace, per-day, human-readable transcripts at
   ~/.inspect/history/<ns>-<YYYY-MM-DD>.log (mode 0600). Each verb
