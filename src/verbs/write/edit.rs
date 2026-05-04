@@ -167,7 +167,10 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let dur = started.elapsed().as_millis() as u64;
 
         let mut entry = AuditEntry::new("edit", &w.label);
-        entry.args = args.expr.clone();
+        // G2 (post-v0.1.3 audit hardening): a sed expression can
+        // legitimately carry secrets (e.g. rotating an API key in a
+        // config file). Redact embedded secrets before recording.
+        entry.args = crate::redact::redact_for_audit(&args.expr).into_owned();
         entry.previous_hash = Some(format!("sha256:{prev_hash}"));
         entry.new_hash = Some(format!("sha256:{new_hash}"));
         entry.snapshot = Some(snaps.path_for(&prev_hash).display().to_string());

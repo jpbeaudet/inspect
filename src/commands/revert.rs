@@ -242,11 +242,13 @@ fn revert_composite(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -
         rev_entry.reverts = Some(entry.id.clone());
         rev_entry.steps_run_id = Some(parent_steps_run_id.clone());
         rev_entry.step_name = Some(step_name.clone());
-        rev_entry.args = cmd.clone();
+        // G2: redact embedded secrets in the revert command body.
+        rev_entry.args = crate::redact::redact_for_audit(cmd).into_owned();
         rev_entry.exit = revert_exit;
         rev_entry.duration_ms = dur;
         rev_entry.applied = Some(revert_ok);
-        rev_entry.rendered_cmd = Some(wrapped);
+        // G2: redact wrapped shell command (carries the same body).
+        rev_entry.rendered_cmd = Some(crate::redact::redact_for_audit(&wrapped).into_owned());
         store.append(&rev_entry)?;
         if revert_ok {
             applied_count += 1;
@@ -372,7 +374,8 @@ fn revert_command_pair(
     let mut rev_entry = AuditEntry::new("revert", &label);
     rev_entry.is_revert = true;
     rev_entry.reverts = Some(entry.id.clone());
-    rev_entry.args = cmd.clone();
+    // G2: redact embedded secrets in the revert command body.
+    rev_entry.args = crate::redact::redact_for_audit(&cmd).into_owned();
     rev_entry.exit = out.exit_code;
     rev_entry.duration_ms = dur;
     rev_entry.applied = Some(out.ok());

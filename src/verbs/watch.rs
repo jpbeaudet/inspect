@@ -353,6 +353,11 @@ fn emit_status(
 }
 
 /// Trim and collapse a value to a single short line for audit/UX use.
+///
+/// G2 (post-v0.1.3 audit hardening): the trimmed value is also passed
+/// through [`crate::redact::redact_for_audit`] before recording, so
+/// `--until-cmd` output containing `KEY=VALUE`, header values, or
+/// URL credentials does not leak into the audit log verbatim.
 fn trimmed_for_audit(s: &str) -> String {
     let t = s.trim();
     let mut out = String::with_capacity(t.len().min(120));
@@ -366,7 +371,7 @@ fn trimmed_for_audit(s: &str) -> String {
     if t.chars().count() > 120 {
         out.push('…');
     }
-    out
+    crate::redact::redact_for_audit(&out).into_owned()
 }
 
 // ---------------------------------------------------------------------

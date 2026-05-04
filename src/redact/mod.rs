@@ -216,6 +216,54 @@ impl OutputRedactor {
     }
 }
 
+/// G2 (post-v0.1.3 audit hardening): redact a single command-line
+/// string before it is recorded in `AuditEntry::args`.
+///
+/// Audit reviewers and forensic exports must never see plaintext
+/// secrets in the recorded command, even when an operator inadvertently
+/// types `psql -p s3cret …` on the CLI. The L7 stream redactor only
+/// runs on stdout/stderr; this helper provides the same coverage for
+/// the *command text itself*.
+///
+/// Coverage: header (`Authorization: Bearer …`), URL credentials
+/// (`scheme://user:pass@host`), env-var pairs (`KEY=VALUE` where KEY
+/// matches the secret-suffix list). PEM is irrelevant for a single
+/// command line and is skipped. The function is line-oriented so
+/// multi-line script bodies (e.g. F14's `--audit-script-body` or
+/// `inspect bundle` step text) are masked line-by-line.
+///
+/// Returns the input unchanged when nothing fires; otherwise an owned
+/// string with the same redaction shape the stream pipeline produces.
+pub fn redact_for_audit(text: &str) -> std::borrow::Cow<'_, str> {
+    let r = OutputRedactor::new(false, false);
+    let mut any = false;
+    let mut out = String::new();
+    let mut iter = text.split('\n').peekable();
+    while let Some(line) = iter.next() {
+        match r.mask_line(line) {
+            Some(masked) => {
+                if matches!(&masked, std::borrow::Cow::Owned(_)) {
+                    any = true;
+                }
+                out.push_str(&masked);
+            }
+            None => {
+                // PEM-suppressed line. Should not occur for single
+                // command lines but keep the contract honest.
+                any = true;
+            }
+        }
+        if iter.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    if any {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +430,46 @@ mod tests {
         assert!(matches!(out, Cow::Borrowed(_)));
         assert_eq!(out.as_ref(), input);
         assert!(!r.was_active());
+    }
+
+    // ---- G2: redact_for_audit ------------------------------------
+
+    #[test]
+    fn redact_for_audit_passes_clean_text_through() {
+        let out = redact_for_audit("ls -la /etc");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), "ls -la /etc");
+    }
+
+    #[test]
+    fn redact_for_audit_masks_env_secret_in_command() {
+        let out = redact_for_audit("DATABASE_URL=postgres://admin:s3cret@h/d psql");
+        assert!(matches!(out, Cow::Owned(_)));
+        // Either the env masker or the URL masker (or both) must hide
+        // the password. We only assert the secret is gone — the exact
+        // shape is the maskers' contract, tested separately.
+        assert!(!out.as_ref().contains("s3cret"));
+    }
+
+    #[test]
+    fn redact_for_audit_masks_url_password_in_curl() {
+        let out = redact_for_audit("curl https://admin:s3cret@example.com/api");
+        assert!(!out.as_ref().contains("s3cret"));
+    }
+
+    #[test]
+    fn redact_for_audit_masks_header_in_curl_command() {
+        let out = redact_for_audit(r#"curl -H "Authorization: Bearer eyJabcdef"  https://x"#);
+        assert!(!out.as_ref().contains("eyJabcdef"));
+    }
+
+    #[test]
+    fn redact_for_audit_handles_multi_line_script_body() {
+        let s = "echo line1\nAPI_KEY=sk-abcdefghk3\necho line3";
+        let out = redact_for_audit(s);
+        assert!(matches!(out, Cow::Owned(_)));
+        assert!(!out.as_ref().contains("sk-abcdefghk3"));
+        assert!(out.as_ref().contains("echo line1"));
+        assert!(out.as_ref().contains("echo line3"));
     }
 }

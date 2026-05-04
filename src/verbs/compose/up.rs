@@ -142,7 +142,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     entry.duration_ms = dur;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.applied = Some(out.ok());
-    entry.rendered_cmd = Some(cmd.clone());
+    entry.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
     let mut extras: Vec<&str> = Vec::new();
     if args.no_detach {
         extras.push("[no_detach=true]");

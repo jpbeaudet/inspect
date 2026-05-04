@@ -742,7 +742,9 @@ fn run_single_branch(
             let mut audit_id: Option<String> = None;
             if matches!(kind, StepBodyKind::Exec) {
                 let mut e = AuditEntry::new("exec", target_ns);
-                e.args = body.clone();
+                // G2 (post-v0.1.3 audit hardening): redact embedded
+                // secrets in the command body before recording.
+                e.args = crate::redact::redact_for_audit(&body).into_owned();
                 e.exit = out.exit_code;
                 e.duration_ms = dur_ms;
                 e.reason = crate::safety::validate_reason(reason.as_deref())?;
@@ -996,7 +998,9 @@ fn run_compose_branch(
     e.duration_ms = dur_ms;
     e.reason = crate::safety::validate_reason(reason)?;
     e.applied = Some(out.ok());
-    e.rendered_cmd = Some(cmd.clone());
+    // G2: bundle compose verbs are structured but the rendered shell
+    // can still embed compose-file env vars; redact defensively.
+    e.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
     e.bundle_id = Some(bundle_id.to_string());
     e.bundle_step = Some(step.id.clone());
     if let Some((mkey, mval)) = matrix.iter().next() {
@@ -1601,7 +1605,8 @@ fn run_rollback_action(
     )?;
     let dur_ms = started.elapsed().as_millis() as u64;
     let mut e = AuditEntry::new("bundle.rollback", target_ns);
-    e.args = body.to_string();
+    // G2: redact the rollback command body before recording.
+    e.args = crate::redact::redact_for_audit(body).into_owned();
     e.exit = out.exit_code;
     e.duration_ms = dur_ms;
     e.is_revert = true;

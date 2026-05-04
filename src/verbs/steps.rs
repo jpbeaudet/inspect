@@ -843,11 +843,13 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                         entry.auto_revert_of = Some(orig_id.clone());
                         entry.reverts = Some(orig_id.clone());
                     }
-                    entry.args = revert_cmd.clone();
+                    entry.args = crate::redact::redact_for_audit(&revert_cmd).into_owned();
                     entry.exit = revert_exit;
                     entry.duration_ms = dur;
                     entry.applied = Some(revert_ok);
-                    entry.rendered_cmd = Some(cmd_with_env);
+                    // G2: revert command body may carry secrets; redact.
+                    entry.rendered_cmd =
+                        Some(crate::redact::redact_for_audit(&cmd_with_env).into_owned());
                     if !effective_overlay.is_empty() {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
@@ -1322,10 +1324,18 @@ fn run_one_target(
         let mut e = AuditEntry::new("run.step", target_label);
         e.steps_run_id = Some(steps_run_id.to_string());
         e.step_name = Some(spec.name.clone());
-        e.args = format!("step={} cmd={}", spec.name, truncate(dispatched_cmd, 200));
+        e.args = format!(
+            "step={} cmd={}",
+            spec.name,
+            crate::redact::redact_for_audit(&truncate(dispatched_cmd, 200))
+        );
         e.exit = exit_code;
         e.duration_ms = dur;
-        e.rendered_cmd = Some(cmd.clone());
+        // G2: redact rendered_cmd to mask any secrets the operator
+        // wrote into the steps manifest. `--show-secrets` is not a
+        // steps-runner concept (steps are non-interactive), so the
+        // safe default applies unconditionally.
+        e.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
         if !effective_overlay.is_empty() {
             e.env_overlay = Some(effective_overlay.clone());
         }

@@ -257,7 +257,13 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
                     if !effective_overlay.is_empty() {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
-                    entry.rendered_cmd = Some(cmd.clone());
+                    // G2: redact wrapped shell command unless the
+                    // operator opted into `--show-secrets`.
+                    entry.rendered_cmd = Some(if args.show_secrets {
+                        cmd.clone()
+                    } else {
+                        crate::redact::redact_for_audit(&cmd).into_owned()
+                    });
                     entry.secrets_masked_kinds = collect_kinds(&redactor);
                     entry.failure_class = Some(class.as_str().to_string());
                     if stream_result.retried {
@@ -296,15 +302,32 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         // operator's explicit `--no-revert` acknowledgement so audit
         // readers can tell free-form mutations apart from mutations
         // that simply pre-date the contract.
+        // G2 (post-v0.1.3 audit hardening): the preview text mirrors
+        // the original user command, so redact it the same way as
+        // the args field unless the operator opted into
+        // `--show-secrets`.
+        let preview_cmd: std::borrow::Cow<'_, str> = if args.show_secrets {
+            std::borrow::Cow::Borrowed(user_cmd.as_str())
+        } else {
+            crate::redact::redact_for_audit(&user_cmd)
+        };
         e.revert = Some(Revert::unsupported(format!(
-            "exec is free-form shell; no inverse captured. Original cmd: {user_cmd}"
+            "exec is free-form shell; no inverse captured. Original cmd: {preview_cmd}"
         )));
         e.no_revert_acknowledged = true;
         e.applied = Some(out.ok());
         if !effective_overlay.is_empty() {
             e.env_overlay = Some(effective_overlay.clone());
         }
-        e.rendered_cmd = Some(cmd.clone());
+        // G2: the rendered shell command is the wrapped form
+        // (`docker exec ... sh -c '<user_cmd>'`) which still embeds
+        // any secrets the operator typed. Redact in the same
+        // show-secrets-aware way.
+        e.rendered_cmd = Some(if args.show_secrets {
+            cmd.clone()
+        } else {
+            crate::redact::redact_for_audit(&cmd).into_owned()
+        });
         e.secrets_masked_kinds = collect_kinds(&redactor);
         // F13: stamp retry / reauth correlation fields and a
         // `failure_class` of `ok` / `command_failed` so audit
@@ -399,6 +422,10 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
 /// `[secrets_exposed=true]` when the operator opted out via
 /// `--show-secrets`; `[secrets_masked=true]` when the redactor fired
 /// during this step; clean cmd otherwise.
+///
+/// G2 (post-v0.1.3 audit hardening): the `user_cmd` text itself is
+/// passed through [`crate::redact::redact_for_audit`] so embedded
+/// secrets in the command line never reach the audit log in plaintext.
 fn stamp_args(
     user_cmd: &str,
     show_secrets: bool,
@@ -406,10 +433,13 @@ fn stamp_args(
 ) -> String {
     if show_secrets {
         format!("{user_cmd} [secrets_exposed=true]")
-    } else if redactor.was_active() {
-        format!("{user_cmd} [secrets_masked=true]")
     } else {
-        user_cmd.to_string()
+        let masked = crate::redact::redact_for_audit(user_cmd);
+        if redactor.was_active() || matches!(&masked, std::borrow::Cow::Owned(_)) {
+            format!("{} [secrets_masked=true]", masked.as_ref())
+        } else {
+            user_cmd.to_string()
+        }
     }
 }
 

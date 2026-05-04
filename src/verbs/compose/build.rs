@@ -140,7 +140,7 @@ pub fn run(args: ComposeBuildArgs) -> Result<ExitKind> {
     entry.streamed = true;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.applied = Some(out.ok());
-    entry.rendered_cmd = Some(cmd.clone());
+    entry.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
     let mut extras: Vec<&str> = Vec::new();
     if args.no_cache {
         extras.push("[no_cache=true]");

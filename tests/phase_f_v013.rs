@@ -9379,3 +9379,151 @@ fn l3_help_alias_documents_param_syntax() {
         "alias --help must show call-site syntax: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------
+// G2 (post-v0.1.3 audit hardening): args-field redaction
+// ---------------------------------------------------------------------
+//
+// Field reproducer: an operator types `psql -p s3cret …` (or
+// `curl -H "Authorization: Bearer …"`, or an inline `KEY=VALUE` env
+// pair) on the inspect command line. The L7 stream redactor only
+// covers stdout/stderr; before G2 the verbatim command — including
+// the secret — landed in `~/.inspect/audit/<month>-<user>.jsonl`
+// under the `args` field.
+//
+// G2 contract: every audit-recording verb runs the recorded `args`
+// text through `crate::redact::redact_for_audit` so embedded secrets
+// are replaced with the same shape the stream pipeline produces, and
+// the entry carries the existing `[secrets_masked=true]` marker.
+
+fn g2_mock() -> serde_json::Value {
+    json!([
+        { "match": "curl",  "stdout": "", "exit": 0 },
+        { "match": "psql",  "stdout": "", "exit": 0 },
+        { "match": "echo",  "stdout": "hi\n", "exit": 0 },
+    ])
+}
+
+fn g2_exec_args<'a>(reason: &'a str, cmd: &'a str, show_secrets: bool) -> Vec<&'a str> {
+    let mut v = vec![
+        "exec",
+        "arte/atlas",
+        "--apply",
+        "--no-revert",
+        "--reason",
+        reason,
+    ];
+    if show_secrets {
+        v.push("--show-secrets");
+    }
+    v.push("--");
+    v.push(cmd);
+    v
+}
+
+#[test]
+fn g2_exec_redacts_url_credentials_in_audit_args() {
+    let sb = Sandbox::new(g2_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(g2_exec_args(
+            "g2 url",
+            "curl https://admin:s3cret@example.com/api",
+            false,
+        ))
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        !body.contains("s3cret"),
+        "audit log must not contain url password verbatim: {body}"
+    );
+    assert!(
+        body.contains("[secrets_masked=true]"),
+        "audit args must carry the secrets_masked marker: {body}"
+    );
+}
+
+#[test]
+fn g2_exec_redacts_inline_env_secret_in_audit_args() {
+    let sb = Sandbox::new(g2_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(g2_exec_args(
+            "g2 env",
+            "DATABASE_URL=postgres://u:s3cret@h/d psql",
+            false,
+        ))
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        !body.contains("s3cret"),
+        "audit log must not contain DATABASE_URL password verbatim: {body}"
+    );
+}
+
+#[test]
+fn g2_exec_redacts_authorization_header_in_audit_args() {
+    let sb = Sandbox::new(g2_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(g2_exec_args(
+            "g2 header",
+            "curl -H 'Authorization: Bearer eyJabcdefghk3' https://x",
+            false,
+        ))
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        !body.contains("eyJabcdefghk3"),
+        "audit log must not contain bearer token verbatim: {body}"
+    );
+}
+
+#[test]
+fn g2_exec_show_secrets_records_command_verbatim() {
+    // Counter-test: when the operator opts in via `--show-secrets`,
+    // the original command is preserved with `[secrets_exposed=true]`
+    // so audit reviewers can tell deliberate disclosure from accident.
+    let sb = Sandbox::new(g2_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(g2_exec_args(
+            "g2 show-secrets",
+            "curl https://admin:s3cret@example.com/api",
+            true,
+        ))
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(
+        body.contains("s3cret"),
+        "with --show-secrets the original command is recorded verbatim: {body}"
+    );
+    assert!(
+        body.contains("[secrets_exposed=true]"),
+        "audit args must carry the secrets_exposed marker: {body}"
+    );
+}
+
+#[test]
+fn g2_exec_clean_command_no_markers() {
+    // Clean command: no markers, command verbatim.
+    let sb = Sandbox::new(g2_mock());
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    sb.cmd()
+        .args(g2_exec_args("g2 clean", "echo hi", false))
+        .assert()
+        .success();
+    let body = audit_jsonl_body(sb.home());
+    assert!(!body.contains("[secrets_masked=true]"));
+    assert!(!body.contains("[secrets_exposed=true]"));
+    assert!(body.contains("echo hi"));
+}

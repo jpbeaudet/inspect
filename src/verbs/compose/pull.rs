@@ -139,7 +139,7 @@ pub fn run(args: ComposePullArgs) -> Result<ExitKind> {
     entry.streamed = true;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.applied = Some(out.ok());
-    entry.rendered_cmd = Some(cmd.clone());
+    entry.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
     let extras = if args.ignore_pull_failures {
         vec!["[ignore_pull_failures=true]"]
     } else {

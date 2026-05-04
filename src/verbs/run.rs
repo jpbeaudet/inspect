@@ -907,7 +907,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         if !effective_overlay.is_empty() {
                             e.env_overlay = Some(effective_overlay.clone());
                         }
-                        e.rendered_cmd = Some(cmd.clone());
+                        e.rendered_cmd = Some(redact_rendered(&cmd, args.show_secrets));
                         e.secrets_masked_kinds = collect_kinds(&redactor);
                         e.streamed = args.stream;
                         e.bidirectional = bidirectional;
@@ -941,7 +941,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     if !effective_overlay.is_empty() {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
-                    entry.rendered_cmd = Some(cmd.clone());
+                    entry.rendered_cmd = Some(redact_rendered(&cmd, args.show_secrets));
                     entry.secrets_masked_kinds = collect_kinds(&redactor);
                     entry.streamed = args.stream;
                     entry.bidirectional = bidirectional;
@@ -968,7 +968,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         if !effective_overlay.is_empty() {
                             entry.env_overlay = Some(effective_overlay.clone());
                         }
-                        entry.rendered_cmd = Some(cmd.clone());
+                        entry.rendered_cmd = Some(redact_rendered(&cmd, args.show_secrets));
                         entry.secrets_masked_kinds = collect_kinds(&redactor);
                         entry.streamed = args.stream;
                         entry.bidirectional = bidirectional;
@@ -1111,6 +1111,14 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
 /// `[secrets_exposed=true]` (operator opted out via `--show-secrets`)
 /// from `[secrets_masked=true]` (the redactor fired during this step)
 /// from a clean run (neither tag).
+///
+/// G2 (post-v0.1.3 audit hardening): the `user_cmd` text itself is
+/// passed through [`crate::redact::redact_for_audit`] so embedded
+/// secrets (`psql -p s3cret`, `curl -H "Authorization: Bearer …"`,
+/// `DATABASE_URL=postgres://u:p@h/d`) never reach the audit log in
+/// plaintext. When `--show-secrets` is set the operator has explicitly
+/// opted into verbatim recording and the original text is preserved
+/// alongside the `[secrets_exposed=true]` tag.
 fn stamp_args(
     user_cmd: &str,
     show_secrets: bool,
@@ -1118,10 +1126,13 @@ fn stamp_args(
 ) -> String {
     if show_secrets {
         format!("{user_cmd} [secrets_exposed=true]")
-    } else if redactor.was_active() {
-        format!("{user_cmd} [secrets_masked=true]")
     } else {
-        user_cmd.to_string()
+        let masked = crate::redact::redact_for_audit(user_cmd);
+        if redactor.was_active() || matches!(&masked, std::borrow::Cow::Owned(_)) {
+            format!("{} [secrets_masked=true]", masked.as_ref())
+        } else {
+            user_cmd.to_string()
+        }
     }
 }
 
@@ -1134,5 +1145,19 @@ fn collect_kinds(redactor: &crate::redact::OutputRedactor) -> Option<Vec<String>
         None
     } else {
         Some(kinds.into_iter().map(|s| s.to_string()).collect())
+    }
+}
+
+/// G2 (post-v0.1.3 audit hardening): redact the wrapped shell command
+/// stored in `AuditEntry::rendered_cmd`. The wrapped form (e.g.
+/// `docker exec ctr sh -c '<user_cmd>'`) embeds whatever the operator
+/// typed and would otherwise leak secrets to the audit log even when
+/// the `args` field is masked. With `--show-secrets` the operator has
+/// opted into verbatim recording.
+fn redact_rendered(cmd: &str, show_secrets: bool) -> String {
+    if show_secrets {
+        cmd.to_string()
+    } else {
+        crate::redact::redact_for_audit(cmd).into_owned()
     }
 }
