@@ -29,14 +29,19 @@ final cleanup phase removes all three classes idempotently.
 
 These caught a previous smoke run. Read them once before any phase.
 
-1. **`--json` envelope shape.** Every read verb wraps its payload
-   under `.data`. Top-level keys are
-   `{schema_version, summary, data, next, meta}`. So the F1 services
-   array is at `.data.services`, not `.services`; F7.5 state is at
-   `.data.state`, not `.state`; cache provenance is at
-   `.meta.source.{mode, stale, runtime_age_s, inventory_age_s}`.
-   The `next` field is the structured equivalent of the `NEXT:`
-   line in human output.
+1. **`--json` envelope shape — two flavors.** Read-**aggregating**
+   verbs (`status`, `health`, `why`, sometimes `ls` / `ps`) wrap
+   their payload under a `.data` envelope with top-level keys
+   `{schema_version, summary, data, next, meta}`. The F1 services
+   array is at `.data.services`; F7.5 state at `.data.state`;
+   cache provenance at `.meta.source.{mode, stale, runtime_age_s,
+   inventory_age_s}`. Read-**listing** verbs (`ports`, `images`,
+   `volumes`, `audit ls`, `cache show`) emit **NDJSON** — one JSON
+   object per line, no envelope, no `.data`. Use `jq` directly on
+   each line, or `jq -s 'fn'` to slurp into an array. The verb's
+   `-h` includes the line `Emit line-delimited JSON (one record
+   per line)` for NDJSON verbs and `Emit a single JSON envelope`
+   for envelope verbs — check `-h` first if unsure.
 2. **`--quiet` is mutex with `--json`.** This is the F7.4 contract:
    `--quiet` strips the human-renderer indent; `--json` produces
    structured output that does not need it. Combining them is a
@@ -53,12 +58,11 @@ These caught a previous smoke run. Read them once before any phase.
    one-line stderr breadcrumb pointing at the canonical form
    unless `INSPECT_NO_CANONICAL_HINT=1` is set; canonical form
    resolves silently).
-5. **Verbs that output an envelope vs raw text.** Read verbs
-   (`status`, `health`, `why`, `ls`, `ps`, `connections`,
-   `ports`, `images`, `volumes`) emit the envelope. Streaming
-   verbs (`logs`, `run`, `cat`, `grep`, `find`, `search`)
-   emit raw lines (with redaction applied per L7) — those are
-   not jq-able as JSON.
+5. **Streaming verbs emit raw bytes, not JSON.** `logs`, `run`,
+   `cat`, `grep`, `find`, `search`, `exec` emit raw lines (with
+   L7 redaction applied) -- they are not jq-able. Their `--json`
+   flag, where present, wraps each line as a record. Don't pipe
+   their default output to `jq`.
 6. **Master socket reuse.** Once `inspect connect <ns>` has
    succeeded, every subsequent verb reuses
    `~/.inspect/sockets/<ns>.sock` and does **not** need the key
@@ -108,7 +112,10 @@ inspect setup arte --force
 inspect status arte
 inspect status arte --json | jq '{state: .data.state, services_count: (.data.services | length), summary, source_mode: .meta.source.mode}'
 inspect connections
-inspect connections --json | jq '.data[] | {ns, auth, session_ttl}'
+# connections --json: verify shape on contact (read verbs evolved at
+# different points; the auth/session_ttl/expires_in fields are the
+# L4 contract -- their wrapping may be NDJSON or .data array).
+inspect connections --json | head -2
 ```
 
 | Gate | Pass criteria |
@@ -134,12 +141,17 @@ inspect why arte/<svc> --no-bundle
 inspect why arte/<svc> --log-tail 5
 inspect why arte/<svc> --json | jq '.services[0] | {recent_logs, effective_command, port_reality}'
 
-# F8 cache freshness
+# F8 cache freshness. The provenance line `SOURCE: live` /
+# `SOURCE: cached <age>` is the F8 contract surface; the per-ns
+# breakdown is in the human output of `status` itself, not in a
+# separate `cache show <ns>` call. `inspect cache show` (no
+# positional) lists ALL cached namespaces with runtime/inventory
+# ages -- use that for the cross-ns view.
 inspect status arte                       # first hit -> SOURCE: live
-inspect status arte                       # second hit -> SOURCE: cache (within TTL)
+inspect status arte                       # second hit -> SOURCE: cached <Ns>
 inspect status arte --refresh             # forces SOURCE: live
-inspect cache show arte
-inspect cache clear arte
+inspect cache show                        # cross-ns ages (no positional)
+inspect cache clear arte                  # per-ns invalidate
 
 # F5 dual-axis selector resolution. Pick a real container whose
 # compose service name differs from its docker container name.
@@ -150,7 +162,10 @@ inspect status 'arte/<compose-name>'      # silent (canonical form)
 inspect ports arte
 inspect ports arte --proto udp
 inspect ports arte --port 53
-inspect ports arte --json | jq '.[0] | {port, proto, host, container, declared_by}'
+# ports --json emits NDJSON (one record per line; documented in -h).
+# Slurp into a jq array with -s if you want array-style queries.
+inspect ports arte --json | head -3                              # one JSON record per line
+inspect ports arte --json | jq -s 'group_by(.proto) | map({proto: .[0].proto, count: length})'
 
 # L10 port-drift (capture two snapshots ~30s apart; if real services
 # don't change ports we instead drift the sandbox container after P3)
