@@ -3300,8 +3300,10 @@ pub enum AuditCommand {
     /// `revert` block — use `audit show <id> --json` for that.
     Ls(AuditLsArgs),
     /// Show one audit entry in detail. `--json` returns the full
-    /// `AuditEntry` including the `revert` block (kind, payload,
-    /// preview, previous_hash) — `audit ls --json` omits it.
+    /// `AuditEntry` (revert block included: kind, payload, preview,
+    /// previous_hash) under `.data.entry` of the standard envelope
+    /// — `audit ls --json` omits the revert block, so use this for
+    /// that. Recipe: `audit show <id> --json | jq '.data.entry'`.
     Show(AuditShowArgs),
     /// Filter audit entries by substring (id/verb/selector/args).
     /// **Newest-first**, same projection caveat as `audit ls --json`.

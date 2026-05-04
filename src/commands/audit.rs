@@ -159,7 +159,7 @@ fn truncate_reason(s: &str, max_chars: usize) -> String {
 
 fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> Result<ExitKind> {
     let Some(e) = entries.iter().find(|e| e.id.starts_with(id_prefix)) else {
-        crate::error::emit("no audit entry matches id prefix '{id_prefix}'");
+        crate::error::emit(format!("no audit entry matches id prefix '{id_prefix}'"));
         return Ok(ExitKind::Error);
     };
     if json {
