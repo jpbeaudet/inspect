@@ -309,6 +309,47 @@ remaining three are documented limitations called out under
   (audit 1777884723466-216a)` after stop+revert against a real
   sandbox container.
 
+- **`audit ls` / `show` / `grep` / `gc` / `verify` `--json` now emit
+  the standard L7 envelope.** Surfaced live during the v0.1.3
+  release smoke when the agent's `audit ls --json | jq '.[0]'`
+  recipe failed with `Cannot index object with number` — the
+  audit verbs were the last `--json` surface still emitting
+  bare-NDJSON / bare-object shapes from before the v0.1.3
+  envelope contract. Every other verb already wraps payloads in
+  `{schema_version, summary, data, next, meta}`, so an agent
+  expecting `.data.entries[]` on `audit ls` got a top-level array
+  and the canonical `head -1` recipe broke. Fix: all five audit
+  verbs now go through the shared `format::Envelope::emit_json`
+  helper. `ls` payload is `{entries: [...]}`, `show` is
+  `{entry: {...}}` (singular — see follow-up below), `grep` is
+  `{matches: [...]}`, `gc` is `{removed, kept}`, `verify` is
+  `{ok, mismatched, missing}`. `summary` carries the human-form
+  one-liner; `meta` carries `count` / `order=newest_first` / `total`
+  on `ls`. The clap `///` doc on each variant and `LONG_AUDIT_LS`
+  were updated with the new path; help-search index re-fits within
+  the 80 KB cap. Field-validated against arte during the same
+  smoke turn — `audit ls --json | jq '.data.entries[0].id'` works
+  end-to-end and `head -1`/`.[0]` recipes round-trip.
+
+- **`audit show <unknown-prefix>` error template no longer leaks
+  the literal `{id_prefix}` placeholder.** Surfaced one smoke turn
+  after the envelope standardization above: a deliberately bad
+  prefix (`audit show deadbeef`) printed `error: no audit entry
+  matches id prefix '{id_prefix}'` instead of interpolating the
+  prefix the operator typed. Cause: the `crate::error::emit` call
+  was passed a static `&str` with brace-syntax, never run through
+  `format!`. Fix: wrap in `format!(...)` so the prefix interpolates.
+  In the same commit, the `Show` clap `///` doc spells out the
+  envelope path explicitly — `audit show <id> --json` returns the
+  full `AuditEntry` under `.data.entry` (singular, parallel to
+  `ls`'s `.data.entries`), with a copy-paste recipe so an agent
+  reading `inspect audit show --help` doesn't expect the entry
+  fields directly on `.data` and pull nulls. Field-validated on
+  arte: error renders `error: no audit entry matches id prefix
+  'deadbeef'` and `audit show <real-id> --json | jq '.data.entry'`
+  yields the full populated record (`verb`, `exit`, `args`,
+  `stdin_bytes`, `stdin_sha256`, …).
+
 ### Added — pain-point-audit documentation (G6 / G7 / G8)
 
 - **`inspect help safety` — Encoding-bypass and multi-line
