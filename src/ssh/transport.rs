@@ -123,6 +123,31 @@ pub fn classify(message: &str) -> Option<TransportClass> {
         return Some(TransportClass::TransportAuthFailed);
     }
 
+    // Stale: master socket gone / persistent channel torn down.
+    // Checked BEFORE the generic Unreachable patterns because the
+    // canonical "master process exited but socket file still exists"
+    // case emits `Control socket connect(/path): Connection refused`,
+    // which contains both the stale-specific token AND the generic
+    // "connection refused" Unreachable token. The control-socket
+    // line is a local Unix-socket failure, not a remote-host one,
+    // so it must win — otherwise auto-reauth never fires after a
+    // codespace restart / `inspect disconnect` / ControlPersist
+    // expiry, and the operator sees an unhelpful "unreachable" hint
+    // for a connection that just needs to be re-established.
+    if m.contains("control socket connect")
+        || m.contains("controlpath does not exist")
+        || m.contains("mux_client_request_session: session request failed")
+        || m.contains("mux_client_request_session")
+        || m.contains("mux_client_hello_exchange")
+        || m.contains("multiplex: master gone")
+        || m.contains("control master exited")
+        || m.contains("broken pipe")
+        || m.contains("connection closed by")
+        || m.contains("connection reset by peer")
+    {
+        return Some(TransportClass::TransportStale);
+    }
+
     // Unreachable: name resolution + transport-layer connect failures
     // that no amount of re-auth would fix.
     if m.contains("could not resolve hostname")
@@ -135,21 +160,6 @@ pub fn classify(message: &str) -> Option<TransportClass> {
         || m.contains("operation timed out")
     {
         return Some(TransportClass::TransportUnreachable);
-    }
-
-    // Stale: master socket gone / persistent channel torn down.
-    // Includes the "broken pipe" / "connection closed" / "control
-    // socket" / control-master-exit cases.
-    if m.contains("broken pipe")
-        || m.contains("connection closed by")
-        || m.contains("connection reset by peer")
-        || m.contains("control socket connect")
-        || m.contains("controlpath does not exist")
-        || m.contains("mux_client_request_session: session request failed")
-        || m.contains("multiplex: master gone")
-        || m.contains("control master exited")
-    {
-        return Some(TransportClass::TransportStale);
     }
 
     None
@@ -206,6 +216,28 @@ mod tests {
     #[test]
     fn openssh_control_socket_gone_is_stale() {
         let stderr = "control socket connect(/tmp/sock): No such file or directory";
+        assert_eq!(classify(stderr), Some(TransportClass::TransportStale));
+    }
+
+    /// Field-captured: when the master process exits but the socket
+    /// file is still on disk, openssh emits BOTH "control socket
+    /// connect" (stale token) AND "Connection refused" (unreachable
+    /// token) in the same buffer. Stale must win — otherwise
+    /// auto-reauth never fires and the operator sees an "unreachable"
+    /// hint for a connection that just needs to be re-established
+    /// (e.g. after a codespace restart or ControlPersist expiry).
+    /// Captured 2026-05 against arte (OVH) during v0.1.3 smoke.
+    #[test]
+    fn openssh_dead_master_with_socket_file_is_stale_not_unreachable() {
+        let stderr = "Control socket connect(/home/codespace/.inspect/sockets/arte.sock): \
+                      Connection refused";
+        assert_eq!(classify(stderr), Some(TransportClass::TransportStale));
+    }
+
+    #[test]
+    fn openssh_mux_session_request_failed_is_stale() {
+        let stderr = "mux_client_request_session: session request failed: \
+                      Session open refused by peer";
         assert_eq!(classify(stderr), Some(TransportClass::TransportStale));
     }
 
