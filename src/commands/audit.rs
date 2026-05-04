@@ -3,12 +3,14 @@
 
 use anyhow::Result;
 
+use serde_json::{json, Value};
+
 use crate::cli::{AuditArgs, AuditCommand, AuditGcArgs};
 use crate::error::ExitKind;
 use crate::safety::gc::{parse_retention, run_gc, GcReport};
 use crate::safety::snapshot::sha256_hex;
 use crate::safety::{AuditStore, SnapshotStore};
-use crate::verbs::output::{Envelope, JsonOut, Renderer};
+use crate::verbs::output::{OutputDoc, Renderer};
 
 pub fn run(args: AuditArgs) -> Result<ExitKind> {
     // The `gc` path opens its own store implicitly via the path
@@ -59,22 +61,49 @@ fn list(
     let view = &sorted[..take];
 
     if json {
-        for e in view {
-            let mut env = Envelope::new(&e.host, "audit", "audit")
-                .put("id", e.id.clone())
-                .put("ts", e.ts.to_rfc3339())
-                .put("verb", e.verb.clone())
-                .put("selector", e.selector.clone())
-                .put("exit", e.exit)
-                .put("diff_summary", e.diff_summary.clone())
-                .put("is_revert", e.is_revert);
-            // P12: always emit `reason` in JSON (null when absent).
-            env = match &e.reason {
-                Some(r) => env.put("reason", r.clone()),
-                None => env.put("reason", serde_json::Value::Null),
-            };
-            JsonOut::write(&env);
-        }
+        // v0.1.3 envelope discipline (smoke find): `audit ls --json` is
+        // now a single `{schema_version, summary, data, next, meta}`
+        // document with `data.entries` as a top-level array. Pre-fix
+        // shape was bare-object NDJSON, which broke `jq '.[0]'` (no
+        // array), conflicted with the shared `--json` flag's
+        // "line-delimited JSON" promise, and forced agents to
+        // round-trip every "newest entry" check through `head -1`.
+        // The projection now also includes `revert.{kind,preview}` so
+        // agents don't have to follow up with `audit show` for the
+        // common "what kind of inverse does this audit have?"
+        // question. Full `revert` block (with `payload` and
+        // `previous_hash`) lives on `audit show <id> --json`.
+        let entries: Vec<Value> = view
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "ts": e.ts.to_rfc3339(),
+                    "server": e.host,
+                    "verb": e.verb,
+                    "selector": e.selector,
+                    "exit": e.exit,
+                    "diff_summary": e.diff_summary,
+                    "is_revert": e.is_revert,
+                    "reason": e.reason,
+                    "revert": e.revert.as_ref().map(|r| json!({
+                        "kind": r.kind.as_str(),
+                        "preview": r.preview,
+                    })),
+                })
+            })
+            .collect();
+        let summary = match reason_filter {
+            Some(p) => format!(
+                "{n} audit entry/entries matching --reason '{p}' (of {n_total} total; showing {take})"
+            ),
+            None => format!("{n_total} audit entry/entries (showing {take})"),
+        };
+        OutputDoc::new(summary, json!({ "entries": entries }))
+            .with_meta("count", take)
+            .with_meta("total", n_total)
+            .with_meta("order", "newest_first")
+            .print_json();
         return Ok(ExitKind::Success);
     }
 
@@ -134,7 +163,18 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
         return Ok(ExitKind::Error);
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(e)?);
+        // v0.1.3 envelope discipline: `audit show <id> --json` now
+        // emits the standard `{schema_version, summary, data, next,
+        // meta}` envelope with the full `AuditEntry` (revert block
+        // included) under `.data.entry`. Pre-fix shape was a bare
+        // pretty-printed `AuditEntry`, inconsistent with every other
+        // envelope verb.
+        let entry_value = serde_json::to_value(e)?;
+        OutputDoc::new(
+            format!("audit {} ({})", e.id, e.verb),
+            json!({ "entry": entry_value }),
+        )
+        .print_json();
         return Ok(ExitKind::Success);
     }
     let mut r = Renderer::new();
@@ -169,6 +209,30 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
     if let Some(rev) = &e.reverts {
         r.data_line(format!("reverts:   {rev}"));
     }
+    // v0.1.3 (smoke find): the text `audit show` rendering used to
+    // omit the F11 `revert` block entirely, forcing agents to
+    // round-trip via `--json` to see whether the audit had a
+    // capturable inverse. Now rendered inline.
+    if let Some(rv) = &e.revert {
+        r.data_line("");
+        r.data_line(format!("revert.kind:    {}", rv.kind.as_str()));
+        r.data_line(format!("revert.preview: {}", rv.preview));
+        if !rv.payload.is_empty() {
+            // Truncate long payloads (composite JSON, snapshot hashes
+            // with metadata) so the human view stays scannable; full
+            // payload remains in `--json`.
+            let trunc = if rv.payload.len() > 160 {
+                format!("{}…", &rv.payload[..159])
+            } else {
+                rv.payload.clone()
+            };
+            r.data_line(format!("revert.payload: {trunc}"));
+        }
+        r.data_line(format!(
+            "revert.captured_at: {}",
+            rv.captured_at.to_rfc3339()
+        ));
+    }
     r.next("inspect revert <id>");
     r.print();
     Ok(ExitKind::Success)
@@ -176,28 +240,55 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
 
 fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<ExitKind> {
     let needle = pat.to_lowercase();
-    let mut hits = 0usize;
     let mut r = Renderer::new();
-    for e in entries {
-        let blob = format!(
-            "{} {} {} {} {}",
-            e.id, e.verb, e.selector, e.args, e.diff_summary
+    // Newest-first to match `audit ls`.
+    let mut sorted: Vec<&crate::safety::AuditEntry> = entries.iter().collect();
+    sorted.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    let matches: Vec<&crate::safety::AuditEntry> = sorted
+        .into_iter()
+        .filter(|e| {
+            let blob = format!(
+                "{} {} {} {} {}",
+                e.id, e.verb, e.selector, e.args, e.diff_summary
+            )
+            .to_lowercase();
+            blob.contains(&needle)
+        })
+        .collect();
+    let hits = matches.len();
+    if json {
+        // v0.1.3 envelope discipline: same shape as `audit ls --json`
+        // — single envelope with `data.matches` as the array. Same
+        // projection (id/ts/verb/selector/exit + revert summary) so
+        // ls and grep are interchangeable for filtering.
+        let arr: Vec<Value> = matches
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "ts": e.ts.to_rfc3339(),
+                    "server": e.host,
+                    "verb": e.verb,
+                    "selector": e.selector,
+                    "exit": e.exit,
+                    "is_revert": e.is_revert,
+                    "revert": e.revert.as_ref().map(|r| json!({
+                        "kind": r.kind.as_str(),
+                        "preview": r.preview,
+                    })),
+                })
+            })
+            .collect();
+        OutputDoc::new(
+            format!("audit grep '{pat}': {hits} match(es)"),
+            json!({ "matches": arr }),
         )
-        .to_lowercase();
-        if !blob.contains(&needle) {
-            continue;
-        }
-        hits += 1;
-        if json {
-            JsonOut::write(
-                &Envelope::new(&e.host, "audit", "audit")
-                    .put("id", e.id.clone())
-                    .put("ts", e.ts.to_rfc3339())
-                    .put("verb", e.verb.clone())
-                    .put("selector", e.selector.clone())
-                    .put("exit", e.exit),
-            );
-        } else {
+        .with_meta("count", hits)
+        .with_meta("order", "newest_first")
+        .with_meta("pattern", pat)
+        .print_json();
+    } else {
+        for e in &matches {
             r.data_line(format!(
                 "{} {} {} {}",
                 e.id,
@@ -206,8 +297,6 @@ fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<
                 e.selector
             ));
         }
-    }
-    if !json {
         r.summary(format!("audit grep '{pat}': {hits} match(es)"));
         r.print();
     }
@@ -269,25 +358,26 @@ fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind>
 
     let bad = missing.len() + mismatched.len();
     if json {
-        JsonOut::write(
-            &Envelope::new("local", "audit", "audit.verify")
-                .put("entries_total", entries.len())
-                .put("entries_with_snapshot", checked)
-                .put("missing_count", missing.len())
-                .put("mismatched_count", mismatched.len())
-                .put(
-                    "missing_ids",
-                    missing.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-                )
-                .put(
-                    "mismatched_ids",
-                    mismatched
-                        .iter()
-                        .map(|(id, _)| id.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .put("ok", bad == 0),
+        // v0.1.3 envelope discipline.
+        let summary = format!(
+            "audit verify: {} entries, {checked} with snapshots, {} missing, {} mismatched",
+            entries.len(),
+            missing.len(),
+            mismatched.len()
         );
+        OutputDoc::new(
+            summary,
+            json!({
+                "entries_total": entries.len(),
+                "entries_with_snapshot": checked,
+                "missing_count": missing.len(),
+                "mismatched_count": mismatched.len(),
+                "missing_ids": missing.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                "mismatched_ids": mismatched.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                "ok": bad == 0,
+            }),
+        )
+        .print_json();
         return Ok(if bad == 0 {
             ExitKind::Success
         } else {
@@ -385,18 +475,31 @@ fn gc(args: &AuditGcArgs) -> Result<ExitKind> {
 }
 
 fn emit_gc_json(r: &GcReport) {
-    JsonOut::write(
-        &Envelope::new("local", "audit", "audit.gc")
-            .put("dry_run", r.dry_run)
-            .put("policy", r.policy.clone())
-            .put("entries_total", r.entries_total)
-            .put("entries_kept", r.entries_kept)
-            .put("deleted_entries", r.deleted_entries)
-            .put("deleted_snapshots", r.deleted_snapshots)
-            .put("freed_bytes", r.freed_bytes)
-            .put("deleted_ids", r.deleted_ids.clone())
-            .put("deleted_snapshot_hashes", r.deleted_snapshot_hashes.clone()),
+    // v0.1.3 envelope discipline.
+    let prefix = if r.dry_run { "would delete" } else { "deleted" };
+    let summary = format!(
+        "audit gc (--keep {}): {prefix} {} entries / {} snapshots / {} bytes; {} entries kept",
+        r.policy,
+        r.deleted_entries,
+        r.deleted_snapshots,
+        format_bytes(r.freed_bytes),
+        r.entries_kept,
     );
+    OutputDoc::new(
+        summary,
+        json!({
+            "dry_run": r.dry_run,
+            "policy": r.policy,
+            "entries_total": r.entries_total,
+            "entries_kept": r.entries_kept,
+            "deleted_entries": r.deleted_entries,
+            "deleted_snapshots": r.deleted_snapshots,
+            "freed_bytes": r.freed_bytes,
+            "deleted_ids": r.deleted_ids,
+            "deleted_snapshot_hashes": r.deleted_snapshot_hashes,
+        }),
+    )
+    .print_json();
 }
 
 fn format_bytes(b: u64) -> String {

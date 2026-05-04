@@ -6177,6 +6177,7 @@ fn l5_gc_json_envelope_schema() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let d = &v["data"];
     for key in [
         "dry_run",
         "policy",
@@ -6189,16 +6190,16 @@ fn l5_gc_json_envelope_schema() {
         "deleted_snapshot_hashes",
     ] {
         assert!(
-            v.get(key).is_some(),
-            "JSON envelope missing required L5 field '{key}': {v}"
+            d.get(key).is_some(),
+            "JSON envelope .data missing required L5 field '{key}': {v}"
         );
     }
-    assert_eq!(v["dry_run"], false);
-    assert_eq!(v["policy"], "90d");
-    assert_eq!(v["entries_total"], 2);
-    assert_eq!(v["entries_kept"], 1);
-    assert_eq!(v["deleted_entries"], 1);
-    let ids = v["deleted_ids"].as_array().unwrap();
+    assert_eq!(d["dry_run"], false);
+    assert_eq!(d["policy"], "90d");
+    assert_eq!(d["entries_total"], 2);
+    assert_eq!(d["entries_kept"], 1);
+    assert_eq!(d["deleted_entries"], 1);
+    let ids = d["deleted_ids"].as_array().unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0], "old-x");
 }
@@ -6234,10 +6235,11 @@ fn l5_gc_count_policy_keeps_newest_per_namespace() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(v["entries_total"], 6);
-    assert_eq!(v["entries_kept"], 2);
-    assert_eq!(v["deleted_entries"], 4);
-    let deleted: std::collections::HashSet<String> = v["deleted_ids"]
+    let d = &v["data"];
+    assert_eq!(d["entries_total"], 6);
+    assert_eq!(d["entries_kept"], 2);
+    assert_eq!(d["deleted_entries"], 4);
+    let deleted: std::collections::HashSet<String> = d["deleted_ids"]
         .as_array()
         .unwrap()
         .iter()
@@ -6314,10 +6316,11 @@ fn l5_gc_empty_audit_dir_succeeds_with_zero_counts() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(v["entries_total"], 0);
-    assert_eq!(v["deleted_entries"], 0);
-    assert_eq!(v["deleted_snapshots"], 0);
-    assert_eq!(v["freed_bytes"], 0);
+    let d = &v["data"];
+    assert_eq!(d["entries_total"], 0);
+    assert_eq!(d["deleted_entries"], 0);
+    assert_eq!(d["deleted_snapshots"], 0);
+    assert_eq!(d["freed_bytes"], 0);
 }
 
 #[test]
