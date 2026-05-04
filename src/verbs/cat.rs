@@ -111,7 +111,10 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             errored_any = true;
             continue;
         };
-        let cmd = build_cat(step.service(), path);
+        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // container_name (e.g. `luminary-api`), not the canonical
+        // service name (`api`). See `Step::container()` doc.
+        let cmd = build_cat(step.container(), path);
         let out = runner.run(
             &step.ns.namespace,
             &step.ns.target,

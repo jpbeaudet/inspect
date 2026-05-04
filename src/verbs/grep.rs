@@ -201,7 +201,10 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
 
     if let Some(path) = step.path.as_deref() {
         let inner = format!("{tool_bin}{flags} -- {pat} {}{suf}", shquote(path));
-        return match step.service() {
+        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // container_name, not the canonical service name. See
+        // `Step::container()` doc; same fix shipped for cat/ls/find.
+        return match step.container() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
             None => inner,
         };
@@ -223,6 +226,10 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
             }
             s
         } else {
+            // F5 dual-axis (v0.1.3): `docker logs` takes the
+            // container_name; only the systemd journalctl branch
+            // above keeps the canonical name (which IS the unit name).
+            let docker_name = step.container().unwrap_or(svc);
             let mut s = String::from("docker logs");
             if let Some(since) = &args.since {
                 s.push_str(" --since ");
@@ -232,7 +239,7 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
                 s.push_str(&format!(" --tail {tail}"));
             }
             s.push(' ');
-            s.push_str(&shquote(svc));
+            s.push_str(&shquote(docker_name));
             s.push_str(" 2>&1");
             s
         };

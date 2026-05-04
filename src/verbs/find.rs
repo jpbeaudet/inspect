@@ -38,7 +38,10 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
             find_cmd.push_str("-name ");
             find_cmd.push_str(&shquote(pat));
         }
-        let cmd = match step.service() {
+        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // container_name, not the canonical service name. See
+        // `Step::container()` doc; same fix shipped for cat/ls/grep.
+        let cmd = match step.container() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&find_cmd)),
             None => find_cmd,
         };

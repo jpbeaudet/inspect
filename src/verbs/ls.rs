@@ -22,7 +22,10 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
         if args.all {
             ls_args.push_str(" -A");
         }
-        let cmd = match step.service() {
+        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // container_name, not the canonical service name. See
+        // `Step::container()` doc; same fix shipped for cat/find/grep.
+        let cmd = match step.container() {
             Some(svc) => format!(
                 "docker exec {} sh -c {}",
                 shquote(svc),
