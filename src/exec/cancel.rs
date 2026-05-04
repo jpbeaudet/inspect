@@ -100,6 +100,35 @@ pub fn check() -> anyhow::Result<()> {
 /// first call wins. On non-Unix platforms this is a no-op.
 pub fn install_handlers() {
     install_unix();
+    install_sigpipe_default();
+}
+
+/// Reset SIGPIPE to its Unix default disposition (`SIG_DFL`).
+///
+/// Rust's standard library installs an *ignore* handler for SIGPIPE at
+/// program startup so writes to a closed pipe surface as `EPIPE` from
+/// `write(2)` — which Rust's `println!` / `writeln!` macros then turn
+/// into a *panic* ("failed printing to stdout: Broken pipe"). For an
+/// agent-facing CLI that is constantly piped through `head`, `grep
+/// -m1`, `jq` etc. this is wrong: every short-circuited pipeline ends
+/// in a backtrace + nonzero exit instead of the conventional silent
+/// 141 = 128 + SIGPIPE. Surfaced live during the v0.1.3 release smoke
+/// when `inspect compose logs … | head -20` panicked mid-stream.
+///
+/// Restoring the OS default is the canonical fix and matches every
+/// other Unix CLI's behavior. Safe even when downstream is a regular
+/// file (no SIGPIPE is delivered there). On non-Unix platforms this
+/// is a no-op.
+fn install_sigpipe_default() {
+    #[cfg(unix)]
+    {
+        // SAFETY: `signal(SIGPIPE, SIG_DFL)` is the documented one-shot
+        // way to reset a default disposition. No handler memory is
+        // exposed to the OS — `SIG_DFL` is a sentinel.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
 }
 
 #[cfg(unix)]

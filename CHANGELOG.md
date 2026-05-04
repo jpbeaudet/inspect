@@ -155,6 +155,27 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **🔴 SIGPIPE panic on `inspect <verb> | head -N` (CRITICAL).**
+  Surfaced live during the v0.1.3 release smoke when
+  `inspect compose logs arte/luminary-atlas --tail 50 --match
+  'error|Error' | head -20` panicked mid-stream with
+  `thread 'main' panicked at 'failed printing to stdout: Broken
+  pipe (os error 32)'`. Rust's stdlib installs `SIG_IGN` for
+  SIGPIPE at process start, so writes to a closed pipe surface
+  as `EPIPE` — and `println!` / `writeln!` turn that into a
+  panic + exit 101 + backtrace on stderr. For an agent-facing
+  CLI that is constantly piped through `head`, `grep -m1`, `jq`
+  etc., every short-circuited pipeline ended in a backtrace
+  instead of the conventional silent exit 141 = 128 + SIGPIPE.
+  Fix: `exec::cancel::install_handlers` now also calls
+  `signal(SIGPIPE, SIG_DFL)`, restoring the Unix-default
+  disposition. An early-closing reader now terminates `inspect`
+  silently like every other Unix CLI. Regression test
+  `smoke_sigpipe_no_panic_on_early_pipe_close` spawns `inspect
+  --help` with stdout piped, drops the reader after one line,
+  and asserts neither exit 101 nor a `Broken pipe` / `panicked
+  at` line on stderr.
+
 - **`audit ls` ordering + projection: help text now spells out
   newest-first and the `revert`-block omission.** The smoke
   agent burnt two cycles assuming `audit ls --json | tail -1`

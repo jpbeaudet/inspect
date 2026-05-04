@@ -9527,3 +9527,69 @@ fn g2_exec_clean_command_no_markers() {
     assert!(!body.contains("[secrets_exposed=true]"));
     assert!(body.contains("echo hi"));
 }
+
+// ---------------------------------------------------------------------------
+// SIGPIPE regression (smoke-discovery, not a backlog item)
+//
+// `inspect compose logs … | head -20` panicked mid-stream during the
+// v0.1.3 release smoke against arte:
+//
+//     thread 'main' panicked at 'failed printing to stdout: Broken
+//     pipe (os error 32)' …
+//
+// Cause: Rust's stdlib installs a SIG_IGN handler for SIGPIPE at
+// program start, so writes to a closed pipe surface as EPIPE — which
+// `println!` / `writeln!` then turn into a panic. Fix:
+// `signal(SIGPIPE, SIG_DFL)` at startup so an early-closing
+// downstream reader (head, grep -m1, jq, …) terminates `inspect`
+// silently with the conventional 141 = 128 + SIGPIPE, like every
+// other Unix CLI.
+//
+// Test: spawn `inspect --help` (deterministic, multi-line, no network)
+// with stdout=piped, drop the reader after 1 line, await exit. Exit
+// code must NOT be 101 (Rust panic) and stderr must NOT contain a
+// panic backtrace.
+// ---------------------------------------------------------------------------
+#[test]
+fn smoke_sigpipe_no_panic_on_early_pipe_close() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as StdCommand, Stdio};
+
+    let bin = env!("CARGO_BIN_EXE_inspect");
+    let mut child = StdCommand::new(bin)
+        .arg("--help")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inspect --help");
+
+    {
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        // Drop reader → close pipe → next write in child gets EPIPE.
+    }
+
+    let out = child.wait_with_output().expect("wait child");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Must not panic. Rust panic abort path is exit 101. Allow 0 (full
+    // help fit in pipe buffer before close) or 141 (SIGPIPE killed
+    // process per restored default disposition).
+    let code = out.status.code();
+    assert!(
+        code != Some(101),
+        "inspect panicked on early pipe close (Rust SIGPIPE default-handler regression). \
+         exit={code:?}, stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("Broken pipe"),
+        "stderr leaked 'Broken pipe' panic message — SIGPIPE handler was not reset to SIG_DFL. \
+         stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "stderr contains a panic backtrace. stderr={stderr}"
+    );
+}
