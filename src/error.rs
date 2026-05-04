@@ -78,6 +78,22 @@ pub enum ConfigError {
     InvalidEnvKey { namespace: String, key: String },
 
     #[error(
+        "invalid user '{user}' for namespace '{namespace}': must match \
+         [A-Za-z_][A-Za-z0-9_.-]* (POSIX-portable login-name shape; \
+         shell metacharacters and whitespace are rejected so a hostile \
+         value cannot expand inside ssh_config %u tokens — \
+         CVE-2026-35386 family)"
+    )]
+    InvalidUser { namespace: String, user: String },
+
+    #[error(
+        "invalid host '{host}' for namespace '{namespace}': must be an IP \
+         literal or a DNS-shaped name (alphanumeric, '.', '-'; no \
+         shell metacharacters or whitespace)"
+    )]
+    InvalidHost { namespace: String, host: String },
+
+    #[error(
         "invalid auth mode '{value}' for namespace '{namespace}': expected \
          \"key\" (default) or \"password\""
     )]
@@ -291,6 +307,21 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         code: "InvalidNamespaceName",
         fragment: "invalid namespace name",
         summary: "namespace name does not match the [a-z0-9][a-z0-9_-]* shape",
+        help_topic: Some("discovery"),
+    },
+    // S4 (post-v0.1.3 security audit): user / host shape validation.
+    // Defense-in-depth against ssh_config `Match exec %u` expansion
+    // (CVE-2026-35386 family).
+    ErrorEntry {
+        code: "InvalidUser",
+        fragment: "invalid user",
+        summary: "user contains shell metacharacters or whitespace",
+        help_topic: Some("discovery"),
+    },
+    ErrorEntry {
+        code: "InvalidHost",
+        fragment: "invalid host",
+        summary: "host contains shell metacharacters or whitespace",
         help_topic: Some("discovery"),
     },
     // ---- ssh ----------------------------------------------------------

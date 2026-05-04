@@ -17,6 +17,49 @@ callers — see `CLAUDE.md` "Authorized deferrals" registry for the
 full rationale. This is the one explicit deferral out of v0.1.3;
 every other backlog item shipped.
 
+### Fixed (pre-release security audit)
+
+A second pre-tag pass — this time a defensive sweep against a
+checklist of real-world CVEs and breach patterns
+(`INSPECT_v013_SECURITY_AUDIT.md`) — surfaced three additional
+hardening fixes (S1, S2, S4). All three close in-place before
+tagging.
+
+- **S1 — Implicit SSH agent / X11 forwarding.** Operator
+  `~/.ssh/config` directives (`ForwardAgent yes`, `ForwardX11
+  yes`) silently inherited into every inspect-spawned ssh
+  invocation, exposing the local agent socket and X11 cookie to
+  every namespace inspect dispatched against. inspect has zero
+  use cases that require either forward (no agent-on-target,
+  no remote X clients), so `base_args()` in `src/ssh/options.rs`
+  now emits `-o ForwardAgent=no -o ForwardX11=no` unconditionally
+  on every dispatch, suppressing the personal-config inheritance.
+  Defends against the OpenSSH agent-forwarding lateral-movement
+  patterns (CVE-2023-38408 family).
+- **S2 — `/proc/<pid>/environ` secrets bypassed the env masker.**
+  The L7 redactor's env-secret rule masks `KEY=VALUE` pairs
+  line-by-line, but `/proc/*/environ` separates entries with NUL
+  bytes rather than newlines, so the entire blob arrived as one
+  unrecognizable line and slipped through verbatim into audit /
+  transcript output. `redact_for_audit` and the streaming line
+  iterator in `src/redact/mod.rs` now detect embedded NULs and
+  recursively mask each NUL-separated segment, so a curious
+  `cat /proc/$pid/environ` from a shell session still has its
+  secret env vars masked. Defends against agent-context-window
+  leak via process-environment exfil (§2.1 of audit).
+- **S4 — Username / hostname shell-metachar injection.**
+  `servers.toml` accepted any UTF-8 string for `user` and `host`,
+  so a malicious or fat-fingered config like
+  `user = "alice;rm -rf ~"` could be expanded by `Match exec %u`
+  / `%h` directives in operator `~/.ssh/config` (CVE-2026-35386
+  family). `src/config/namespace.rs` now validates `user` against
+  the POSIX login-name grammar
+  (`[A-Za-z_][A-Za-z0-9_.-]{0,31}`) and `host` against
+  RFC-952/1123 hostname or IP-literal grammar, with the new
+  typed errors `InvalidUser` / `InvalidHost` surfaced via
+  `inspect help safety` and `inspect help ssh`. Validation runs
+  at config-load before any ssh argv is constructed.
+
 ### Fixed (pre-release pain-point audit)
 
 A structured pain-point audit run between code-freeze and tag

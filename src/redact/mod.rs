@@ -144,6 +144,38 @@ impl OutputRedactor {
             return Some(Cow::Borrowed(line));
         }
 
+        // S2 (post-v0.1.3 security audit): /proc/<pid>/environ and
+        // similar interfaces emit NUL-separated `KEY=VALUE` records
+        // with no newline terminator. The streaming line reader
+        // splits on `\n` only, so the entire blob arrives as a single
+        // "line" that the per-line maskers can't decompose. Split on
+        // NUL here and mask each chunk independently, rejoining with
+        // NUL so the output bytes survive for downstream consumers.
+        // PEM is intentionally bypassed for NUL-split chunks — a PEM
+        // BEGIN line cannot occur mid-NUL-blob, and running PEM's
+        // multi-line state machine across split chunks would corrupt
+        // its internal tracking.
+        if line.contains('\0') {
+            let masked: String = line
+                .split('\0')
+                .map(|chunk| match self.mask_line_inner(chunk) {
+                    Some(Cow::Borrowed(s)) => s.to_string(),
+                    Some(Cow::Owned(s)) => s,
+                    // `None` (PEM suppress) cannot happen here; the
+                    // PEM regex anchors on `^...$` and a chunk
+                    // wouldn't carry a full BEGIN/END pair. Fall
+                    // through to the marker for safety.
+                    None => PEM_REDACTED_MARKER.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\0");
+            return Some(Cow::Owned(masked));
+        }
+
+        self.mask_line_inner(line)
+    }
+
+    fn mask_line_inner<'a>(&self, line: &'a str) -> Option<Cow<'a, str>> {
         // PEM is a multi-line gate. Inside / on END of a block it
         // returns Suppress (and no other masker fires); on the BEGIN
         // line it asks the composer to emit the marker; otherwise it
@@ -471,5 +503,37 @@ mod tests {
         assert!(!out.as_ref().contains("sk-abcdefghk3"));
         assert!(out.as_ref().contains("echo line1"));
         assert!(out.as_ref().contains("echo line3"));
+    }
+
+    #[test]
+    fn s2_nul_separated_environ_blob_is_masked() {
+        // /proc/<pid>/environ shape: NUL-separated KEY=VALUE pairs,
+        // no terminating newline. Pre-S2 the whole blob arrived as a
+        // single line and only the first KEY was inspected, leaking
+        // every secret after the first NUL.
+        let r = OutputRedactor::new(false, false);
+        let blob = "PATH=/usr/bin\0API_KEY=sk-abcdefghk3\0HOME=/root";
+        let out = r.mask_line(blob).unwrap();
+        // The secret value must be masked …
+        assert!(
+            !out.as_ref().contains("sk-abcdefghk3"),
+            "secret leaked through NUL-separated blob: {out}"
+        );
+        // … and the NUL byte separators must survive so downstream
+        // consumers (transcript, audit, stdout) see the same shape.
+        assert_eq!(out.as_ref().matches('\0').count(), 2);
+        // Non-secret keys pass through unchanged.
+        assert!(out.as_ref().contains("PATH=/usr/bin"));
+        assert!(out.as_ref().contains("HOME=/root"));
+        assert!(r.was_active());
+    }
+
+    #[test]
+    fn s2_nul_blob_with_no_secret_passes_clean() {
+        let r = OutputRedactor::new(false, false);
+        let blob = "PATH=/usr/bin\0HOME=/root\0LANG=C.UTF-8";
+        let out = r.mask_line(blob).unwrap();
+        assert_eq!(out.as_ref(), blob);
+        assert!(!r.was_active());
     }
 }

