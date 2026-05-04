@@ -98,10 +98,19 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
             s.service().map(|x| format!("/{x}")).unwrap_or_default()
         );
         let revert = match prev_owner.as_deref() {
-            Some(o) => Revert::command_pair(
-                format!("chown {} -- {}", shquote(o), shquote(path)),
-                format!("chown {o} {path}"),
-            ),
+            Some(o) => {
+                // F11 capture-site authoritative: see chmod.rs.
+                let inner_revert = format!("chown {} -- {}", shquote(o), shquote(path));
+                let payload = match s.container() {
+                    Some(container) => format!(
+                        "docker exec {} sh -c {}",
+                        shquote(container),
+                        shquote(&inner_revert)
+                    ),
+                    None => inner_revert,
+                };
+                Revert::command_pair(payload, format!("chown {o} {path}"))
+            }
             None => Revert::unsupported(format!(
                 "could not capture prior owner of {path}; revert unavailable"
             )),

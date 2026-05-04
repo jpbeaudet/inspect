@@ -89,10 +89,19 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
                 "{path} already existed before mkdir; revert is a no-op"
             ))
         } else {
-            Revert::command_pair(
-                format!("rmdir -- {}", shquote(path)),
-                format!("rmdir {path}"),
-            )
+            // F11 capture-site authoritative: payload is the literal
+            // command for the runner, wrapped in `docker exec` when
+            // the original verb dispatched through a container.
+            let inner_revert = format!("rmdir -- {}", shquote(path));
+            let payload = match s.container() {
+                Some(container) => format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&inner_revert)
+                ),
+                None => inner_revert,
+            };
+            Revert::command_pair(payload, format!("rmdir {path}"))
         };
         if args.revert_preview {
             eprintln!(

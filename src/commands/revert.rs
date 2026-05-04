@@ -207,7 +207,12 @@ fn revert_composite(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -
         r.print();
         return Ok(ExitKind::Success);
     }
-    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::Always, 1, "Revert?") {
+    // F11 / LLM-trap: a targeted `revert <id> --apply` is already an
+    // explicit, double-witnessed intent (the audit-id + the apply
+    // flag). No interactive prompt — only the large-fanout interlock
+    // fires, which is a no-op at target_count=1. Drift detection on
+    // state_snapshot reverts still requires `--force` independently.
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {
         eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
     }
@@ -341,10 +346,15 @@ fn revert_command_pair(
         step.ns.namespace,
         step.service().map(|x| format!("/{x}")).unwrap_or_default()
     );
-    let wrapped = match step.container() {
-        Some(container) => format!("docker exec {} sh -c {}", shquote(container), shquote(&cmd)),
-        None => cmd.clone(),
-    };
+    // F11 capture-site authoritative (v0.1.3 smoke fix): `revert.payload`
+    // is the literal command the runner should dispatch, exactly as the
+    // original verb dispatched. Lifecycle inverses (`docker start`,
+    // `systemctl start`) run host-level; in-container inverses
+    // (chmod/chown/mkdir/touch) are pre-wrapped in `docker exec` at
+    // capture time. Earlier code unconditionally wrapped here, which
+    // double-wrapped lifecycle reverts and tried to run
+    // `docker exec <stopped-container> sh -c "docker start ..."`.
+    let wrapped = cmd.clone();
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     if !gate.should_apply() {
         let mut r = Renderer::new();
@@ -358,7 +368,9 @@ fn revert_command_pair(
         r.print();
         return Ok(ExitKind::Success);
     }
-    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::Always, 1, "Revert?") {
+    // F11 / LLM-trap: targeted revert with --apply is already an
+    // explicit, double-witnessed intent. No interactive prompt.
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {
         eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
     }
@@ -488,7 +500,10 @@ fn revert_state_snapshot(
         return Ok(ExitKind::Success);
     }
 
-    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::Always, 1, "Revert?") {
+    // F11 / LLM-trap: targeted revert with --apply is already an
+    // explicit, double-witnessed intent. No interactive prompt.
+    // Drift over the captured snapshot still requires --force.
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {
         eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
     }

@@ -1035,13 +1035,21 @@ EXAMPLES
 
 const LONG_REVERT: &str = "\
 Revert a previous mutation by audit id. Dry-run by default (shows the \
-reverse diff); `--apply` restores the original content. Refuses if the \
-file changed since the recorded mutation unless `--force`.
+reverse diff or inverse command); `--apply` executes it.
+
+CONFIRMATION
+  `revert <id> --apply` does NOT prompt interactively: the audit-id \
+plus `--apply` are already an explicit, double-witnessed intent and \
+agent / pipeline callers cannot answer a stdin prompt. Drift over a \
+captured snapshot still requires `--force`. Large fanout (>10 \
+targets, e.g. via `--last N` against a wide selector) still trips \
+the fanout interlock unless `--yes-all` is passed.
 
 EXAMPLES
   $ inspect revert <audit-id>
   $ inspect revert <audit-id> --apply
-  $ inspect revert <audit-id> --apply --force";
+  $ inspect revert <audit-id> --apply --force
+  $ inspect revert --last 3 --apply";
 
 const LONG_BUNDLE: &str = "\
 YAML-driven multi-step orchestration. A bundle declares preflight \

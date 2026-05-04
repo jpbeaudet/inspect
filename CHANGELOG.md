@@ -153,6 +153,50 @@ remaining three are documented limitations called out under
   follow symlinks on the create path. One unit test asserts the
   `set -eC` prefix.
 
+### Fixed — release-smoke LLM-trap
+
+- **`inspect revert <id> --apply` no longer prompts interactively.**
+  Surfaced during the v0.1.3 release smoke against arte: a
+  targeted `revert <audit-id> --apply` blocked silently on a `[y/N]`
+  stdin prompt routed to stderr, with no preceding summary line.
+  Pipelines and agent callers can't answer the prompt and saw it as
+  a hang at 0% CPU. The audit-id plus `--apply` are already an
+  explicit, double-witnessed intent — a third signal is overkill.
+  All three revert paths (`command_pair`, `state_snapshot`,
+  `composite`) now use the large-fanout interlock (no-op at
+  `target_count=1`) instead of the unconditional `Confirm::Always`
+  prompt. Drift detection on `state_snapshot` reverts still
+  requires `--force`; `revert --last N` against a wide selector
+  still trips the >10-target fanout interlock unless `--yes-all`
+  is passed. `LONG_REVERT` gained a CONFIRMATION section
+  documenting the new contract.
+
+- **F11 `command_pair` revert wrapping bug.** Surfaced in the same
+  smoke turn after the prompt was removed: `inspect revert
+  <stop-audit> --apply` against a stopped sandbox container failed
+  with `Error response from daemon: container <hash> is not
+  running`. Capture sites disagreed about whose responsibility the
+  `docker exec` wrap was — `lifecycle.rs` baked host-level inverses
+  (`docker start <c>`) into `revert.payload`, while the
+  in-container verbs (`chmod`, `chown`, `mkdir`, `touch`) wrote
+  bare in-container payloads (`chmod 644 -- /path`) and trusted
+  `revert_command_pair` to wrap. `revert_command_pair` then wrapped
+  unconditionally whenever `step.container()` was `Some`, so
+  lifecycle reverts were double-wrapped into
+  `docker exec <stopped-container> sh -c "docker start <c>"` —
+  doomed by definition because the container that should run the
+  revert is the very container being revived. The contract is now
+  capture-site-authoritative: `revert.payload` is the literal
+  command the runner dispatches, exactly mirroring how the original
+  verb dispatched. The four in-container verbs pre-wrap their
+  inverse in `docker exec` at capture time; lifecycle / compose /
+  ssh / steps reverts remain host-level. `revert_command_pair`
+  runs the payload as-is, no wrapping, no second-guessing. Field-
+  validated end-to-end on arte:
+  `reverted audit 1777883334190-055d → arte/inspect-smoke-…
+  (audit 1777884723466-216a)` after stop+revert against a real
+  sandbox container.
+
 ### Added — pain-point-audit documentation (G6 / G7 / G8)
 
 - **`inspect help safety` — Encoding-bypass and multi-line

@@ -104,10 +104,23 @@ pub fn run(args: ChmodArgs) -> Result<ExitKind> {
             s.service().map(|x| format!("/{x}")).unwrap_or_default()
         );
         let revert = match prev_mode.as_deref() {
-            Some(m) => Revert::command_pair(
-                format!("chmod {} -- {}", shquote(m), shquote(path)),
-                format!("chmod {m} {path}"),
-            ),
+            Some(m) => {
+                // F11 capture-site authoritative: payload is the
+                // literal command the runner will dispatch, wrapped
+                // in `docker exec` when the original verb dispatched
+                // through a container. Mirrors the apply-time wrap
+                // below so revert.rs runs payload as-is.
+                let inner_revert = format!("chmod {} -- {}", shquote(m), shquote(path));
+                let payload = match s.container() {
+                    Some(container) => format!(
+                        "docker exec {} sh -c {}",
+                        shquote(container),
+                        shquote(&inner_revert)
+                    ),
+                    None => inner_revert,
+                };
+                Revert::command_pair(payload, format!("chmod {m} {path}"))
+            }
             None => Revert::unsupported(format!(
                 "could not capture prior mode of {path}; revert unavailable"
             )),

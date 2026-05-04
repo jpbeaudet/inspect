@@ -85,7 +85,19 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
                 "{path} already existed; touch only updates mtime, no inverse captured"
             ))
         } else {
-            Revert::command_pair(format!("rm -f -- {}", shquote(path)), format!("rm {path}"))
+            // F11 capture-site authoritative: payload is the literal
+            // command for the runner, wrapped in `docker exec` when
+            // the original verb dispatched through a container.
+            let inner_revert = format!("rm -f -- {}", shquote(path));
+            let payload = match s.container() {
+                Some(container) => format!(
+                    "docker exec {} sh -c {}",
+                    shquote(container),
+                    shquote(&inner_revert)
+                ),
+                None => inner_revert,
+            };
+            Revert::command_pair(payload, format!("rm {path}"))
         };
         if args.revert_preview {
             eprintln!(
