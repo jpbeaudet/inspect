@@ -6,14 +6,17 @@
 //! that were `0600 root:root`, that silently widens permissions on
 //! every edit — a classic production foot-gun.
 //!
-//! The snippet uses GNU coreutils `chmod --reference` / `chown
-//! --reference`, which Linux servers ship with by default. `chown`
-//! frequently requires root; we tolerate its failure (the
-//! `2>/dev/null || true`) so unprivileged edits still succeed with
-//! the operator's own ownership rather than aborting outright. mode
-//! preservation is required (rejecting a failure would block edits to
-//! files whose modes differ from the default umask, which is the
-//! whole point of this helper).
+//! The snippet uses POSIX-portable `stat -c '%a'` / `stat -c '%u:%g'`
+//! to read the original file's mode and ownership, then `chmod` /
+//! `chown` the temp file before the atomic rename. `stat -c` is
+//! supported by both GNU coreutils and BusyBox (Alpine), unlike the
+//! pre-v0.1.3 `chmod --reference` form which is GNU-only and printed
+//! BusyBox usage spew on every Alpine edit (release-smoke find on
+//! arte/inspect-smoke-* against `nginx:alpine`). `chown` frequently
+//! requires root; we tolerate its failure (the `2>/dev/null || true`)
+//! so unprivileged edits still succeed with the operator's own
+//! ownership rather than aborting outright. Mode preservation is
+//! required (failure aborts via `set -e`).
 //!
 //! The whole pre-rename block is wrapped in `if [ -e PATH ]` so this
 //! also works for first-time creates (no original to mirror).
@@ -36,8 +39,8 @@ pub fn write_then_rename(b64: &str, tmp: &str, path: &str) -> String {
         "set -e; \
          printf %s {b64_q} | base64 -d > {tmp_q}; \
          if [ -e {path_q} ]; then \
-            chmod --reference={path_q} {tmp_q}; \
-            chown --reference={path_q} {tmp_q} 2>/dev/null || true; \
+            chmod \"$(stat -c '%a' {path_q})\" {tmp_q}; \
+            chown \"$(stat -c '%u:%g' {path_q})\" {tmp_q} 2>/dev/null || true; \
          fi; \
          mv {tmp_q} {path_q}"
     )
@@ -48,17 +51,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snippet_preserves_mode_via_reference() {
+    fn snippet_preserves_mode_via_stat() {
         let s = write_then_rename("BASE64==", "/etc/foo.tmp", "/etc/foo");
-        assert!(s.contains("chmod --reference="));
-        assert!(s.contains("chown --reference="));
-        // chown failure tolerated, chmod failure is not (no `|| true`).
+        assert!(s.contains("chmod \"$(stat -c '%a' "));
+        assert!(s.contains("chown \"$(stat -c '%u:%g' "));
+        // chown failure tolerated, chmod failure is not.
         assert!(s.contains("|| true"));
-        assert!(!s.contains("chmod --reference=/etc/foo /etc/foo.tmp 2>/dev/null"));
+        // The pre-v0.1.3 GNU-only form must be gone.
+        assert!(!s.contains("--reference="));
     }
 
     #[test]
-    fn snippet_skips_reference_when_path_missing() {
+    fn snippet_skips_stat_when_path_missing() {
         // The if-guard is what enables first-time creates.
         let s = write_then_rename("X", "/new.tmp", "/new");
         assert!(s.contains("if [ -e "));

@@ -50,15 +50,27 @@ impl SnapshotStore {
     }
 
     pub fn get(&self, hash_hex: &str) -> Result<Vec<u8>> {
-        let hex_only = hash_hex.strip_prefix("sha256-").unwrap_or(hash_hex);
+        let hex_only = strip_sha256_prefix(hash_hex);
         let path = self.dir.join(format!("sha256-{hex_only}"));
         std::fs::read(&path).with_context(|| format!("reading snapshot {}", path.display()))
     }
 
     pub fn path_for(&self, hash_hex: &str) -> PathBuf {
-        let hex_only = hash_hex.strip_prefix("sha256-").unwrap_or(hash_hex);
+        let hex_only = strip_sha256_prefix(hash_hex);
         self.dir.join(format!("sha256-{hex_only}"))
     }
+}
+
+/// Strip either `sha256-` (the on-disk filename prefix) or `sha256:`
+/// (the audit-entry prefix used in `previous_hash` / `new_hash`) from
+/// a hash string. Field smoke (v0.1.3) caught this mismatch when
+/// `inspect revert` of an `edit` entry built the path
+/// `sha256-sha256:HEX` and got ENOENT — capture-site stored the
+/// colon form, snapshot-store only stripped the dash form.
+fn strip_sha256_prefix(s: &str) -> &str {
+    s.strip_prefix("sha256-")
+        .or_else(|| s.strip_prefix("sha256:"))
+        .unwrap_or(s)
 }
 
 /// Stand-alone hex digest of a byte slice.

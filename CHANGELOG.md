@@ -155,6 +155,36 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **F11 `state_snapshot` revert: snapshot path prefix mismatch.**
+  Surfaced during the v0.1.3 release smoke against an Alpine
+  sandbox: `inspect revert <edit-audit-id> --apply` failed with
+  `reading snapshot …/sha256-sha256:HEX … No such file or
+  directory`. Capture sites stamp `previous_hash` as
+  `"sha256:HEX"` (colon, the audit-entry convention), but
+  `SnapshotStore::{get,path_for}` only stripped the `"sha256-"`
+  on-disk filename prefix, so the colon-form leaked through and
+  built a doubly-prefixed `sha256-sha256:HEX` path. Snapshot
+  store now strips both prefixes via a shared
+  `strip_sha256_prefix()` helper.
+
+- **F11 atomic-write snippet was GNU-only (`chmod --reference`).**
+  Same smoke turn, against `nginx:alpine` (BusyBox coreutils):
+  every `inspect edit` apply spewed BusyBox `chmod` usage
+  (`Usage: chmod [-Rcvf] MODE…`) because `chmod --reference=PATH
+  FILE` and `chown --reference=PATH FILE` are GNU-only. The
+  atomic-rename snippet (used by `edit`, `put`, `cp` via the
+  shared `verbs/write/atomic.rs` and `verbs/transfer.rs`
+  helpers) now reads the prior mode/owner with POSIX-portable
+  `stat -c '%a' PATH` / `stat -c '%u:%g' PATH` and re-applies
+  via plain `chmod` / `chown`. `chmod` failure still aborts the
+  apply (mode preservation is required); `chown` failure is
+  tolerated (root-only, the existing `2>/dev/null || true`).
+  Unit tests `snippet_preserves_mode_via_stat`,
+  `atomic_script_mirrors_prior_mode_and_owner`, and
+  `atomic_script_applies_mode_override_after_mirror` were
+  rewritten to assert the new `stat -c` form and to fail loudly
+  if anyone reintroduces `--reference=`.
+
 - **`inspect revert <id> --apply` no longer prompts interactively.**
   Surfaced during the v0.1.3 release smoke against arte: a
   targeted `revert <audit-id> --apply` blocked silently on a `[y/N]`

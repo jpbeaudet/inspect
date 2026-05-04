@@ -556,11 +556,17 @@ pub(crate) fn build_stream_atomic_script(
     }
     // 1. Stream stdin into the temp file.
     script.push_str(&format!("cat > {tmp_q}; "));
-    // 2. Mirror prior mode/owner if path exists.
+    // 2. Mirror prior mode/owner if path exists. POSIX-portable
+    //    `stat -c` form (works on GNU coreutils and BusyBox / Alpine);
+    //    pre-v0.1.3 used `chmod --reference` which is GNU-only and
+    //    spewed BusyBox usage on every Alpine put/cp — release-smoke
+    //    find on arte/inspect-smoke-* against `nginx:alpine`. Mode
+    //    preservation is required (failure aborts via `set -e`);
+    //    chown is best-effort (root-only) so we tolerate failure.
     script.push_str(&format!(
         "if [ -e {path_q} ]; then \
-            chmod --reference={path_q} {tmp_q}; \
-            chown --reference={path_q} {tmp_q} 2>/dev/null || true; \
+            chmod \"$(stat -c '%a' {path_q})\" {tmp_q}; \
+            chown \"$(stat -c '%u:%g' {path_q})\" {tmp_q} 2>/dev/null || true; \
         fi; "
     ));
     // 3. Apply operator overrides (after mirror so they win).
@@ -621,15 +627,17 @@ mod tests {
     #[test]
     fn atomic_script_mirrors_prior_mode_and_owner() {
         let s = build_stream_atomic_script("/p.tmp", "/p", false, None, None);
-        assert!(s.contains("chmod --reference='/p' '/p.tmp'"));
-        assert!(s.contains("chown --reference='/p' '/p.tmp' 2>/dev/null || true"));
+        assert!(s.contains("chmod \"$(stat -c '%a' '/p')\" '/p.tmp'"));
+        assert!(s.contains("chown \"$(stat -c '%u:%g' '/p')\" '/p.tmp' 2>/dev/null || true"));
+        // GNU-only `--reference` form must be gone.
+        assert!(!s.contains("--reference="));
     }
 
     #[test]
     fn atomic_script_applies_mode_override_after_mirror() {
         let s = build_stream_atomic_script("/p.tmp", "/p", false, Some("0755"), None);
         // override appears AFTER the mirror block, before mv
-        let mirror_idx = s.find("chmod --reference=").unwrap();
+        let mirror_idx = s.find("chmod \"$(stat").unwrap();
         let override_idx = s.find("chmod '0755'").unwrap();
         let mv_idx = s.find("mv ").unwrap();
         assert!(mirror_idx < override_idx);
