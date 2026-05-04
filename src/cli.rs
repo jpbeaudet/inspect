@@ -451,13 +451,29 @@ MODEL:    shells out to remote 'grep -r' against the resolved target path; no cl
 EXAMPLE:  inspect grep arte/onyx-vault:/var/log 'panic'
 NOTE:     for indexed search across a fleet, use 'inspect search' (LogQL DSL, profile-side index).
 
-Search content in logs or files on the selected targets. Selector may \
-include `:path` to grep a specific file. Smart-case by default.
+Search content in logs or files on the selected targets. Smart-case by \
+default.
+
+ARGUMENT SHAPE (read this before reaching for unfamiliar flags)
+  inspect grep <PATTERN> <SELECTOR>
+  - <PATTERN> is the FIRST positional arg (the regex to grep for).
+  - <SELECTOR> is the SECOND positional. To grep a specific file, \
+append `:path` directly to the selector — there is NO `--path` flag.
+      <ns>/<svc>            -> greps `docker logs` for the container
+      <ns>/<svc>:/abs/path  -> greps that file inside the container
+      <ns>/_:/abs/path      -> greps that file on the host fs
+  - `--match <REGEX>` is a SECOND-stage POST-filter (server-side
+    `grep -E`), applied AFTER the main <PATTERN> match. Repeatable
+    (OR semantics). Use this to narrow log noise without re-running.
+  - `--exclude <REGEX>` is the inverse: drop lines matching it. Also
+    repeatable; applied after `--match`.
 
 EXAMPLES
   $ inspect grep \"error\" arte/pulse --since 1h
   $ inspect grep -i \"timeout\" 'prod-*/storage' --since 30m
-  $ inspect grep \"milvus\" arte/atlas:/var/log/atlas.log";
+  $ inspect grep \"milvus\" arte/atlas:/var/log/atlas.log
+  $ inspect grep 'root' arte/api:/etc/passwd        # single-file shape
+  $ inspect grep 'panic' arte/pulse --match 'goroutine' --exclude 'health'";
 
 const LONG_CAT: &str = "\
 Print the contents of a file inside a container or on the host.
@@ -476,13 +492,26 @@ EXAMPLES
   $ inspect ls arte/pulse:/var/lib/pulse -l";
 
 const LONG_FIND: &str = "\
+MODEL:    shells out to remote `find <path> -name <pattern>`; no client-side indexing.
+EXAMPLE:  inspect find arte/atlas:/etc \"*.conf\"
+NOTE:     pattern is a POSITIONAL arg, not `--name` (this is not real find(1)).
+
 Find files by name pattern on a target. Wraps remote `find` and \
 respects discovery's tooling probe.
+
+ARGUMENT SHAPE (read this before reaching for unfamiliar flags)
+  inspect find <TARGET> [PATTERN]
+  - <TARGET> is `<ns>/<svc>:<path>` (or `<ns>/_:<path>` for host fs).
+  - [PATTERN] is the OPTIONAL second positional — a glob like
+    `\"*.conf\"` passed to remote `find -name`. There is NO `--name` flag;
+    using one will be rejected by clap.
+  - Omitting [PATTERN] lists every file under <path> (`find -name '*'`).
 
 EXAMPLES
   $ inspect find arte/atlas:/etc \"*.conf\"
   $ inspect find arte/_:/var/log \"*.log\"
-  $ inspect find 'prod-*/storage:/data'";
+  $ inspect find arte/api:/etc \"host*\"          # quote globs to avoid local shell expansion
+  $ inspect find 'prod-*/storage:/data'             # no pattern: list everything";
 
 const LONG_LIFECYCLE: &str = "\
 Container lifecycle (the verb form chooses the action: restart / stop / \
