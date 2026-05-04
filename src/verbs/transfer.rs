@@ -323,8 +323,15 @@ fn push(args: PushArgs) -> Result<ExitKind> {
                 format!("restore {label} from snapshot sha256:{}", &h[..12]),
             ),
             None => Revert::command_pair(
-                format!("inspect put created {label}"),
+                // payload = literal command the runner dispatches;
+                // preview = human-readable. v0.1.3 smoke caught
+                // these reversed: revert of a put-create dispatched
+                // the prose `inspect put created …` as a remote
+                // shell command and failed with `command not
+                // found`. Capture-site authoritative: payload is
+                // always the runnable form.
                 build_remote_rm(s, path),
+                format!("rm {label} (created by put)"),
             ),
         });
         entry.applied = Some(out.ok());

@@ -944,9 +944,24 @@ GC + RETENTION (L5, v0.1.3)
   oldest file's mtime crosses the threshold, and at most once per
   minute via the `~/.inspect/audit/.gc-checked` marker).
 
+ORDERING + JSON PROJECTION (agent-recipe critical)
+  `audit ls` (text and `--json`) is **newest-first**. To grab the most
+  recent entry from a pipeline, use `head -1` — `tail -1` returns the
+  OLDEST entry in the page, not the newest.
+
+      $ inspect audit ls --json | jq -r '.[0].id'                # newest
+      $ inspect audit ls --json | jq -r '.[] | select(.verb==\"put\") | .id' | head -1
+
+  The `audit ls --json` envelope is a projection (id, ts, verb,
+  selector, exit, diff_summary, is_revert, reason) — it does **not**
+  include the `revert` block. To inspect `revert.kind` / payload /
+  preview, round-trip through `inspect audit show <id> --json`.
+
 EXAMPLES
   $ inspect audit ls
+  $ inspect audit ls --json | jq -r '.[0].id'   # newest entry id
   $ inspect audit show <id>
+  $ inspect audit show <id> --json | jq '.revert'   # revert block
   $ inspect audit grep \"atlas\"
   $ inspect audit gc --keep 90d --dry-run
   $ inspect audit gc --keep 100 --json";
@@ -1112,9 +1127,13 @@ Compose step kind (L8, v0.1.3):
   `volumes: true` / `rmi: true` (both project-scoped). Audit shape
   matches the standalone `inspect compose <action>` verbs:
   `verb=compose.<action>`, `args=\"[project=…] [service=…]
-  [compose_file_hash=…]\"`, with `revert.kind=command_pair` for
-  up/down/restart/build (the inverse points at the matching compose
-  verb) and `revert.kind=unsupported` for pull.
+  [compose_file_hash=…]\"`, with `revert.kind=unsupported` on every
+  per-step compose entry. Direct
+  `inspect revert <compose-step-audit-id> --apply` refuses with the
+  manual inverse verb in the preview; bundle-level rollback (via
+  `bundle apply --on-failure rollback`) walks the composite parent
+  audit and invokes the inverse verb locally with the original
+  flag set, which is the only reliable way to undo a compose step.
 
 EXAMPLES
   $ inspect bundle plan deploy.yaml
@@ -3274,11 +3293,18 @@ pub struct AuditArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AuditCommand {
-    /// List recent audit entries (newest first).
+    /// List recent audit entries (**newest first**). For pipelines:
+    /// the most recent entry is `head -1`, not `tail -1`. The
+    /// `--json` envelope is a projection (id/ts/verb/selector/exit/
+    /// diff_summary/is_revert/reason) and does NOT include the
+    /// `revert` block — use `audit show <id> --json` for that.
     Ls(AuditLsArgs),
-    /// Show one audit entry in detail.
+    /// Show one audit entry in detail. `--json` returns the full
+    /// `AuditEntry` including the `revert` block (kind, payload,
+    /// preview, previous_hash) — `audit ls --json` omits it.
     Show(AuditShowArgs),
     /// Filter audit entries by substring (id/verb/selector/args).
+    /// **Newest-first**, same projection caveat as `audit ls --json`.
     Grep(AuditGrepArgs),
     /// Field pitfall §3.4: best-effort integrity check of the local
     /// audit log. Verifies every JSONL line parses, every referenced

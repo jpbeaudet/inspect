@@ -1110,26 +1110,36 @@ fn compose_revert_for_action(
         None => format!("{ns}/{project}"),
     };
     match action {
-        ComposeAction::Up => Revert::command_pair(
-            format!("inspect compose up {sel} --apply"),
-            format!("inspect compose down {sel} --apply"),
-        ),
-        ComposeAction::Down => Revert::command_pair(
-            format!("inspect compose down {sel} --apply"),
-            format!("inspect compose up {sel} --apply"),
-        ),
-        ComposeAction::Restart => Revert::command_pair(
-            format!("inspect compose restart {sel} --apply"),
-            format!("inspect compose restart {sel} --apply"),
-        ),
+        // F11 capture-site authoritative (v0.1.3 smoke fix): per-step
+        // compose reverts previously stored an `inspect compose <inv>
+        // {sel} --apply` CLI wrapper as the runnable payload. That
+        // payload is dispatched by `revert_command_pair` via
+        // `runner.run` against the remote target — where `inspect`
+        // is not installed — so direct
+        // `inspect revert <compose-step-audit-id> --apply` failed
+        // with `command not found`. The native bundle revert path
+        // (`inspect bundle apply --on-failure rollback`) walks the
+        // composite parent audit, not these per-step entries, and
+        // already invokes the inverse verb locally. Direct revert
+        // requires bundle context (project path, flag set) we do
+        // not have here, so refuse loudly via `Unsupported` and
+        // point the operator at the right manual verb.
+        ComposeAction::Up => Revert::unsupported(format!(
+            "compose up has no remote-runnable inverse; run `inspect compose down {sel} --apply`"
+        )),
+        ComposeAction::Down => Revert::unsupported(format!(
+            "compose down has no remote-runnable inverse; run `inspect compose up {sel} --apply`"
+        )),
+        ComposeAction::Restart => Revert::unsupported(format!(
+            "compose restart has no inverse; re-run `inspect compose restart {sel} --apply` to repeat"
+        )),
         ComposeAction::Pull => Revert::unsupported(
             "compose pull has no inverse — pulled images stay in the local docker cache"
                 .to_string(),
         ),
-        ComposeAction::Build => Revert::command_pair(
-            format!("inspect compose build {sel} --apply"),
-            format!("inspect compose down {sel} --apply"),
-        ),
+        ComposeAction::Build => Revert::unsupported(format!(
+            "compose build has no remote-runnable inverse; run `inspect compose down {sel} --apply` to drop containers"
+        )),
     }
 }
 

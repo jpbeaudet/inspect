@@ -48,11 +48,15 @@ These caught a previous smoke run. Read them once before any phase.
    clap usage error (exit 2). Use `--json` alone when piping to
    `jq`; use `--quiet` alone when piping the human format to a
    non-`jq` filter.
-3. **Audit-list output.** `inspect audit ls --tail N --json`
-   returns the entries as a JSON array at the **top level** (no
-   `.data` wrapper) — this verb predates the L7 envelope sweep.
-   Use `.[]`, `.[0]`, etc. directly. Verify the shape on first
-   contact in case this differs.
+3. **Audit-list output is newest-first.** `inspect audit ls --limit
+   N --json` returns the most recent N entries as a JSON array at
+   the **top level** (no `.data` wrapper) — this verb predates the
+   L7 envelope sweep. The flag is `--limit` (NOT `--tail`); the
+   most recent entry is `.[0]` / `head -1`, NOT `tail -1`. The
+   array is a projection (id, ts, verb, selector, exit,
+   diff_summary, is_revert, reason); the `revert` block is **not**
+   included — round-trip via `inspect audit show <id> --json` to
+   inspect `revert.kind` / `payload` / `preview`.
 4. **Field selectors are `<ns>/<svc>`** (matches inventory) or
    `<ns>/<container_name>` (F5 dual-axis resolver — emits a
    one-line stderr breadcrumb pointing at the canonical form
@@ -239,7 +243,11 @@ inspect put ./tmp/inspect-smoke-payload.txt arte/_:/tmp/inspect-smoke-up.txt --m
 inspect run arte -- "stat -c '%a' /tmp/inspect-smoke-up.txt"      # 640
 # put creates -> revert removes (command_pair); put over existing ->
 # state_snapshot. Verify the revert kind on the audit entries.
-inspect audit ls --tail 5 --json | jq '.[] | {verb, "rk": .revert.kind}'
+# revert.kind is NOT in the `audit ls --json` projection — round-trip
+# the most recent put audit ids through `audit show <id> --json`:
+for id in $(inspect audit ls --limit 5 --json | jq -r '.[] | select(.verb=="put") | .id'); do
+  inspect audit show "$id" --json | jq -r '"\(.id) verb=\(.verb) rk=\(.revert.kind)"'
+done
 
 # L8 compose surface (read-only; no per-service down/up on the real
 # compose services). If the host has compose projects:
@@ -270,7 +278,7 @@ printf 'echo from-stdin-pipe\n' > /tmp/inspect-smoke-init.sh
 cat /tmp/inspect-smoke-init.sh | inspect run arte \
   -- "docker exec -i ${SMOKE_CTR} sh"
 # Pass: stdout contains 'from-stdin-pipe'.
-inspect audit ls --tail 1 --json | \
+inspect audit ls --limit 1 --json | \
   jq '.[0] | {verb, stdin_bytes, stdin_sha256: .stdin_sha256}'
 # Pass: stdin_bytes matches file size.
 
@@ -279,7 +287,7 @@ echo data | inspect run arte --no-stdin -- "cat"   # exit 2 + chained hint
 
 # F14 script mode (heredoc with embedded sh + python; no local quoting)
 inspect run arte --file ./tests/smoke/v013/migration.sh -- "${SMOKE_CTR}"
-inspect audit ls --tail 1 --json | \
+inspect audit ls --limit 1 --json | \
   jq '.[0] | {script_path, script_sha256, script_bytes, script_interp}'
 # Pass: script body deduped at ~/.inspect/scripts/<sha>.sh
 
@@ -290,12 +298,12 @@ timeout --signal=INT 5 inspect run arte --stream \
 inspect run arte -- "ps -ef | grep -c 'docker logs -f ${SMOKE_CTR}' \
   | grep -v grep || true"
 # Pass: zero orphaned 'docker logs -f' processes on arte.
-inspect audit ls --tail 1 --json | jq '.[0].streamed'   # true
+inspect audit ls --limit 1 --json | jq '.[0].streamed'   # true
 
 # L11 --stream + --file composition (lifted clap mutex)
 inspect run arte --stream --file ./tests/smoke/v013/migration.sh \
   -- "${SMOKE_CTR}"
-inspect audit ls --tail 1 --json | jq '.[0].bidirectional'   # true
+inspect audit ls --limit 1 --json | jq '.[0].bidirectional'   # true
 
 # F17 multi-step runner with injected step-3 failure + revert unwind.
 # Manifest at tests/smoke/v013/migration.json; step 3 deliberately
@@ -304,9 +312,9 @@ inspect run arte --steps ./tests/smoke/v013/migration.json \
   --revert-on-failure \
   --reason "v0.1.3 smoke F17 unwind probe"
 echo "exit=$?"   # non-zero (the failure exit), not 0
-inspect audit ls --tail 10 --json | \
+inspect audit ls --limit 10 --json | \
   jq '[.[] | select(.steps_run_id != null)] | length'
-inspect audit ls --tail 10 --json | \
+inspect audit ls --limit 10 --json | \
   jq '[.[] | select(.verb == "run.step.revert")] | length'
 # Pass: composite revert walks step 2 then step 1 inverses.
 ```

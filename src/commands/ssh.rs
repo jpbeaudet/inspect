@@ -123,18 +123,20 @@ mod add_key {
             gen = generated,
             rew = config_rewritten,
         );
-        // No clean inverse: the verb does not attempt to revoke the
-        // public key automatically. The command_pair body documents
-        // the manual remove path so a forensic operator has the exact
-        // remote command in the audit record.
-        entry.revert = Some(Revert::command_pair(
-            format!("inspect ssh add-key {} --apply", args.namespace),
-            format!(
-                "ssh {ns} -- 'sed -i \"\\\\|{line}|d\" ~/.ssh/authorized_keys'",
-                ns = args.namespace,
-                line = pubkey_line.replace('|', "\\|"),
-            ),
-        ));
+        // F11 capture-site authoritative (v0.1.3 smoke fix): there
+        // is no clean automatic inverse for `ssh.add-key` — revoking
+        // a deployed public key is an operator decision (it may have
+        // already been used to bootstrap further automation). Use
+        // `Unsupported` rather than `command_pair` so
+        // `inspect revert <add-key-audit-id>` refuses loudly with
+        // the manual remote command in the preview, instead of
+        // silently dispatching the forward CLI wrapper. Matches the
+        // F11 contract: "never silently no-op".
+        entry.revert = Some(Revert::unsupported(format!(
+            "manual revoke required: ssh {ns} -- 'sed -i \"\\\\|{line}|d\" ~/.ssh/authorized_keys'",
+            ns = args.namespace,
+            line = pubkey_line.replace('|', "\\|"),
+        )));
 
         let store = AuditStore::open()?;
         store.append(&entry)?;

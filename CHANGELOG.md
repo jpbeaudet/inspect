@@ -155,6 +155,67 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **`audit ls` ordering + projection: help text now spells out
+  newest-first and the `revert`-block omission.** The smoke
+  agent burnt two cycles assuming `audit ls --json | tail -1`
+  yielded the most recent entry (it yields the OLDEST in the
+  page; `audit ls` already sorts via
+  `sort_by_key(Reverse(e.ts))`) and another cycle expecting
+  `revert.kind` to be present in `audit ls --json` (the projection
+  emits id/ts/verb/selector/exit/diff_summary/is_revert/reason
+  only — the `revert` block lives on `audit show <id> --json`).
+  No code change to `audit ls`; instead the help surface is
+  hardened so the same trap can't repeat:
+    - `LONG_AUDIT_LS` gains an "ORDERING + JSON PROJECTION
+      (agent-recipe critical)" section with a `head -1` example
+      and an explicit "round-trip through `audit show`" pointer
+      for the revert block.
+    - The clap `///` doc comments on `Ls`, `Show`, and `Grep`
+      carry the same warning so it surfaces at `inspect audit
+      ls --help` / `inspect audit show --help` / `inspect audit
+      grep --help` (the leaf surface LLM agents hit first).
+    - `docs/SMOKE_v0.1.3.md` LLM-trap §3 rewritten and every
+      `inspect audit ls --tail N --json` recipe (which was also
+      using a non-existent `--tail` flag — the real flag is
+      `--limit`) replaced with the canonical `--limit N --json
+      | jq '.[0]'` form, plus a put-roundtrip recipe that walks
+      `audit show` for the `revert.kind`.
+
+- **F11 `command_pair` capture-site discipline: `payload` is the
+  literal command, never CLI prose.** Surfaced live during the
+  v0.1.3 smoke after `inspect put` of a brand-new file: the
+  audit's `revert.payload` was the human prose
+  `inspect put created arte:/tmp/...` while the runnable
+  `rm -f -- ...` was buried in `revert.preview` (args reversed).
+  `revert_command_pair` dispatches `payload` through the runner,
+  so direct revert would have tried to run that prose as a
+  remote shell command and failed with `command not found`. The
+  put-create site now passes the real shell command first; the
+  contract is cemented by inline comments. Two adjacent capture
+  sites that violated the same anti-pattern were swept in the
+  same commit:
+    - **`inspect ssh add-key`**: payload was
+      `inspect ssh add-key <ns> --apply` (the *forward* CLI
+      wrapper, not an inverse). Now `Unsupported` with the
+      manual `sed -i '\\|<line>|d'` revoke command in the
+      preview — matching the comment that already said "no clean
+      automatic inverse" and the F11 contract "never silently
+      no-op".
+    - **`inspect bundle … compose: …` per-step entries** for
+      `up` / `down` / `restart` / `build`: payload was an
+      `inspect compose <inv> {sel} --apply` CLI wrapper, which
+      the runner cannot dispatch on the remote target (`inspect`
+      is not installed there). Direct
+      `inspect revert <compose-step-audit-id> --apply` would
+      have failed with `command not found`. All four are now
+      `Unsupported` with the manual inverse verb in the
+      preview; bundle-level rollback (`bundle apply --on-failure
+      rollback`) is unaffected because it walks the composite
+      parent audit locally with the original flag set, and that
+      path was already correct. `LONG_BUNDLE` updated to match.
+  Standalone `inspect compose <action>` verbs (outside the
+  bundle runner) were already `Unsupported` and unaffected.
+
 - **F11 `state_snapshot` revert: snapshot path prefix mismatch.**
   Surfaced during the v0.1.3 release smoke against an Alpine
   sandbox: `inspect revert <edit-audit-id> --apply` failed with
