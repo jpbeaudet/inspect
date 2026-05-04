@@ -25,6 +25,49 @@ final cleanup phase removes all three classes idempotently.
 
 ---
 
+## Conventions an agent running this smoke must know
+
+These caught a previous smoke run. Read them once before any phase.
+
+1. **`--json` envelope shape.** Every read verb wraps its payload
+   under `.data`. Top-level keys are
+   `{schema_version, summary, data, next, meta}`. So the F1 services
+   array is at `.data.services`, not `.services`; F7.5 state is at
+   `.data.state`, not `.state`; cache provenance is at
+   `.meta.source.{mode, stale, runtime_age_s, inventory_age_s}`.
+   The `next` field is the structured equivalent of the `NEXT:`
+   line in human output.
+2. **`--quiet` is mutex with `--json`.** This is the F7.4 contract:
+   `--quiet` strips the human-renderer indent; `--json` produces
+   structured output that does not need it. Combining them is a
+   clap usage error (exit 2). Use `--json` alone when piping to
+   `jq`; use `--quiet` alone when piping the human format to a
+   non-`jq` filter.
+3. **Audit-list output.** `inspect audit ls --tail N --json`
+   returns the entries as a JSON array at the **top level** (no
+   `.data` wrapper) — this verb predates the L7 envelope sweep.
+   Use `.[]`, `.[0]`, etc. directly. Verify the shape on first
+   contact in case this differs.
+4. **Field selectors are `<ns>/<svc>`** (matches inventory) or
+   `<ns>/<container_name>` (F5 dual-axis resolver — emits a
+   one-line stderr breadcrumb pointing at the canonical form
+   unless `INSPECT_NO_CANONICAL_HINT=1` is set; canonical form
+   resolves silently).
+5. **Verbs that output an envelope vs raw text.** Read verbs
+   (`status`, `health`, `why`, `ls`, `ps`, `connections`,
+   `ports`, `images`, `volumes`) emit the envelope. Streaming
+   verbs (`logs`, `run`, `cat`, `grep`, `find`, `search`)
+   emit raw lines (with redaction applied per L7) — those are
+   not jq-able as JSON.
+6. **Master socket reuse.** Once `inspect connect <ns>` has
+   succeeded, every subsequent verb reuses
+   `~/.inspect/sockets/<ns>.sock` and does **not** need the key
+   passphrase env var. The setup precheck path was the one
+   exception (fixed in commit 7d588d2 — precheck now reuses the
+   master socket instead of spawning a fresh BatchMode probe).
+
+---
+
 ## Pre-flight (before opening any SSH)
 
 | Step | Command | Pass criteria |
@@ -63,9 +106,9 @@ covered and skipped here unless the operator explicitly stages a
 ```sh
 inspect setup arte --force
 inspect status arte
-inspect status arte --json --quiet | jq '.state, (.services | length)'
+inspect status arte --json | jq '{state: .data.state, services_count: (.data.services | length), summary, source_mode: .meta.source.mode}'
 inspect connections
-inspect connections --json | jq '.[] | {ns, auth, session_ttl}'
+inspect connections --json | jq '.data[] | {ns, auth, session_ttl}'
 ```
 
 | Gate | Pass criteria |
@@ -74,7 +117,7 @@ inspect connections --json | jq '.[] | {ns, auth, session_ttl}'
 | F2 | Healthy host: zero `warning:` lines on stderr from `setup` / `status`. (Slow-but-successful is debug-level; partial timeouts collapse to one summary line.) |
 | F2 inventory-scaling | `INSPECT_DOCKER_INSPECT_TIMEOUT` not needed on a 10-15 container host. |
 | L4 | `inspect connections` table includes `auth` / `session_ttl` / `expires_in` columns; JSON envelope carries the same fields. |
-| F7.5 | `--json --quiet` output is pipe-clean (no leading two-space indent) and `.state` is one of `ok` / `no_services_matched` / `empty_inventory`. |
+| F7.5 | `--json` output payload sits under `.data`; `.data.state` is one of `ok` / `no_services_matched` / `empty_inventory`. (`--json --quiet` is a clap usage error — see the conventions preamble.) |
 
 ---
 
