@@ -294,6 +294,15 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("discovery"),
     },
     // ---- ssh ----------------------------------------------------------
+    // G5 (v0.1.3): the kernel's `sun_path` cap (108 bytes on Linux,
+    // 104 on macOS) is conservatively enforced at 104. More specific
+    // than the generic "ssh" fragment below, so it must come first.
+    ErrorEntry {
+        code: "ControlSocketPathTooLong",
+        fragment: "control socket path",
+        summary: "namespace produces a Unix-socket path longer than the kernel sun_path cap",
+        help_topic: Some("ssh"),
+    },
     ErrorEntry {
         code: "SshConnectFailed",
         fragment: "ssh",

@@ -118,6 +118,13 @@ pub fn run_remote(
             .arg(&socket)
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
+    } else {
+        // G4 (v0.1.3): when we are NOT attaching to an inspect-owned
+        // ControlMaster socket, force `ControlMaster=no` so an
+        // operator's personal `ControlMaster auto` in ~/.ssh/config
+        // cannot promote this short-lived dispatch into a backgrounded
+        // master that outlives the parent and detaches stdio.
+        ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
         // F16 (v0.1.3): -tt forces PTY allocation even when local
@@ -349,6 +356,10 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
             .arg(&socket)
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
+    } else {
+        // G4 (v0.1.3): force `ControlMaster=no` on the direct-ssh
+        // path. See `run_remote` above for rationale.
+        ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
         // F16 (v0.1.3): -tt forces a PTY for the remote command. See
@@ -546,6 +557,10 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
             .arg(&socket)
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
+    } else {
+        // G4 (v0.1.3): force `ControlMaster=no` on the direct-ssh
+        // path. See `run_remote` above for rationale.
+        ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
         // F16 (v0.1.3): -tt for streaming-capturing dispatches too,

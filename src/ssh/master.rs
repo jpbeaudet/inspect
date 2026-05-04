@@ -103,6 +103,36 @@ pub fn socket_path(namespace: &str) -> PathBuf {
     paths::sockets_dir().join(format!("{namespace}.sock"))
 }
 
+/// G5 (v0.1.3): the kernel `sun_path` field (the C-string a
+/// `bind(AF_UNIX)` accepts) is capped at 108 bytes on Linux and 104
+/// on macOS. ssh exits with `unix_listener: path "..." too long for
+/// Unix domain socket` when ControlPath exceeds the cap; the message
+/// surfaces from a child process and is hard to correlate with the
+/// `inspect connect` invocation that triggered it. We pre-validate
+/// at master-start time using the conservative 104-byte cap, point
+/// the operator at `INSPECT_HOME` to relocate the sockets directory,
+/// and chain to `inspect help ssh` for the broader troubleshooting
+/// topic.
+const SOCKET_PATH_MAX: usize = 104;
+
+/// Verify that `socket` fits within the kernel's `sun_path` cap. See
+/// [`SOCKET_PATH_MAX`] for the rationale.
+pub fn validate_socket_path(socket: &Path) -> Result<()> {
+    let len = socket.as_os_str().len();
+    if len > SOCKET_PATH_MAX {
+        return Err(anyhow::anyhow!(
+            "control socket path is {len} bytes, exceeding the {SOCKET_PATH_MAX}-byte \
+             kernel sun_path cap: {}\n\
+             hint: relocate the sockets directory by exporting \
+             INSPECT_HOME=/tmp/i (or any short path) and re-run; or rename the \
+             namespace to something shorter.\n\
+             see: inspect help ssh",
+            socket.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Ensure `~/.inspect/sockets/` exists with mode 0700.
 pub fn ensure_sockets_dir() -> std::result::Result<PathBuf, ConfigError> {
     paths::ensure_home()?;
@@ -258,6 +288,11 @@ pub fn start_master(
 ) -> Result<ConnectOutcome> {
     ensure_sockets_dir().map_err(anyhow::Error::from)?;
     let socket = socket_path(namespace);
+    // G5 (v0.1.3): fail fast and forensically if the socket path
+    // would exceed the kernel `sun_path` cap. ssh would otherwise
+    // emit a confusing 'unix_listener: path "…" too long' error from
+    // a child process; this check chains to a recovery hint.
+    validate_socket_path(&socket)?;
 
     // (1) Our socket alive?
     if matches!(check_socket(&socket, target), MasterStatus::Alive) {
@@ -752,4 +787,36 @@ fn maybe_warn_password_auth(namespace: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::File::create(&marker);
+}
+
+#[cfg(test)]
+mod g5_tests {
+    use super::{validate_socket_path, SOCKET_PATH_MAX};
+    use std::path::PathBuf;
+
+    #[test]
+    fn g5_short_path_passes() {
+        let p = PathBuf::from("/tmp/i/arte.sock");
+        assert!(validate_socket_path(&p).is_ok());
+    }
+
+    #[test]
+    fn g5_path_at_cap_passes() {
+        let mut s = String::from("/");
+        s.push_str(&"a".repeat(SOCKET_PATH_MAX - 1));
+        assert_eq!(s.len(), SOCKET_PATH_MAX);
+        assert!(validate_socket_path(&PathBuf::from(s)).is_ok());
+    }
+
+    #[test]
+    fn g5_path_over_cap_fails_with_hint() {
+        let mut s = String::from("/");
+        s.push_str(&"a".repeat(SOCKET_PATH_MAX));
+        assert_eq!(s.len(), SOCKET_PATH_MAX + 1);
+        let err = validate_socket_path(&PathBuf::from(s)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("control socket path"), "msg={msg}");
+        assert!(msg.contains("INSPECT_HOME"), "msg={msg}");
+        assert!(msg.contains("inspect help ssh"), "msg={msg}");
+    }
 }

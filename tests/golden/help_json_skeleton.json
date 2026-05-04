@@ -14,6 +14,7 @@
     "BadAliasType",
     "BadLogQL",
     "BadSelectorGrammar",
+    "ControlSocketPathTooLong",
     "CpNeedsRemote",
     "CpRemoteRemote",
     "EmptyQuery",

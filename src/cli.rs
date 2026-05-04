@@ -781,7 +781,21 @@ EXAMPLES
   $ inspect watch arte/atlas --until-cmd 'systemctl is-active atlas' --equals active
   $ inspect watch arte/db    --until-sql 'SELECT pg_is_in_recovery()=false' --psql-opts '-U postgres'
   $ inspect watch arte/api   --until-http http://localhost:8080/health --match 'status == 200'
-  $ inspect watch arte/atlas --until-log 'ready to accept connections' --timeout 5m";
+  $ inspect watch arte/atlas --until-log 'ready to accept connections' --timeout 5m
+
+KNOWN LIMITATION (G7) — POINT-IN-TIME PREDICATE
+  The predicate is checked at one polling instant per iteration: \
+the value/exit/HTTP status sampled at the moment the probe \
+returns. There is no `--min-consecutive` flag to require N \
+successive passes before exiting, so a flapping condition \
+(replica lag bouncing across a threshold, an HTTP endpoint \
+serving 200/503 intermittently) can satisfy a single poll and \
+exit before the underlying state has settled. Use \
+`--stable-for <duration>` for sustained-state semantics: it \
+requires the captured value to be byte-identical for the full \
+window before exit. A first-class `--min-consecutive` is on the \
+v0.1.4 backlog. See `inspect help watch` for the full \
+discussion.";
 
 const LONG_PATH_ARG: &str = "\
 File operation on a target path (the verb form chooses: rm / mkdir / \

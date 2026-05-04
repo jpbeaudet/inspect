@@ -539,7 +539,16 @@ pub(crate) fn build_stream_atomic_script(
 ) -> String {
     let tmp_q = shquote(tmp);
     let path_q = shquote(path);
-    let mut script = String::from("set -e; ");
+    // G9 (v0.1.3): `set -C` enables the shell's `noclobber` flag so
+    // the `cat > <tmp>` redirect uses `O_EXCL` semantics — it refuses
+    // to follow a pre-existing symlink at the tmp path or to overwrite
+    // a regular file. This closes a symlink-race window where an
+    // attacker with write access to the tmp's parent directory could
+    // pre-stage `<tmp>` as a symlink to a sensitive target before
+    // inspect's redirect runs. A stale tmp from a crashed prior
+    // upload is now a hard failure (operator must clean up manually);
+    // that is the intended trade-off vs silently overwriting.
+    let mut script = String::from("set -e; set -C; ");
     if mkdir_p {
         // Compute the parent dir on the remote and mkdir -p it.
         // dirname is POSIX; portable across coreutils + busybox.
@@ -647,5 +656,19 @@ mod tests {
     fn atomic_script_no_mkdir_when_flag_off() {
         let s = build_stream_atomic_script("/a/b.tmp", "/a/b", false, None, None);
         assert!(!s.contains("mkdir -p"));
+    }
+
+    #[test]
+    fn g9_atomic_script_uses_noclobber() {
+        // G9 (v0.1.3): `set -C` must be enabled before the `cat >`
+        // redirect so a pre-existing symlink at the tmp path causes
+        // the redirect to fail rather than be silently followed.
+        let s = build_stream_atomic_script("/etc/foo.tmp", "/etc/foo", false, None, None);
+        let nocl = s.find("set -C").expect("set -C must be present");
+        let cat = s.find("cat >").expect("cat redirect must be present");
+        assert!(
+            nocl < cat,
+            "set -C must precede the cat redirect; script={s}"
+        );
     }
 }

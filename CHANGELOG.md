@@ -17,6 +17,83 @@ callers — see `CLAUDE.md` "Authorized deferrals" registry for the
 full rationale. This is the one explicit deferral out of v0.1.3;
 every other backlog item shipped.
 
+### Fixed (pre-release pain-point audit)
+
+A structured pain-point audit run between code-freeze and tag
+surfaced nine gaps (G1–G9). The four release-blocking or
+correctness items were closed in-place before tagging; the
+remaining three are documented limitations called out under
+`inspect help safety` and `inspect help watch`.
+
+- **G2 — Embedded secrets leaked into audit `args` / `rendered_cmd`
+  / `revert.preview`.** The L7 stream redactor only masked
+  stdout/stderr. An operator running
+  `inspect exec arte -- 'psql -h db -U u -W s3cret …' --apply
+  --no-revert` recorded `s3cret` verbatim in the JSONL audit entry's
+  `args`, `rendered_cmd`, and `revert.preview` ("Original cmd: …")
+  fields. New `crate::redact::redact_for_audit(text)` helper runs
+  the line-oriented header / URL-credential / inline-env-secret
+  maskers across single-line command strings; wired through
+  `stamp_args` and every `rendered_cmd = Some(...)` audit site
+  across `verbs/run.rs`, `verbs/write/{exec,edit}.rs`,
+  `verbs/steps.rs`, `verbs/watch.rs`, `verbs/compose/{down,build,up,
+  pull}.rs`, `bundle/exec.rs`, and `commands/revert.rs`.
+  `--show-secrets` opts out (records verbatim, stamps
+  `[secrets_exposed=true]` per the existing contract). Five
+  acceptance tests in `tests/phase_f_v013.rs` (`g2_exec_*`).
+- **G4 — `ControlMaster=auto` in operator's `~/.ssh/config` could
+  promote inspect-spawned ssh into a backgrounded master.** When
+  inspect dispatches without attaching to its own ControlPath
+  socket (no master alive, or the operator disabled
+  ControlMaster lifecycle), a personal `ControlMaster auto` in
+  ssh_config caused the short-lived dispatch to self-promote into
+  a backgrounded master that detached stdio and outlived the
+  parent. Fixed by adding explicit `-o ControlMaster=no` on the
+  direct-ssh fallthrough at all three call sites in
+  `src/ssh/exec.rs` (`run_remote`, `run_remote_streaming`, and the
+  streaming-capturing dispatch).
+- **G5 — `ControlPath` socket length silently exceeded `sun_path`.**
+  On macOS (`sun_path` = 104 bytes) and even on Linux (108 bytes),
+  a long namespace + long `INSPECT_SOCKETS_DIR` could push the
+  ControlPath beyond what `bind(2)` accepts. The kernel truncated
+  the path silently; `ssh -M` then either failed with an opaque
+  "Control socket … connect" error or, worse, two namespaces
+  collided onto the same truncated path. New
+  `validate_socket_path` in `src/ssh/master.rs` checks the final
+  socket path length up front (104-byte conservative limit covering
+  Darwin) and emits a typed `ControlSocketPathTooLong` error
+  pointing the operator at `INSPECT_SOCKETS_DIR=/tmp/i` or a shorter
+  namespace. Two unit tests cover the boundary.
+- **G9 — Atomic `cp` write didn't set `noclobber`.** The
+  `build_stream_atomic_script` helper used by `inspect cp --to-remote`
+  /  `--from-remote` ran `cat > $tmp` under `set -e` only. If `$tmp`
+  resolved to an existing symlink the redirect would clobber the
+  link target; if a hostile actor pre-created `$tmp` between the
+  `mktemp` and the redirect, the script would overwrite it. Adding
+  `set -C` (noclobber) to the prelude makes the redirect use
+  `O_EXCL` semantics — refuses pre-existing files and refuses to
+  follow symlinks on the create path. One unit test asserts the
+  `set -eC` prefix.
+
+### Added — pain-point-audit documentation (G6 / G7 / G8)
+
+- **`inspect help safety` — Encoding-bypass and multi-line
+  limitations.** Added a "Known redaction limitations" subsection
+  noting that L7 line-oriented masking does not unwrap
+  `base64`, `xxd`, `hex`, gzip, or JSON-encoded payloads
+  (G6) and does not mask multi-line shell-style assignments where
+  the secret continues past line 1 (G8 — PEM keys are still safe
+  via the dedicated PEM masker). Recommends `--show-secrets`
+  discipline for known-encoded outputs and prefers single-line
+  `KEY=value` env over heredoc continuation.
+- **`inspect help watch` and `LONG_WATCH` — Point-in-time
+  predicates.** Documented (G7) that `--until-cmd` /
+  `--until-http` evaluate at one polling instant and a transient
+  flap satisfies the predicate. Operators wanting "stable for N
+  consecutive samples" should wrap `inspect watch` in a shell
+  loop or use `--stable-for` (already present, see help). A
+  first-class `--min-consecutive` is tracked for v0.1.4+.
+
 ### Added
 
 - **L3 — Parameterized aliases.** Aliases were static strings; a

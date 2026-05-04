@@ -58,6 +58,52 @@ OUTPUT REDACTION (L7, v0.1.3)
 
   See `inspect help write` for the per-masker pattern table.
 
+REDACTION LIMITS (known boundaries)
+  The L7 pipeline is line-oriented and pattern-based. There are
+  three classes of input it does NOT mask, by design — each is
+  documented here so operators can run with eyes open.
+
+  1. POST-PROCESSED SECRETS (G6).
+     `echo "$API_KEY" | base64`, `… | xxd`, `… | gzip | base64`,
+     and similar transforms re-encode the secret into bytes the
+     pattern maskers do not recognize. JSON-encoding a structured
+     secret (e.g. a service-account key) produces the same blind
+     spot: the encoded form is not a `KEY=VALUE`, not a header,
+     not a URL credential, and not a PEM block, so every masker
+     skips it.
+     Operator discipline: when a verb's command intentionally
+     re-encodes secret material, run with `--show-secrets` so the
+     audit log records the exposure explicitly (per the
+     `[secrets_exposed=true]` contract), and do NOT redirect that
+     output into a log file or shared transcript.
+
+  2. MULTI-LINE NON-PEM SECRETS (G8).
+     The env masker matches `KEY=VALUE` on a single line. A shell
+     here-doc style:
+         export TOKEN="line1
+         line2line3"
+     masks line 1 only; lines 2..N pass through verbatim.
+     PEM private keys are exempt: the dedicated PEM masker
+     collapses the entire `-----BEGIN ... -----END` block to a
+     single `[REDACTED PEM KEY]` marker regardless of line count.
+     For non-PEM multi-line values (multi-line API tokens,
+     line-continuation-assembled JSON keys), prefer single-line
+     shell variables, or run with `--show-secrets` and treat the
+     verb output as sensitive.
+
+  3. ARBITRARY OPAQUE BLOBS.
+     A high-entropy random string with no `KEY=` prefix, no header
+     framing, and no URL framing has no signal for the maskers to
+     latch onto. This is the same boundary GitHub Actions and
+     other line-masking systems hit: pattern-based redaction
+     cannot distinguish a deliberate identifier from a credential
+     when both share the same alphabet.
+
+  These limits apply to stdout/stderr, JSON `line` fields, audit
+  `args` / `rendered_cmd` / `revert.preview`, and L7 transcripts
+  (F18) uniformly — there is exactly one redaction code path
+  shared across all four surfaces.
+
 RETENTION + ORPHAN-SNAPSHOT GC (L5, v0.1.3)
   `inspect audit gc --keep <X>` deletes audit entries older than
   the retention threshold and sweeps orphan snapshot files.
