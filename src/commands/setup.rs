@@ -298,7 +298,7 @@ fn precheck_or_bail(namespace: &str, target: &SshTarget) -> anyhow::Result<()> {
         auth_failed_hint, host_key_changed_hint, run as run_precheck, unreachable_hint,
         PrecheckOutcome,
     };
-    match run_precheck(target) {
+    match run_precheck(namespace, target) {
         PrecheckOutcome::Ok => Ok(()),
         PrecheckOutcome::AuthFailed { .. } => {
             Err(anyhow::anyhow!(auth_failed_hint(namespace, target)))

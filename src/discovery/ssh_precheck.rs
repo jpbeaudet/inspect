@@ -11,6 +11,7 @@
 
 use std::process::Command;
 
+use crate::ssh::master::{check_socket, socket_path, MasterStatus};
 use crate::ssh::SshTarget;
 
 /// Reason a precheck failed. Drives which chained hint we emit.
@@ -35,8 +36,26 @@ pub enum PrecheckOutcome {
 /// `ConnectTimeout=10` matches the rest of the codebase. We set a small
 /// process-level timeout via `wait_timeout`-style polling? No — ssh's
 /// own `ConnectTimeout` is enough; if ssh itself wedges (very rare), we
-/// give it a hard `Duration` budget below.
-pub fn run(target: &SshTarget) -> PrecheckOutcome {
+///
+/// Smoke-caught (v0.1.3): when an inspect-managed master socket is
+/// already alive for `namespace`, the precheck must reuse it. Without
+/// this short-circuit, an encrypted-key namespace (`inspect connect`
+/// already opened the master, passphrase already entered) fails the
+/// precheck because `BatchMode=yes` cannot prompt for the passphrase
+/// on the fresh probe-time `ssh` invocation, and the failure is
+/// misclassified as `AuthFailed` even though every dispatch verb
+/// (run, exec, logs, ...) reuses the master correctly. The fix:
+/// before spawning the BatchMode probe, ask `check_socket` whether
+/// the namespace's master is alive; if so, short-circuit to
+/// `PrecheckOutcome::Ok`. The semantics are identical (ssh would
+/// have succeeded over the master anyway) and avoid the spurious
+/// re-auth attempt.
+pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
+    let socket = socket_path(namespace);
+    if matches!(check_socket(&socket, target), MasterStatus::Alive) {
+        return PrecheckOutcome::Ok;
+    }
+
     let connect_timeout = std::env::var("INSPECT_SSH_CONNECT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -268,5 +287,22 @@ mod tests {
         let h = unreachable_hint("arte", &t());
         assert!(h.contains("h:22"));
         assert!(h.contains("ping h"));
+    }
+
+    /// Smoke-caught (v0.1.3): the precheck must accept a namespace and
+    /// short-circuit when the inspect-managed master socket is alive.
+    /// This is a compile-level guard on the API shape — the live
+    /// short-circuit path is exercised by the v0.1.3 release smoke
+    /// (`docs/SMOKE_v0.1.3.md`, P1) where an encrypted-key namespace
+    /// with an already-open master must succeed `setup --force`
+    /// without re-prompting for the passphrase.
+    #[test]
+    fn run_takes_namespace_argument() {
+        // No assertion needed — this is a compile-time guard. If the
+        // signature regresses to `run(target)` we want a build break,
+        // not a runtime surprise.
+        fn _shape_check(ns: &str, t: &SshTarget) -> PrecheckOutcome {
+            run(ns, t)
+        }
     }
 }
