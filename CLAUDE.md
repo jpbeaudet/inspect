@@ -298,3 +298,148 @@ implementation, or partial work. **Verify before assuming**:
   + maintenance), `INSPECT_v0.1.3_BACKLOG.md` (current scope).
 - Audit log path: `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
 - Profile / config: `~/.inspect/servers.toml` (mode 0600).
+
+## Field-validated invariants (operational lessons)
+
+These are operational truths burnt into the tree by real release-smoke
+sessions. Every line below corresponds to a bug shipped to production
+or a recipe that wasted multiple agent turns. Treat them as
+non-negotiable: re-discovering them is wasted compute.
+
+### Signal handling
+
+- **SIGPIPE must be reset to `SIG_DFL` at startup.** Rust's stdlib
+  installs `SIG_IGN`, so `println!` / `writeln!` to a closed pipe
+  panics with `failed printing to stdout: Broken pipe`. For an
+  agent-facing CLI piped through `head`, `grep -m1`, `jq` etc.,
+  every short-circuited pipeline ended in exit 101 + backtrace
+  instead of the conventional silent 141. Fixed in
+  `src/exec/cancel.rs::install_sigpipe_default()`, called from
+  `install_handlers()` which `main.rs` invokes early. Regression
+  test `smoke_sigpipe_no_panic_on_early_pipe_close` in
+  `tests/phase_f_v013.rs`. **Never remove or condition this.**
+
+### F11 universal-revert capture-site contract
+
+The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
+`StateSnapshot`, `Composite`). Capture sites are **authoritative**:
+
+- **`command_pair(payload, preview)` argument order is load-bearing.**
+  `payload` = the literal shell command the runner will dispatch on
+  the remote. `preview` = human prose for `audit show` / `revert
+  --dry-run`. Reversing them is a 100% silent failure that exits 127
+  at revert time. Inline comments at every capture site state the
+  contract; new sites must follow.
+- **In-container verbs pre-wrap their own `docker exec`.** chmod /
+  chown / mkdir / touch revert payloads are the literal
+  `docker exec <ctr> <cmd>` string, not a bare command that the
+  runner would have to re-wrap. The runner runs payloads as-is.
+- **CLI-only inverses are `Unsupported`, not `command_pair`.** If the
+  inverse is "run the same `inspect` binary with different flags"
+  (e.g. `ssh add-key`'s revoke, `bundle compose:up`'s down), the
+  runner cannot dispatch `inspect` on the remote target. Use
+  `Revert::unsupported(<manual command in preview>)` so the operator
+  sees the inverse but `revert --apply` doesn't try to run prose.
+- **Audit hash IDs use `sha256:HEX` (colon).** The on-disk store uses
+  `sha256-HEX` (dash). Strip *both* forms in any path-builder; see
+  `SnapshotStore::strip_sha256_prefix`.
+- **Avoid GNU-only flags in capture-site commands.**
+  `chmod --reference=PATH` / `chown --reference=PATH` are GNU-only;
+  Alpine/BusyBox spew usage. Use POSIX-portable
+  `stat -c '%a'` / `stat -c '%u:%g'` and substitute the value into
+  `chmod NNNN` / `chown UID:GID`.
+- **Targeted `revert <id> --apply` must NOT prompt.** All three
+  revert paths (`revert_command_pair`, `revert_state_snapshot`,
+  `revert_composite`) use `Confirm::LargeFanout` rather than
+  `Confirm::Always` — agents cannot answer `[y/N]`.
+
+### JSON output contract
+
+- **`audit ls/show/grep/gc/verify --json` emit the standard envelope**
+  `{schema_version, summary, data, next, meta}`, same as every other
+  envelope verb. Pre-fix shape was bare-NDJSON / bare-object and
+  caused `.[0]` / `| length` jq recipes to fail with "Cannot index
+  object with number". Don't regress.
+- **`compose ls --json` envelope path is `.data.compose_projects[]`,
+  field is `.name`.** `compose ps --json` payload path is
+  `.data.services[]` (object-keyed `.data`, not array). The shared
+  `--json` flag help-string says "line-delimited JSON" but envelope
+  verbs emit a *single* envelope — the help string is misleading
+  for envelope verbs and accurate only for true NDJSON streams
+  (audit history-text streams, run --stream stdout, etc.). When in
+  doubt, probe with `inspect <verb> --json | wc -l` (1 = envelope,
+  N = NDJSON) and `jq -c '. | type, keys?'`.
+- **Audit ordering is newest-first.** `audit ls` sorts via
+  `sort_by_key(Reverse(e.ts))`. The most recent entry is `head -1`
+  / `.data.entries[0]`, **never** `tail -1`. The `audit ls`
+  projection omits the `revert` block — round-trip via
+  `audit show <id> --json` to inspect `revert.kind` / payload /
+  preview. `LONG_AUDIT_LS` and the clap `///` docs on `Ls` / `Show`
+  / `Grep` enforce this; don't dilute them.
+
+### Build + test gating
+
+- **Always build with the real release profile.** `Cargo.toml`
+  ships `lto = "thin"` + `codegen-units = 1` because that's what
+  end users get from `cargo install` and from tagged binaries.
+  Smoke-validate against *that* binary, not a debug or
+  LTO-disabled variant — runtime semantics are equivalent in
+  theory, but optimizer-level codegen has surfaced real bugs in
+  this codebase before (LTO inlining changed a panic location;
+  codegen-units=16 reordered a dropck path). **Do not override**
+  `CARGO_PROFILE_RELEASE_LTO` or `CARGO_PROFILE_RELEASE_CODEGEN_UNITS`
+  to fit a constrained environment; if a host OOMs on
+  `cargo build --release`, run on a roomier host. Validating on a
+  reduced binary and shipping the optimized one is how surprise
+  bugs reach production.
+- **WSL/codespace `cargo` PATH.** Default shell does not have
+  `~/.cargo/bin` on `PATH`. Prefix every cargo invocation with
+  `export PATH="$HOME/.cargo/bin:$PATH"; cargo …` or it hits
+  `command not found`.
+- **Pre-commit gate is `cargo fmt --check && cargo clippy
+  --all-targets -- -D warnings && cargo test`.** Targeted
+  `cargo test --test <name>` is fine for iteration; the full gate
+  must pass before every commit.
+
+### SSH ControlMaster reuse
+
+- **`ssh_precheck` must short-circuit when the master socket is
+  alive.** Before `7d588d2`, precheck spawned a fresh `BatchMode`
+  ssh that fails on encrypted keys *even with a master alive*,
+  blocking every verb. The fix: short-circuit on
+  `socket_exists_and_is_fresh(ns)`. With a live master, an agent
+  can run any read/write/lifecycle verb without the user's
+  passphrase env var present in the spawn.
+
+### Smoke-runbook + recipe traps
+
+- **Set `SMOKE_CTR` explicitly in every terminal session.** It does
+  not survive `exec bash` or new VS Code terminal panes. Empty
+  expansion produces `docker exec  sh` / `docker logs -f` failures
+  that look like CLI bugs but are environment.
+- **F5 dual-axis: `cat`/`ls`/`find`/`grep` docker dispatch must use
+  `step.container()`, not `step.service()`.** When a compose
+  service's `container_name` differs from the service name (e.g.
+  service `api` → container `luminary-api`), dispatching by service
+  name lands the verb on a non-existent container. The bug is
+  silent — the verb errors with `No such container: <service>`.
+- **`--quiet` is mutex with `--json`** at clap level (F7.4 contract).
+  `--json` is already trailer-free; piping JSON output through
+  filters does not need `--quiet`. Drop `--quiet` from any `--json`
+  recipe.
+
+### Help-surface discipline
+
+- **Help text is API for agents, not a nicety.** Every flag,
+  envelope shape, and exit code that an agent can hit through `-h`
+  must be self-describing. When a smoke session burns N turns on a
+  shape mismatch, the fix is *both* code and help text — agents
+  read help first. Pre-existing examples: `LONG_GREP` /
+  `LONG_FIND` defending against `--path` / `--name` muscle memory;
+  `LONG_AUDIT_LS` "ORDERING + JSON PROJECTION" section;
+  `LONG_BUNDLE` documenting which compose-step revert kinds are
+  `unsupported` vs `command_pair`.
+- **Verbose help text + search index.** When prose pushes the help
+  search index over the cap in `src/help/search.rs`, **raise the
+  cap, don't trim docs.** Precedent: 50→64 KB (v0.1.2), 64→80 KB
+  (v0.1.3).
