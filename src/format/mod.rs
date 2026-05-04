@@ -8,9 +8,9 @@
 //! 3. TTY detection (color + decoration auto-off when stdout isn't a
 //!    terminal).
 //!
-//! Renderers live next to this module: [`render_doc`] for the
-//! command-level [`OutputDoc`] used by aggregate verbs (status, health,
-//! why, connectivity, recipe, search) and [`render_rows`] for per-record
+//! Renderers live next to this module: `render_doc` for the
+//! command-level `OutputDoc` used by aggregate verbs (status, health,
+//! why, connectivity, recipe, search) and `render_rows` for per-record
 //! verbs (ps, ports, images, volumes, network, list).
 
 use anyhow::{anyhow, Result};

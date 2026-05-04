@@ -5,7 +5,7 @@
 //! groups stamped into the entry's `args` field for `audit grep`
 //! discoverability:
 //!
-//!   [project=<name>] [service=<name>] [compose_file_hash=<sha256-12>]
+//!   `[project=<name>]` `[service=<name>]` `[compose_file_hash=<sha256-12>]`
 //!
 //! `compose_file_hash` is the SHA-256 prefix of the project's
 //! compose file as fetched at audit time. A post-mortem can verify

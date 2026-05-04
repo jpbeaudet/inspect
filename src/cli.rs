@@ -3501,7 +3501,7 @@ pub enum ComposeCommand {
     /// build output for visibility on long builds.
     Build(ComposeBuildArgs),
     /// Run a command inside a compose service (`docker compose -p
-    /// <p> exec <svc> ...`). Mirrors `inspect run` — no audit, no
+    /// PROJECT exec SERVICE ...`). Mirrors `inspect run` — no audit, no
     /// apply gate, output redacted unless `--show-secrets`.
     Exec(ComposeExecArgs),
 }

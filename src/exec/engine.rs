@@ -5,7 +5,7 @@
 //! 2. For each selector branch in the union:
 //!    a. Resolve `source=` to a [`Medium`].
 //!    b. Resolve `server`/`service` to concrete (namespace, target) steps.
-//!    c. Read records via the medium's [`Reader`].
+//!    c. Read records via the medium's `Reader`.
 //!    d. Apply remaining selector matchers (server/service/source
 //!    regexes, plus user-defined labels).
 //! 3. Concatenate all branch outputs.

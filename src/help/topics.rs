@@ -20,7 +20,7 @@ pub struct Topic {
     pub body: Option<&'static str>,
 }
 
-/// The canonical topic order — must match [`archives/INSPECT_HELP_BIBLE.md`] §2.1.
+/// The canonical topic order — must match `archives/INSPECT_HELP_BIBLE.md` §2.1.
 /// The index page renders topics in this exact order.
 pub const TOPICS: &[Topic] = &[
     Topic {

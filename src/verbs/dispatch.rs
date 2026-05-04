@@ -97,7 +97,7 @@ impl<'a> Step<'a> {
 }
 
 /// Resolve `selector` and prepare a fan-out plan. Returns the runner and a
-/// vec of (NsCtx, Vec<ResolvedTarget>) pairs keyed by namespace, so the
+/// vec of `(NsCtx, Vec<ResolvedTarget>)` pairs keyed by namespace, so the
 /// caller can iterate in stable namespace order.
 pub type Plan = (Box<dyn RemoteRunner>, Vec<NsCtx>, Vec<ResolvedTarget>);
 

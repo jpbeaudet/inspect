@@ -61,7 +61,7 @@
 //! saved. Saves append; removes prune; the index never holds
 //! secrets, only the namespace names.
 //!
-//! [`list`] is self-healing: it reads the index file, then for
+//! `list` is self-healing: it reads the index file, then for
 //! each entry probes the keychain (`get_password`) and prunes any
 //! entry that the backend no longer recognizes. So an operator who
 //! deletes `inspect-cli/arte` directly through `Keychain Access.app`

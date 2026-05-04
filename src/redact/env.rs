@@ -58,7 +58,7 @@ impl EnvMasker {
 
     /// `true` iff [`Self::mask_line`] has rewritten at least one line
     /// since construction. Used by the composer to populate
-    /// [`AuditEntry::secrets_masked_kinds`].
+    /// `AuditEntry::secrets_masked_kinds`.
     pub(super) fn was_active(&self) -> bool {
         self.active.get()
     }

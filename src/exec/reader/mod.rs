@@ -2,7 +2,7 @@
 //!
 //! A reader takes a single resolved (namespace, target) plus the
 //! semantic medium pre-extracted from the selector and returns a
-//! Vec<Record> for that step. Readers shell out via [`RemoteRunner`]
+//! `Vec<Record>` for that step. Readers shell out via [`RemoteRunner`]
 //! so they're free to be unit-tested with `INSPECT_MOCK_REMOTE_FILE`.
 
 use anyhow::Result;
@@ -61,7 +61,7 @@ pub trait Reader: Send + Sync {
     ) -> Result<Vec<Record>>;
 }
 
-/// `Arc`-shareable variant of [`for_medium`] used when the engine
+/// `Arc`-shareable variant of `for_medium` used when the engine
 /// fans out reads across worker threads.
 pub fn for_medium_arc(m: &Medium) -> std::sync::Arc<dyn Reader + Send + Sync> {
     match m {

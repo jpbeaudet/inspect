@@ -338,8 +338,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     })
 }
 
-/// B3 (v0.1.2): build the human-readable "(no matches for X in
-/// <window>)" line printed when `inspect logs --match` produces zero
+/// B3 (v0.1.2): build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
 /// hits. Pulled out so the same message is reachable from both the
 /// per-step and merged code paths.
 fn no_match_notice(args: &LogsArgs) -> String {

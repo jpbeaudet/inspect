@@ -22,7 +22,7 @@ use anyhow::{anyhow, Result};
 /// `Medium` is matched against literally. Regex-style `source=~"..."` is
 /// resolved by walking the catalogue of plausible mediums (logs, file,
 /// dir, discovery, state, volume, image, network, host) and matching
-/// each medium's stringified form. See [`Medium::all_well_known`].
+/// each medium's stringified form. See `Medium::all_well_known`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Medium {
     Logs,
@@ -85,7 +85,7 @@ impl Medium {
         }
     }
 
-    /// Render back to `source=` value form (round-trip with [`parse`]).
+    /// Render back to `source=` value form (round-trip with `parse`).
     pub fn as_label(&self) -> String {
         match self {
             Medium::Logs => "logs".into(),

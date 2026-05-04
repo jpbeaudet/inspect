@@ -1,6 +1,6 @@
 //! F8 (v0.1.3) — runtime tier of the discovery cache.
 //!
-//! Background: the existing [`Profile`] cache at
+//! Background: the existing `Profile` cache at
 //! `~/.inspect/profiles/<ns>.yaml` is the **inventory tier** — slow-changing
 //! facts (container existence, names, images, declared ports, compose
 //! membership). It is rewritten by `inspect setup` and otherwise persists
