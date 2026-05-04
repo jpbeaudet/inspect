@@ -59,6 +59,19 @@ tagging.
   typed errors `InvalidUser` / `InvalidHost` surfaced via
   `inspect help safety` and `inspect help ssh`. Validation runs
   at config-load before any ssh argv is constructed.
+- **S5 — URL credential masker leaked the suffix of passwords
+  containing `@`.** The L7 URL-credential redactor anchored on the
+  *first* `@` after the password, so connection strings like
+  `postgres://admin:p@ssw0rd!@db.internal/app` were rewritten to
+  `postgres://admin:****@ssw0rd!@db.internal/app` — masking only
+  `p` and leaking `ssw0rd!` into audit / transcript output. The
+  regex in `src/redact/url.rs` is now greedy on the password and
+  captures the host explicitly (Rust `regex` has no look-around,
+  so we rewrite `$1:****@$2` instead of using a host lookahead).
+  Backtracking finds the rightmost `@` that is followed by a
+  host-shaped token; embedded `@`s in the password are consumed
+  as data. Three new unit tests cover the §5.4 case, three-`@`
+  pathological input, and pass-through for non-URL `@` patterns.
 
 ### Fixed (pre-release pain-point audit)
 

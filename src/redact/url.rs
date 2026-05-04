@@ -21,10 +21,28 @@ fn url_cred_re() -> &'static Regex {
     RE.get_or_init(|| {
         // scheme: alpha first, then alnum / + / - / .
         // user:   any non-:/@/whitespace character
-        // pass:   any non-@/whitespace character
-        // (we don't capture host — it stays as-is via the literal `@`)
-        Regex::new(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+):([^\s@]+)@")
-            .expect("redact::url URL_CRED_RE compiles")
+        // pass:   greedy `[^\s]+` so that passwords *containing*
+        //         `@` (the L7 audit §5.4 case
+        //         `postgres://admin:p@ssw0rd!@host/db`) are masked
+        //         in full. Greedy + regex backtracking finds the
+        //         rightmost `@` that is followed by a host-shaped
+        //         token (alnum / `.` / `-`, optional `:port`); any
+        //         earlier `@` inside the password is consumed as
+        //         data. The Rust `regex` crate does not support
+        //         look-around, so we capture the host explicitly
+        //         and rewrite `$1:****@$2` (the URL trailer —
+        //         `/path`, `?query`, ` log-suffix`, etc. — is
+        //         unmatched and naturally preserved).
+        Regex::new(
+            r"(?x)
+            ([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+)        # $1 scheme://user
+            :                                              # :
+            [^\s]+                                         # password (greedy, no capture)
+            @                                              # @
+            ([a-zA-Z0-9.\-]+(?::[0-9]+)?)                  # $2 host[:port]
+            ",
+        )
+        .expect("redact::url URL_CRED_RE compiles")
     })
 }
 
@@ -42,7 +60,7 @@ impl UrlCredMasker {
         if !re.is_match(line) {
             return None;
         }
-        Some(re.replace_all(line, "$1:****@").into_owned())
+        Some(re.replace_all(line, "$1:****@$2").into_owned())
     }
 }
 
@@ -156,5 +174,46 @@ mod tests {
             .unwrap();
         assert!(out.contains("distinctive_username"));
         assert!(!out.contains("topsecret"));
+    }
+
+    #[test]
+    fn password_containing_at_fully_masked() {
+        // Audit §5.4 — `postgres://admin:p@ssw0rd!@host/db`. The
+        // unescaped `@` inside the password used to anchor the old
+        // first-`@` regex, leaking `ssw0rd!` into the masked
+        // output. The lazy-+-host-lookahead form now captures the
+        // entire password regardless of embedded `@`.
+        let m = UrlCredMasker::new();
+        let out = m
+            .mask_line("DATABASE_URL=postgres://admin:p@ssw0rd!@db.internal/app")
+            .unwrap();
+        assert_eq!(out, "DATABASE_URL=postgres://admin:****@db.internal/app");
+        // Defense-in-depth: the masked output must not contain any
+        // suffix of the original password.
+        assert!(!out.contains("p@"));
+        assert!(!out.contains("ssw0rd"));
+    }
+
+    #[test]
+    fn password_with_multiple_ats_fully_masked() {
+        // Pathological case — three `@`s in the password. The
+        // lazy-+-host-lookahead must skip past every `@` whose
+        // suffix is not host-shaped (`!`, `#`, etc. break the host
+        // grammar) and only stop at the real authority boundary.
+        let m = UrlCredMasker::new();
+        let out = m.mask_line("amqp://svc:a@b@c@host:5672/vhost").unwrap();
+        assert_eq!(out, "amqp://svc:****@host:5672/vhost");
+    }
+
+    #[test]
+    fn password_with_at_then_no_host_unchanged() {
+        // If there is no host-shaped token after the last `@`, the
+        // line is not a credential URL and must pass through
+        // unchanged. (Avoids false positives on `mailto:` after
+        // `:` etc.)
+        let m = UrlCredMasker::new();
+        // `://user:pass@` followed by `!` — `!` is not a hostname
+        // char, so no boundary match; line passes through.
+        assert!(m.mask_line("postgres://u:p@!notahost").is_none());
     }
 }
