@@ -19,6 +19,32 @@ use super::master::{check_socket, socket_path, MasterStatus};
 use super::options::SshTarget;
 const SSH_BIN: &str = "ssh";
 
+/// F13 (v0.1.3): when ssh itself fails (master gone, host unreachable,
+/// auth rejected) it exits non-zero with a recognisable stderr token.
+/// `dispatch_with_reauth` only triggers on `Err(...)`, so we must
+/// promote those transport failures to errors here — otherwise the
+/// caller sees `Ok(RemoteOutput { exit_code: 255, .. })` and the
+/// auto-reauth path never fires. Returns `Some(Err(..))` when stderr
+/// matches a transport classification, `None` for genuine remote
+/// command failures (which propagate as `Ok(exit_code)` unchanged).
+fn transport_err(exit_code: i32, stderr: &str) -> Option<anyhow::Error> {
+    if exit_code == 0 {
+        return None;
+    }
+    if super::transport::classify(stderr).is_some() {
+        // Use the raw stderr as the error message so
+        // `dispatch_with_reauth`'s `classify(&err.to_string())` re-
+        // matches the same tokens. Trim trailing whitespace for a
+        // cleaner SUMMARY render.
+        let trimmed = stderr.trim_end();
+        if trimmed.is_empty() {
+            return Some(anyhow!("ssh transport failure (exit {exit_code})"));
+        }
+        return Some(anyhow!("{trimmed}"));
+    }
+    None
+}
+
 /// Result of a remote command execution.
 #[derive(Debug, Clone)]
 pub struct RemoteOutput {
@@ -110,7 +136,30 @@ pub fn run_remote(
         super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
 
     let socket = socket_path(namespace);
-    let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
+    let use_socket = match check_socket(&socket, target) {
+        MasterStatus::Alive => true,
+        MasterStatus::Stale | MasterStatus::Missing => {
+            // F13 (v0.1.3): no live ControlMaster — either the
+            // socket file exists but the master process is gone
+            // (Stale: codespace restart, OOM, ControlPersist expiry)
+            // or the master was never opened / a prior reauth
+            // cleaned up the socket (Missing). In both cases we
+            // must NOT fall through to a fresh `ssh -o BatchMode=yes`
+            // dispatch: that path silently fails with "Permission
+            // denied (publickey)" for any encrypted-key namespace
+            // because BatchMode forbids passphrase prompts, and the
+            // classifier would then mis-route the recovery to
+            // AuthFailed (terminal) instead of Stale (auto-reauth).
+            // Short-circuit with a stale-transport stderr token so
+            // `dispatch_with_reauth` detects it and triggers
+            // `runner.reauth()` — which walks the full auth ladder
+            // (agent → env → keychain → interactive prompt).
+            return Err(anyhow!(
+                "control socket connect({}): Connection refused (master gone)",
+                socket.display()
+            ));
+        }
+    };
 
     let mut ssh = Command::new(SSH_BIN);
     if use_socket {
@@ -202,6 +251,12 @@ pub fn run_remote(
                      MaxSessions, or raise the server's limit)",
                     target.host
                 ));
+            }
+            // F13: promote ssh-transport failures (master gone,
+            // unreachable, auth rejected) to `Err` so the dispatch
+            // wrapper classifies and (for stale) auto-reauths.
+            if let Some(e) = transport_err(exit_code, &stderr) {
+                return Err(e);
             }
             return Ok(RemoteOutput {
                 stdout,
@@ -348,7 +403,16 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
         super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
 
     let socket = socket_path(namespace);
-    let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
+    let use_socket = match check_socket(&socket, target) {
+        MasterStatus::Alive => true,
+        MasterStatus::Stale | MasterStatus::Missing => {
+            // F13 (v0.1.3): see `run_remote` for rationale.
+            return Err(anyhow!(
+                "control socket connect({}): Connection refused (master gone)",
+                socket.display()
+            ));
+        }
+    };
 
     let mut ssh = Command::new(SSH_BIN);
     if use_socket {
@@ -517,6 +581,12 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
                 target.host
             ));
         }
+        // F13: promote transport failures so the dispatch wrapper
+        // classifies and (on stale) auto-reauths. Genuine remote
+        // command failures fall through to `Ok(exit_code)`.
+        if let Some(e) = transport_err(exit_code, &stderr) {
+            return Err(e);
+        }
     }
 
     Ok(exit_code)
@@ -549,7 +619,16 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
         super::concurrency::acquire(&target.host).context("acquiring SSH session slot")?;
 
     let socket = socket_path(namespace);
-    let use_socket = matches!(check_socket(&socket, target), MasterStatus::Alive);
+    let use_socket = match check_socket(&socket, target) {
+        MasterStatus::Alive => true,
+        MasterStatus::Stale | MasterStatus::Missing => {
+            // F13 (v0.1.3): see `run_remote` for rationale.
+            return Err(anyhow!(
+                "control socket connect({}): Connection refused (master gone)",
+                socket.display()
+            ));
+        }
+    };
 
     let mut ssh = Command::new(SSH_BIN);
     if use_socket {
@@ -683,6 +762,12 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
              MaxSessions, or raise the server's limit)",
             target.host
         ));
+    }
+    // F13: promote ssh-transport failures so the dispatch wrapper
+    // classifies and (for stale) auto-reauths. Genuine remote command
+    // failures fall through to `Ok(RemoteOutput { exit_code, .. })`.
+    if let Some(e) = transport_err(exit_code, &stderr) {
+        return Err(e);
     }
 
     Ok(RemoteOutput {

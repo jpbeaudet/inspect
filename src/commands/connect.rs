@@ -424,6 +424,17 @@ pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
             save_to_keychain: false,
         },
     )
-    .map(|_| ())
+    .map(|outcome| {
+        // F13 (v0.1.3, smoke-driven): operator notice on successful
+        // reauth. Without this, the only feedback after the prompt
+        // is the verb's normal output — easy to miss that the
+        // session was actually re-established. The TTL echoes the
+        // ControlPersist budget so operators know how long the
+        // recovered session will last.
+        eprintln!(
+            "note: session for '{}' re-established (ttl {})",
+            resolved.name, outcome.ttl,
+        );
+    })
     .with_context(|| format!("reauth '{}'", resolved.name))
 }

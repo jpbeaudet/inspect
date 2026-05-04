@@ -107,10 +107,37 @@ pub fn classify(message: &str) -> Option<TransportClass> {
         };
     }
 
-    // AuthFailed must be checked BEFORE Stale because openssh
-    // sometimes emits both "permission denied" and "connection
-    // closed" in the same buffer; auth failure is the more specific
-    // diagnosis.
+    // Stale (control-socket-specific tokens): UNAMBIGUOUS local
+    // Unix-socket failures. These must win over AuthFailed because
+    // when the master process is dead but the socket file remains
+    // (codespace restart, ControlPersist expiry, OOM-killed master),
+    // openssh emits BOTH `Control socket connect(/path): Connection
+    // refused` AND, after falling back to a direct ssh, may emit
+    // `Permission denied (publickey)` for an encrypted key under
+    // BatchMode. The control-socket line is the true root cause
+    // (local mux is gone, reauth fixes it); the Permission denied
+    // line is collateral from the fallback attempt and would mislead
+    // the classifier into AuthFailed if checked first. Without this
+    // ordering, auto-reauth never fires for the most common operator
+    // scenario: encrypted-key user returns to a codespace whose
+    // master process was killed.
+    if m.contains("control socket connect")
+        || m.contains("controlpath does not exist")
+        || m.contains("mux_client_request_session: session request failed")
+        || m.contains("mux_client_request_session")
+        || m.contains("mux_client_hello_exchange")
+        || m.contains("multiplex: master gone")
+        || m.contains("control master exited")
+    {
+        return Some(TransportClass::TransportStale);
+    }
+
+    // AuthFailed: must be checked AFTER the control-socket-specific
+    // Stale tokens (above) because of the encrypted-key fallback
+    // case, but BEFORE the generic Stale tokens (below) because
+    // openssh sometimes emits both "permission denied" and
+    // "connection closed" in the same buffer for genuine auth
+    // failures, and auth is the more specific diagnosis there.
     if m.contains("permission denied (publickey")
         || m.contains("permission denied (password")
         || m.contains("permission denied,please try again")
@@ -123,25 +150,11 @@ pub fn classify(message: &str) -> Option<TransportClass> {
         return Some(TransportClass::TransportAuthFailed);
     }
 
-    // Stale: master socket gone / persistent channel torn down.
-    // Checked BEFORE the generic Unreachable patterns because the
-    // canonical "master process exited but socket file still exists"
-    // case emits `Control socket connect(/path): Connection refused`,
-    // which contains both the stale-specific token AND the generic
-    // "connection refused" Unreachable token. The control-socket
-    // line is a local Unix-socket failure, not a remote-host one,
-    // so it must win — otherwise auto-reauth never fires after a
-    // codespace restart / `inspect disconnect` / ControlPersist
-    // expiry, and the operator sees an unhelpful "unreachable" hint
-    // for a connection that just needs to be re-established.
-    if m.contains("control socket connect")
-        || m.contains("controlpath does not exist")
-        || m.contains("mux_client_request_session: session request failed")
-        || m.contains("mux_client_request_session")
-        || m.contains("mux_client_hello_exchange")
-        || m.contains("multiplex: master gone")
-        || m.contains("control master exited")
-        || m.contains("broken pipe")
+    // Stale (generic transport tokens): channel torn down without
+    // the unambiguous control-socket markers above. Checked before
+    // Unreachable because these signal an established session that
+    // dropped, which reauth resolves.
+    if m.contains("broken pipe")
         || m.contains("connection closed by")
         || m.contains("connection reset by peer")
     {
@@ -274,9 +287,29 @@ mod tests {
     }
 
     #[test]
-    fn auth_takes_precedence_over_stale_in_mixed_buffer() {
+    fn auth_takes_precedence_over_generic_stale_in_mixed_buffer() {
         let stderr = "Permission denied (publickey).\nConnection closed by 1.2.3.4 port 22";
         assert_eq!(classify(stderr), Some(TransportClass::TransportAuthFailed));
+    }
+
+    /// Field-captured 2026-05 against arte (OVH) with encrypted
+    /// ed25519 key after codespace restart killed the master
+    /// process. openssh emits the control-socket failure first,
+    /// then falls back to a direct ssh attempt that fails BatchMode
+    /// because the encrypted key needs a passphrase. If the
+    /// classifier checked AuthFailed before the control-socket
+    /// Stale tokens, this case misclassifies as auth_failed and
+    /// auto-reauth never fires — exactly the user-reported bug
+    /// during v0.1.3 smoke. Stale must win for the dead-master
+    /// plus encrypted-key combo because the local socket failure
+    /// is the true root cause; the Permission denied is just the
+    /// fallback ssh's downstream symptom.
+    #[test]
+    fn openssh_dead_master_plus_encrypted_key_fallback_is_stale() {
+        let stderr = "Control socket connect(/home/codespace/.inspect/sockets/arte.sock): \
+                      Connection refused\n\
+                      ubuntu@40.160.5.129: Permission denied (publickey).";
+        assert_eq!(classify(stderr), Some(TransportClass::TransportStale));
     }
 
     #[test]

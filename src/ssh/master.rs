@@ -337,34 +337,47 @@ pub fn start_master(
     }
 
     // (4) Env-var passphrase.
+    //
+    // F13 (v0.1.3, smoke-driven): when `key_passphrase_env` is
+    // configured but the variable is unset or empty in the current
+    // environment (operator returned to a fresh shell after a
+    // codespace restart, forgot to re-export, etc.), do NOT hard-
+    // fail. Fall through to the keychain (4.5) and interactive
+    // prompt (5) paths so the auto-reauth flow can recover with one
+    // passphrase entry — the same UX as a first-time `inspect
+    // connect`. The previous `Err(...)` here was the failure mode
+    // surfaced during smoke: auto-reauth fired but always lost
+    // because the agent shell didn't have the env var exported.
     if let Some(var) = auth.passphrase_env {
-        let value = std::env::var(var).map_err(|_| {
-            anyhow!(
-                "passphrase env var '{var}' is not set in the current environment; \
-                 either export it or unset 'key_passphrase_env' for namespace '{ns}'",
-                ns = namespace
-            )
-        })?;
-        if value.is_empty() {
-            return Err(anyhow!("passphrase env var '{var}' is empty"));
+        match std::env::var(var) {
+            Ok(value) if !value.is_empty() => {
+                let askpass = AskpassScript::new(var)?;
+                run_master(
+                    target,
+                    ttl,
+                    &socket,
+                    &askpass.env_vars(),
+                    /*batch=*/ false,
+                )
+                .with_context(|| format!("ssh master failed using env var '{var}'"))?;
+                // Best-effort: nothing to zeroize — the secret stays
+                // in the user's environment until they unset it. We
+                // never copy it.
+                let _ = value;
+                return Ok(ConnectOutcome {
+                    auth_mode: AuthMode::EnvPassphrase,
+                    socket: Some(socket),
+                    ttl: ttl.to_string(),
+                });
+            }
+            _ => {
+                // Unset or empty — fall through to keychain +
+                // interactive prompt below. The interactive prompt
+                // mentions the env var name in its hint so the
+                // operator knows they could also export it for
+                // unattended runs.
+            }
         }
-        let askpass = AskpassScript::new(var)?;
-        run_master(
-            target,
-            ttl,
-            &socket,
-            &askpass.env_vars(),
-            /*batch=*/ false,
-        )
-        .with_context(|| format!("ssh master failed using env var '{var}'"))?;
-        // Best-effort: nothing to zeroize — the secret stays in the user's
-        // environment until they unset it. We never copy it.
-        let _ = value;
-        return Ok(ConnectOutcome {
-            auth_mode: AuthMode::EnvPassphrase,
-            socket: Some(socket),
-            ttl: ttl.to_string(),
-        });
     }
 
     // (4.5) L2 (v0.1.3): consult the OS keychain. This step fires only
@@ -440,9 +453,16 @@ pub fn start_master(
         });
     }
 
+    let env_hint = match auth.passphrase_env {
+        Some(var) => format!(
+            "key_passphrase_env='{var}' configured but the variable is \
+             not set in the current environment"
+        ),
+        None => "no key_passphrase_env configured".to_string(),
+    };
     Err(anyhow!(
         "could not authenticate to '{}@{}:{}': no agent identity, \
-         no key_passphrase_env configured, no keychain entry, and stdin is not a TTY",
+         {env_hint}, no keychain entry, and stdin is not a TTY",
         target.user,
         target.host,
         target.port
@@ -495,8 +515,22 @@ fn run_master_with_opts(
     cmd.args(target.base_args()).arg(&target.host);
 
     cmd.stdin(Stdio::null());
-    // Surface stderr so users can see ssh's diagnostics directly.
-    cmd.stderr(Stdio::inherit());
+    // Surface stderr so operators can see ssh's diagnostics directly
+    // — EXCEPT when this is a BatchMode probe. The probe is the
+    // first step of the fallthrough ladder (agent / passphrase-less
+    // key) and is *expected* to fail when the only available
+    // identity is an encrypted key with no agent. Printing
+    // "Permission denied (publickey)" before the interactive
+    // passphrase prompt makes operators think auth failed and
+    // their entered passphrase was wrong, when in fact the prompt
+    // itself is the recovery path. Capture and discard probe
+    // stderr; the real attempt that follows runs with stderr
+    // inherited so any genuine failure surfaces.
+    if batch {
+        cmd.stderr(Stdio::null());
+    } else {
+        cmd.stderr(Stdio::inherit());
+    }
     cmd.stdout(Stdio::null());
     for (k, v) in extra_env {
         cmd.env(k, v);
