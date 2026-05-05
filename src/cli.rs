@@ -1162,6 +1162,42 @@ EXAMPLES
   $ inspect help quickstart
   $ inspect help all";
 
+const LONG_QUERY: &str = "\
+Apply a jq-language filter to JSON or NDJSON read from stdin and emit \
+the result(s) to stdout. The filter language is the same one `jq` \
+implements; every recipe in `inspect`'s help / MANUAL / RUNBOOK works \
+verbatim — no external `jq` install required.
+
+INPUT
+  Default mode auto-detects: if stdin parses as a single JSON value, \
+  the filter sees `.` as that value; otherwise stdin is treated as \
+  NDJSON (one JSON value per line) and the filter is evaluated per \
+  line. `--ndjson` forces per-line mode even when the input looks \
+  single-value. `--slurp` collects every NDJSON value into one array \
+  before evaluating, so jq idioms like `length` / `map(.x) | unique` \
+  work over the whole stream. Stdin size is capped at 16 MiB by \
+  default; override with `INSPECT_QUERY_STDIN_MAX=<bytes>`.
+
+OUTPUT
+  Compact JSON, one yielded value per line. With `-r` / `--raw`, \
+  string yields are emitted unquoted (= `jq -r`); a non-string yield \
+  under `--raw` is an error.
+
+EXIT CODES
+  0   filter produced at least one result
+  1   filter produced zero results, runtime error, or `--raw` got a \
+      non-string yield
+  2   filter parse error, stdin not parseable as JSON, empty stdin, \
+      or argument error
+
+EXAMPLES
+  $ echo '{\"a\":1,\"b\":2}' | inspect query '.a'
+  $ inspect status arte --json | inspect query '.summary' -r
+  $ inspect audit ls --json | inspect query '.data.entries[0].id' -r
+  $ printf '1\\n2\\n3\\n' | inspect query --slurp 'add'
+  $ inspect run arte 'cat /etc/foo.json' --json --quiet | \\
+        inspect query '. | fromjson | .value'";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "inspect",
@@ -1376,6 +1412,10 @@ pub enum Command {
     #[command(long_about = LONG_COMPOSE)]
     Compose(ComposeArgs),
 
+    /// Apply a jq-language filter to JSON or NDJSON read from stdin.
+    #[command(long_about = LONG_QUERY)]
+    Query(QueryArgs),
+
     // ---- Help system (HP-0) -------------------------------------------------
     /// Show help on a topic, search help, or list all topics.
     #[command(long_about = LONG_HELP)]
@@ -1413,6 +1453,32 @@ pub struct HelpArgs {
     /// cases and implementation notes. (Sidecars ship in HP-6.)
     #[arg(long)]
     pub verbose: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(long_about = LONG_QUERY)]
+pub struct QueryArgs {
+    /// jq-language filter, e.g. `.data.entries[0].id` or
+    /// `.[] | select(.healthy)`.
+    pub filter: String,
+
+    /// Emit JSON-string yields unquoted (the `jq -r` convention).
+    /// A non-string yield is an error rather than a quoted JSON
+    /// fallback so `xargs` / `wc -l` consumers cannot accidentally
+    /// receive literal `"` characters.
+    #[arg(short = 'r', long)]
+    pub raw: bool,
+
+    /// Collect every NDJSON value from stdin into a single array
+    /// before applying the filter (the `jq -s` convention).
+    #[arg(short = 's', long, conflicts_with = "ndjson")]
+    pub slurp: bool,
+
+    /// Force per-line streaming mode. Default behavior auto-detects:
+    /// stdin parsing as one JSON value runs the filter against that
+    /// value; otherwise NDJSON per-line mode is selected.
+    #[arg(long, conflicts_with = "slurp")]
+    pub ndjson: bool,
 }
 
 #[derive(Debug, Args)]

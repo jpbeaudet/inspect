@@ -270,64 +270,124 @@ that a fresh agent can run to verify completion before moving
 on. Commits land in the order C1 → C2 → C3 → C4. **Do not
 bundle**; each commit must leave the tree green and shippable.
 
-### Commit C1 — `query::` module + jaq integration (no behavior change visible to users)
+The crate-wide lint `dead_code = "deny"` (see
+`Cargo.toml::[lints.rust]`) means every commit's new `pub`
+surface needs a non-test caller in the same commit. Suppressing
+the lint with `#[allow(dead_code)]` is **not** an acceptable
+workaround. This shapes the C1 / C2 boundary below — C1 ships
+the abstraction together with its first natural caller (`inspect
+query`), and C2 layers `--select` onto every other JSON-emitting
+verb as additive sugar.
 
-**Subject:** `F19: query module — jaq-backed jq filter engine
-behind a clean abstraction`
+### Commit C1 — `query::` module + `inspect query <filter>` verb
+
+**Subject:** `F19: query module — jaq filter engine + inspect
+query verb`
 
 **Scope:**
 
-- Create `src/query/` per the layout above.
+- Create `src/query/` with the layout described in the design
+  section above (`mod.rs`, `jaq.rs`, `ndjson.rs`, `raw.rs`,
+  `tests.rs`).
 - Wire `mod query;` into `src/main.rs` (alphabetical
-  position between `profile` and `redact` — match the
-  existing module order).
+  position between `profile` and `redact`).
 - Implement `query::eval` / `eval_slurp` / `compile` /
   `eval_compiled` / `render_raw` / `render_compact` against
   jaq-core 3.x + jaq-std 3.x + jaq-json 2.x. Use
   `jaq_core::load::Arena` for parsing, `jaq_std::funs()` for
   the standard library, `jaq_json::Val` for the
   `serde_json::Value` ↔ jaq value bridge.
-- `QueryError` enum: `Parse { filter, message }`,
-  `Runtime { message }`, `RawNonString { index, kind }`. All
-  variants implement `Display` with operator-readable
-  messages (no jaq-internal token positions; render the human
-  message only).
-- **No CLI surface yet.** No verb sees this module. No
-  `--select` flag exists.
+- `QueryError` enum (`Parse` / `Runtime` / `RawNonString`)
+  with `Display` carrying operator-readable messages.
+- **First natural caller: a new `inspect query <filter>`
+  verb** that reads JSON or NDJSON from stdin and applies a
+  jq-language filter. This is the smallest possible
+  consumer that activates every public API in `query::`
+  (compile, eval, eval_slurp, render_compact, render_raw,
+  ndjson::Filter — all wired through this one verb), so the
+  `dead_code` lint stays clean. The verb is also useful in
+  its own right for an agent: it can pipe any saved
+  envelope or any `--json` output through a filter without
+  requiring an external `jq` install. C2 layers `--select`
+  onto the rest of the JSON-emitting verbs as additive
+  sugar over the same machinery — `inspect query` continues
+  to exist after C2 as the escape hatch for ad-hoc filtering
+  of arbitrary stdin JSON.
+- `inspect query` surface (built in this commit):
+  - Argument: `<FILTER>` — single jq-language string.
+  - Flags: `--raw` / `-r` (= `jq -r`), `--slurp` / `-s` (=
+    `jq -s` — collects every NDJSON value from stdin into
+    one array first), `--ndjson` (per-line streaming mode;
+    default detection is "single JSON value if stdin parses
+    as one, NDJSON otherwise"). When `--ndjson` is explicit
+    + not `--slurp`, the verb runs `query::ndjson::Filter`
+    on every line.
+  - Stdin handling: read to end (capped at `INSPECT_QUERY_STDIN_MAX`
+    env var, default 16 MiB — same shape as F9's `--stdin-max`
+    contract). Empty stdin → exit 2 (usage error: "no JSON on
+    stdin"). Non-JSON stdin → exit 2 with the parse-error byte
+    offset.
+  - Output: compact JSON, one document per yielded value,
+    via `transcript::emit_stdout` so transcripts capture
+    the filter output (not the unfiltered input).
+  - Exit codes: 0 = filter produced ≥ 1 result. 1 = filter
+    produced zero results, or runtime error, or
+    `--raw`-on-non-string error. 2 = filter parse error, or
+    stdin not parseable as JSON, or empty stdin, or clap
+    arg error.
+  - `LONG_QUERY` constant in `src/cli.rs` documenting the
+    contract (jq-syntax pointer, exit-code table, three
+    worked examples covering plain / raw / slurp).
+- **No `--select` flag yet on other verbs.** That is C2's
+  whole job; C1 sticks to landing the abstraction + its
+  first-class caller.
 
-**Acceptance tests** (new file
-`src/query/tests.rs`, included via `#[cfg(test)] mod tests;`):
+**Acceptance tests:**
 
-- `identity_returns_input` — filter `.`, asserts single
-  result equals input.
-- `path_extraction` — filter `.foo.bar`, asserts deep path.
-- `array_iteration` — filter `.[]` against a 3-element
-  array, asserts three results in order.
-- `select_with_predicate` — filter
-  `.[] | select(.healthy)`, asserts only matching elements.
-- `length_on_array_and_object` — filter `length`, two
-  inputs, asserts numeric result both shapes.
-- `keys_sorted` — filter `keys`, asserts sorted string array.
-- `map_then_unique` — filter `map(.name) | unique`, asserts
-  the right deduped output.
-- `null_safe_path` — filter `.missing?`, asserts empty
-  result (not an error).
-- `parse_error_classified` — filter `.[`, asserts
-  `QueryError::Parse` returned with non-empty message.
-- `runtime_error_classified` — filter `1 + "x"`, asserts
-  `QueryError::Runtime`.
-- `slurp_collects_all` — `eval_slurp("length", &[v1, v2,
-  v3])` returns `[3]`.
-- `compile_then_eval_three_lines` — pre-compile `.line`,
-  evaluate against three NDJSON-shaped inputs, asserts
-  per-input results.
-- `render_raw_string_unquoted` — filter `.summary` on
-  `{"summary":"ok"}`, `render_raw` returns `ok\n`.
-- `render_raw_non_string_errors` — filter `.count` on
-  `{"count":3}`, `render_raw` returns
-  `QueryError::RawNonString`.
-- `render_compact_one_per_line` — filter `.[]` on
-  `[1,2,3]`, `render_compact` returns `"1\n2\n3\n"`.
+- Module unit tests in `src/query/tests.rs` (in-tree;
+  filter exercises taken from the recipe set the C3 sweep
+  will migrate):
+  - `identity_returns_input`, `path_extraction`,
+    `array_iteration`, `select_with_predicate`,
+    `length_on_array_and_object`, `keys_sorted`,
+    `map_then_unique`, `null_safe_path`,
+    `parse_error_classified`, `runtime_error_classified`,
+    `slurp_collects_all`, `compile_then_eval_three_lines`,
+    `render_raw_string_unquoted`,
+    `render_raw_non_string_errors`,
+    `render_compact_one_per_line`,
+    `render_compact_empty_yields_empty_string`,
+    `ndjson_per_frame_compact`, `ndjson_per_frame_raw`,
+    `ndjson_slurp_length`,
+    `ndjson_parse_error_at_construction`,
+    `recipe_audit_ls_first_id`,
+    `recipe_status_state_and_count`,
+    `recipe_compose_ls_project_names`.
+- Integration tests in `tests/jaq_query_v013.rs` (new
+  file, `f19_query_*` prefix) covering the verb itself:
+  - `f19_query_identity_roundtrip` — pipe a known JSON
+    object to `inspect query '.'`, assert stdout equals
+    input (modulo whitespace).
+  - `f19_query_path_extraction` — `echo '{"a":{"b":1}}'
+    | inspect query '.a.b'` exits 0, stdout `1`.
+  - `f19_query_raw_string` — `echo '{"s":"hi"}' | inspect
+    query -r '.s'` exits 0, stdout `hi\n`.
+  - `f19_query_raw_non_string` — `echo '{"n":3}' | inspect
+    query -r '.n'` exits 1, stderr matches "non-string".
+  - `f19_query_ndjson_per_frame` — three NDJSON frames in
+    on stdin, `inspect query --ndjson '.line'` emits three
+    lines.
+  - `f19_query_slurp_length` — three NDJSON frames in,
+    `inspect query --slurp 'length'` exits 0, stdout `3`.
+  - `f19_query_parse_error_exit_2` — `inspect query '.['
+    < /dev/null` (or with a valid stdin) exits 2 with a
+    parse-error stderr line.
+  - `f19_query_zero_results_exit_1` — filter that yields
+    nothing (`.[] | select(false)`) → exit 1, no stdout.
+  - `f19_query_empty_stdin_exit_2` — empty stdin → exit 2
+    + usage hint.
+  - `f19_query_runtime_error_exit_1` — `1 + "x"` → exit 1,
+    stderr matches "runtime".
 
 **Post-conditions checklist (run on resume):**
 
@@ -336,23 +396,19 @@ export PATH="$HOME/.cargo/bin:$PATH"
 test -d src/query                                               # ✓
 ls src/query/{mod,jaq,ndjson,raw,tests}.rs >/dev/null           # ✓
 grep -q '^mod query;' src/main.rs                               # ✓
-cargo build --release 2>&1 | tail -5                            # clean
+inspect query --help 2>&1 | head -5                             # contract visible
+echo '{"x":1}' | inspect query '.x'                             # stdout: 1
+echo '{"s":"hi"}' | inspect query -r '.s'                       # stdout: hi
 cargo test --lib query:: 2>&1 | grep -E '^test result'          # all pass
+cargo test --test jaq_query_v013 2>&1 | grep -E '^test result'  # all pass
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5        # clean
 cargo fmt --check                                               # clean
 ```
 
-**Update sweep for C1:** sub-set of the five-surface rule;
-this commit is implementation-only, so:
-
-- Source + tests: ✓ (above).
-- CHANGELOG: **no entry yet** — held for C4 (single F19
-  bullet covers all four commits; matches the F11 / F17
-  precedent of a multi-commit feature with one CHANGELOG
-  bullet).
-- Backlog: **no row yet** — C4 adds it.
-- MANUAL / RUNBOOK: nothing to add (no surface).
-- `-h` help: nothing to add (no surface).
+**Update sweep for C1:** source + tests + `LONG_QUERY` help
+text. CHANGELOG / backlog row stay held for C4 (single F19
+bullet covers all four commits, matching the F11 / F17
+multi-commit precedent).
 
 ---
 
@@ -360,6 +416,11 @@ this commit is implementation-only, so:
 
 **Subject:** `F19: --select / --select-raw / --select-slurp on
 every JSON-emitting verb`
+
+**Pre-condition:** C1 landed; `query::*` is callable from any
+verb; `inspect query` smoke-tests pass. C2 is purely additive
+sugar on top of the existing abstraction — no new public API
+in `src/query/` is added in C2.
 
 **Scope:**
 
@@ -722,24 +783,31 @@ accordingly:
 - **Case A — `src/query/` does not exist.** Pre-C1. Start at
   C1; do not skip the Cargo.toml verification (deps already
   added).
-- **Case B — `src/query/` exists, no `--select` in cli.rs.**
-  Mid-C1 or C1 done. Run C1 post-conditions. If green,
-  proceed to C2. If red, finish C1 first (likely the
-  `query::tests` set is incomplete).
-- **Case C — `--select` in cli.rs, but `tests/jaq_select_v013.rs`
+- **Case B — `src/query/` exists, but `inspect query --help`
+  fails or the verb is not in `src/cli.rs`.** Mid-C1. The
+  abstraction has landed but the verb wiring did not
+  finish. Re-read `git diff HEAD` and pick up the verb
+  side; run C1 post-conditions before declaring it done.
+  Confirm `cargo clippy --all-targets -- -D warnings` is
+  clean — if dead-code lint is firing on `query::*`, the
+  verb is not consuming everything yet.
+- **Case C — `inspect query` passes its smoke recipes but
+  no `SelectArgs` in `src/cli.rs`.** C1 done, C2 not
+  started. Open C2.
+- **Case D — `SelectArgs` in `src/cli.rs`, but `tests/jaq_select_v013.rs`
   does not exist OR fails.** Mid-C2. Re-read git diff;
-  identify which verbs already received `SelectArgs` (search
-  for `SelectArgs` references). Continue from the next
-  un-touched verb in the authoritative C2 list. Run C2
-  post-conditions before proceeding.
-- **Case D — C2 post-conditions green, but `| jq` still in
+  identify which verbs already received `SelectArgs`
+  (search for `SelectArgs` references). Continue from the
+  next un-touched verb in the authoritative C2 list. Run
+  C2 post-conditions before proceeding.
+- **Case E — C2 post-conditions green, but `| jq` still in
   help/MANUAL/RUNBOOK/SMOKE.** Mid-C3. Re-run the
   `grep -RnE '\| jq '` sweep, finish remaining files. The
   C3 post-conditions checklist tells you when you're done.
-- **Case E — C3 post-conditions green, but no `F19` row in
+- **Case F — C3 post-conditions green, but no `F19` row in
   the backlog.** Mid-C4. Run the C4 closure list; almost
   always this means CHANGELOG / backlog updates are pending.
-- **Case F — All post-conditions green; F19 row says ✅ Done.**
+- **Case G — All post-conditions green; F19 row says ✅ Done.**
   F19 is shipped. Run the full pre-commit gate one final
   time as a paranoia check; if green, F19 is closed.
 
@@ -751,32 +819,21 @@ says what actually happened.
 
 ---
 
-## Out-of-scope (deliberately, with provenance)
+## What F19 ships
 
-This section exists to be honest under the no-silent-deferrals
-policy: every line below is a future enhancement, **not** a
-deferred F19 sub-feature. Each is parked at v0.1.5+ and the
-reason is recorded so it doesn't have to be re-debated.
+F19 ships every flag, every recipe migration, and every help
+surface needed to make the current help / MANUAL / RUNBOOK /
+SMOKE documents work without an external `jq`:
 
-- **Filter caching across invocations.** Pre-parsing every
-  filter on every verb invocation is fine for v0.1.3
-  workloads (filters are small, jaq parses in microseconds).
-  A filter cache becomes interesting only under the v0.1.5
-  perf-sweep. Parked at v0.1.5+.
-- **`--select-from-file <PATH>`.** Loading filters from
-  files (jq's `-f`) is a v0.1.5 ergonomic. F19 ships only
-  the inline-string form because every recipe in our docs
-  is short enough to inline. Parked at v0.1.5+.
-- **Streaming-verb partial slurp** (collect-N-then-evaluate).
-  `--select-slurp` collects every line; bounded slurp would
-  be a memory-safety hardening for unbounded streams. Parked
-  at v0.1.5+.
-- **`@json` / `@text` / `@csv` output formatters wrapped via
-  `--select`.** jq has output format verbs; F19 ships
-  `--select-raw` (= `@text`) only because that's the only
-  one used in current recipes. Parked at v0.1.5+.
+- `--select` / `--select-raw` / `--select-slurp` on every
+  JSON-emitting verb (envelope + streaming).
+- `inspect query <FILTER>` standalone verb for arbitrary
+  stdin filtering.
+- `inspect help select` editorial topic.
+- Every `| jq` recipe in `src/help/content/`,
+  `src/help/verbose/`, `src/cli.rs` `LONG_*`, `docs/MANUAL.md`,
+  `docs/RUNBOOK.md`, `docs/SMOKE_v0.1.3.md`, `README.md`
+  rewritten to use `--select`.
 
-These four items are out-of-scope for v0.1.5+, **not** for
-v0.1.3. Lighting-up F19 in v0.1.3 closes 100% of the recipes
-in the current docs and 100% of the smoke document; that is
-the v0.1.3 contract.
+This is the F19 contract — 100% of in-tree recipes work via
+`--select` after C3 lands.

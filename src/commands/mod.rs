@@ -16,6 +16,7 @@ pub mod history;
 pub mod keychain;
 pub mod list;
 pub mod profile;
+pub mod query;
 pub mod recipe;
 pub mod remove;
 pub mod resolve;

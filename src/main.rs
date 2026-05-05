@@ -20,6 +20,7 @@ mod keychain;
 mod logql;
 mod paths;
 mod profile;
+mod query;
 mod redact;
 mod safety;
 mod selector;
@@ -175,6 +176,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Fleet(args) => commands::fleet::run(args),
         Command::Bundle(args) => commands::bundle::run(args),
         Command::Compose(args) => verbs::compose::dispatch(args),
+        Command::Query(args) => commands::query::run(args),
         Command::Help(args) => commands::help::run(args),
     }
 }
