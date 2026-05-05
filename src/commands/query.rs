@@ -7,7 +7,7 @@ use std::io::Read;
 use anyhow::{anyhow, Result};
 
 use crate::cli::QueryArgs;
-use crate::error::ExitKind;
+use crate::error::{self, ExitKind};
 use crate::query::{self, QueryError, QueryErrorKind};
 use crate::transcript;
 
@@ -39,23 +39,22 @@ pub fn run(args: QueryArgs) -> Result<ExitKind> {
                 Ok(ExitKind::Success)
             }
         }
-        // Parse errors are usage errors → exit 2 via anyhow.
-        Err(e) if e.kind == QueryErrorKind::Parse => Err(anyhow!(
-            "filter parse error: {}\nhint: see jq syntax, e.g. `.data.entries[0].id`",
-            e.message
-        )),
-        // Runtime + RawNonString are no-match-class → exit 1; we
-        // print the message to stderr and return `NoMatches` rather
-        // than bubble through anyhow (which would force exit 2).
+        // Parse errors are usage-class → bubble as anyhow so main's
+        // `error::emit` adds the canonical "error: " prefix and (once
+        // the catalog row + topic land in C3) the `see: inspect help
+        // select` cross-link. Exit code 2.
+        Err(e) if e.kind == QueryErrorKind::Parse => Err(anyhow!("filter parse: {}", e.message)),
+        // Runtime / raw-non-string are no-match-class — emit through
+        // `error::emit` (same canonical shape, with the same future
+        // catalog cross-link) and return `NoMatches` so the exit code
+        // is 1, not 2.
         Err(e) => {
             let label = match e.kind {
-                QueryErrorKind::Runtime => "filter runtime error",
+                QueryErrorKind::Runtime => "filter runtime",
                 QueryErrorKind::RawNonString => "filter --raw",
                 QueryErrorKind::Parse => unreachable!("handled above"),
             };
-            let line = format!("{}: {}", label, e.message);
-            eprintln!("{}", line);
-            transcript::tee_stderr(&line);
+            error::emit(format!("{}: {}", label, e.message));
             Ok(ExitKind::NoMatches)
         }
     }

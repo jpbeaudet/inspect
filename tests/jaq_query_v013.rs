@@ -50,6 +50,7 @@ fn f19_query_raw_non_string_exit_1() {
         .write_stdin(r#"{"n":3}"#)
         .assert()
         .code(1)
+        .stderr(contains("error: filter --raw:"))
         .stderr(contains("non-string"));
 }
 
@@ -93,7 +94,7 @@ fn f19_query_parse_error_exit_2() {
         .write_stdin("{}")
         .assert()
         .code(2)
-        .stderr(contains("parse error"));
+        .stderr(contains("error: filter parse:"));
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn f19_query_runtime_error_exit_1() {
         .write_stdin("null")
         .assert()
         .code(1)
-        .stderr(contains("runtime"));
+        .stderr(contains("error: filter runtime:"));
 }
 
 #[test]

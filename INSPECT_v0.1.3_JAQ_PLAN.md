@@ -267,8 +267,54 @@ body.
 Each commit has: a one-line subject, a sub-section breakdown,
 explicit acceptance tests, and a **post-conditions checklist**
 that a fresh agent can run to verify completion before moving
-on. Commits land in the order C1 → C2 → C3 → C4. **Do not
-bundle**; each commit must leave the tree green and shippable.
+on. Commits land in the order C1 → C1-fixup → C2 → C3 → C4
+on branch `v0.1.3-jaq`. The branch is merged back to `v0.1.3`
+once C4 is green. **Do not bundle**; each commit must leave
+the tree green and shippable.
+
+### Branch model
+
+All F19 work lives on `v0.1.3-jaq`, branched from `v0.1.3`
+after the prep commit `432b091` ("F19: prep — jaq dependency,
+rationale, and 4-commit implementation plan"). Final step
+after C4 is `git checkout v0.1.3 && git merge --ff-only
+v0.1.3-jaq` (or `--no-ff` if a merge-commit boundary is
+desired). The reason for the branch is to keep partial F19
+state off `v0.1.3` — `inspect query` (from C1) without
+`--select` on the rest of the verbs (C2-C4) is an inconsistent
+contract; the full feature must land atomically from `v0.1.3`'s
+point of view.
+
+### C1-fixup commit (between C1 and C2)
+
+The C1 commit `ff0d7a3` shipped `commands/query.rs` with
+filter-error stderr lines emitted via raw `eprintln!` rather
+than through `crate::error::emit`. That passes the literal CI
+check (`tests/error_help_links.rs::no_raw_error_eprintln_outside_error_module`
+matches the substring `eprintln!("error:`, and the C1 messages
+start with the label, not `error:`), but violates the
+*spirit* of the contract: every user-facing error in inspect
+should render in the canonical `error: <msg>` + `see: inspect
+help <topic>` shape so agents can cross-link consistently.
+
+A separate fix-up commit on `v0.1.3-jaq` (rather than `git
+commit --amend` per CLAUDE.md "always create NEW commits"
+policy) reroutes the three filter-error stderr lines through
+`error::emit`. The messages are normalized so `error::emit`'s
+`error:` prefix doesn't double up — labels become "filter
+parse:", "filter runtime:", "filter --raw:" (not "filter
+runtime error:"), so the rendered output is "error: filter
+parse: …".
+
+The catalog entry that gives these errors a `see: inspect help
+select` link is C3's responsibility (it ships the `select`
+topic in the same commit; adding the catalog row in C2 would
+break `tests::every_catalog_row_points_at_a_real_topic_or_none`
+because the topic doesn't exist yet).
+
+C1-fixup commit subject: `F19 (C1-fixup): route filter errors
+through error::emit for help-topic linkage`. Footer: `Closes
+the C1 stderr-routing oversight on v0.1.3-jaq.`
 
 The crate-wide lint `dead_code = "deny"` (see
 `Cargo.toml::[lints.rust]`) means every commit's new `pub`
@@ -418,123 +464,302 @@ multi-commit precedent).
 every JSON-emitting verb`
 
 **Pre-condition:** C1 landed; `query::*` is callable from any
-verb; `inspect query` smoke-tests pass. C2 is purely additive
-sugar on top of the existing abstraction — no new public API
-in `src/query/` is added in C2.
+verb; `inspect query` smoke-tests pass. C1-fixup landed; filter
+errors route through `error::emit`. C2 is purely additive sugar
+on top of the existing abstraction — no new public API in
+`src/query/` is added in C2.
 
-**Scope:**
+### Design divergence from the original C2 spec
 
-- Define a shared clap arg group `SelectArgs` in
-  `src/cli.rs` (next to the existing `JsonOnly` / `Quiet`
-  patterns). Three fields, all clap `requires = "json"`,
-  all `conflicts_with = "quiet"`. Doc-comment on each gives
-  the rationale + the `inspect help select` pointer.
-- Add `SelectArgs` to every verb args struct that already
-  has a `pub json: bool` field. Verbs to touch
-  (authoritative list — every miss is a bug):
-  - `status`, `why`, `ps`, `ls`, `health`, `find`,
-    `cat`, `ports`, `network`, `volumes`, `images`,
-    `search`, `connectivity`, `discover`, `recipe`,
-    `connect` (via `setup`), `cache ls`, `cache clear`,
-    `bundle`, `history show`.
-  - `audit ls`, `audit show`, `audit grep`, `audit gc`,
-    `audit verify`.
-  - `compose ls`, `compose ps`, `compose up`,
-    `compose down`, `compose restart`, `compose build`,
-    `compose pull`, `compose config`.
-  - `run`, `exec` (envelope summary path; streaming
-    frame path covered by C2 streaming hook below).
-  - `put`, `get`.
-- Single-envelope plumbing: extend
-  `OutputDoc::print_json` to take an
-  `Option<SelectArgs>` (or read it from a builder).
-  Envelope verbs pass their `SelectArgs` in.
-  Implementation:
-  1. Build envelope as today (no path change up to this
-     point).
-  2. If `--select` is None → existing behavior unchanged
-     (single line, full envelope).
-  3. If `--select` is Some(filter) →
-     `query::eval(filter, &serde_json::to_value(self)?)`.
-     - Parse error → return `Err` upward; main maps to
-       exit 2 with `error: --select filter: …` +
-       `hint: inspect help select`.
-     - Runtime error → exit 1 with
-       `error: --select runtime: …` + same `hint:`.
-     - On success: if `--select-raw`, render via
-       `query::render_raw`; else
-       `query::render_compact`. Emit through the
-       existing `transcript::emit_stdout` so the
-       transcript / NDJSON channel records the post-filter
-       output (consistent with `--quiet` precedent — what
-       the user sees is what we audit).
-- Streaming plumbing (`run --stream`, `logs`, `grep
-  --json`, `audit grep` history-line stream): introduce
-  `query::ndjson::Filter` — a `Compiled` filter wrapper
-  with optional slurp buffer + raw-render state. Each
-  per-frame emit site checks for the filter, evaluates per
-  frame, and emits the rendered output. Slurp mode buffers
-  the deserialized values until end-of-stream, then
-  evaluates once. Slurp + raw together: emit raw at
-  end-of-stream.
-- `clap`-level mutex enforcement: `requires = "json"` on
-  all three flags + `conflicts_with = "quiet"`. **Do not**
-  enforce at runtime — clap tells the operator at
-  argument-parse time, with the canonical clap usage error,
-  exit 2.
-- Per-verb `LONG_*` constants in `src/cli.rs`: add a one-line
-  pointer to each long-help block (`SELECTING:` section,
-  one or two filter examples). Match the existing
-  `LONG_AUDIT_LS` "ORDERING + JSON PROJECTION" pattern.
-  Don't write a paragraph per verb — the editorial topic
-  in C3 carries the depth.
-- Exit-code documentation: add `--select` rows to
-  `inspect help safety` exit-code table (C3 task — but the
-  *codes themselves* are stable contract on day one).
+The original C2 scope said "define a shared clap arg group
+`SelectArgs` and add it to every verb args struct that has
+`pub json: bool`". A pre-implementation survey of the codebase
+(see `Agent` survey transcript in this session) found that
+shape doesn't match reality:
+
+- Only **3 places** in `src/` declare `pub json: bool` directly
+  (`HelpArgs` and `FleetArgs` in `src/cli.rs`, and
+  `FormatArgs::json` in `src/format/mod.rs`).
+- Every other JSON-emitting verb inherits `--json` through
+  `#[command(flatten)] pub format: FormatArgs` — 30+ verbs.
+- JSON emission flows through **three chokepoints** in
+  `src/verbs/output.rs`, not 30 per-verb sites:
+  - `OutputDoc::print_json` (line 244) — 15 envelope verbs
+    (status, health, audit ls/show/grep, compose ls/ps,
+    cache, why, connectivity, recipe, search, setup-derived).
+  - `JsonOut::write` (line 164) — 10 streaming verbs (logs,
+    grep, run --stream, history show, journal-style emitters,
+    ps/find/ls/network/images/volumes/ports per-record paths).
+  - `Renderer::dispatch` JSON branch (line 105-110) — 6 per-
+    record verbs that buffer rows then emit them. Note: this
+    branch currently uses `println!` rather than
+    `transcript::emit_stdout`, **bypassing the transcript**.
+    This is a pre-existing tech-debt gap; C2 fixes it as part
+    of the same change set per the LLM-trap-fix-on-first-
+    surface + sweep-the-pattern policy in CLAUDE.md.
+
+The cleaner shape — adopted for C2 — is:
+
+1. Add `select`, `select_raw`, `select_slurp` to **`FormatArgs`
+   itself** (not a new struct). 30+ verbs get the flags
+   automatically via the existing `#[command(flatten)]`. Two
+   exceptions (`HelpArgs`, `FleetArgs`) get the same fields
+   added directly to their structs to keep the surface
+   uniform.
+2. Plumb the filter through the three chokepoints, not
+   per-verb.
+3. Two top-level commands with bespoke serialization
+   (`fleet`, `help --json`) plus `setup`'s own `print_json`
+   get filter integration at the same time so the contract
+   is uniform across every JSON-emitting verb. **Do not skip
+   them** — partial coverage is a worse contract than no
+   coverage (agents would learn `--select` works on most
+   verbs and be surprised when it silently no-ops on others).
+
+### Scope
+
+**Flags + validation (`src/format/mod.rs`):**
+
+- Add three fields to `FormatArgs`:
+  - `select: Option<String>` (`--select <FILTER>`) — the jq-
+    language filter source.
+  - `select_raw: bool` (`--select-raw` / clap `requires =
+    "select"`) — emit string yields unquoted (`jq -r`).
+  - `select_slurp: bool` (`--select-slurp` / clap `requires
+    = "select"`) — collect every NDJSON value into one
+    array first (`jq -s`).
+  - `--select-raw` and `--select-slurp` are independently
+    settable (combinable, `jq -rs`-equivalent).
+- Validation in `FormatArgs::resolve()`: if `select.is_some()`
+  AND the resolved format is not JSON-class (`--json` /
+  `--jsonl`), return `Err(anyhow!("--select requires --json
+  or --jsonl"))`. Routes through `ExitKind::Error` → exit 2
+  with the canonical `error: …` shape.
+- `--quiet` ⊕ `--select` is enforced transitively: `--quiet`
+  is already `conflicts_with_all = ["json", "jsonl"]` at
+  clap level, and `--select` requires JSON-class via
+  `resolve()`, so the combination is rejected.
+- New helper `FormatArgs::select_filter() ->
+  anyhow::Result<Option<query::ndjson::Filter>>` constructs a
+  Filter for streaming verbs in one place. Parse errors are
+  mapped to "`--select filter: <message>`" anyhow errors so
+  they route through `error::emit` → exit 2 (catalog entry
+  shipped in C3).
+
+**OutputDoc plumbing (`src/verbs/output.rs`):**
+
+- Change `OutputDoc::print_json` signature from
+  `(&self) -> ()` to `(&self, select: Option<&str>, raw: bool,
+  slurp: bool) -> anyhow::Result<crate::error::ExitKind>`.
+  - `select == None`: serialize self → `transcript::emit_stdout`,
+    return `Ok(Success)` (existing behavior, now just
+    explicit-Result).
+  - `select == Some(filter)`:
+    - Serialize self to `serde_json::Value`.
+    - Run `query::eval(filter, &value)` (or `eval_slurp` if
+      `slurp == true`).
+    - On parse error: return `Err(anyhow!("filter parse: …"))`
+      → routes through `error::emit` → exit 2.
+    - On runtime error or raw-non-string: emit through
+      `error::emit` directly, return `Ok(NoMatches)` → exit 1.
+    - On zero results: return `Ok(NoMatches)` → exit 1.
+    - On success: render via `query::render_raw` (if `raw`)
+      or `render_compact`, emit through
+      `transcript::emit_stdout`, return `Ok(Success)`.
+- Update every caller to thread the return value through to
+  `main`'s `ExitKind` plumbing (most verbs already return
+  `anyhow::Result<ExitKind>` — this is a small mechanical
+  change at each call site).
+
+**JsonOut streaming plumbing (`src/verbs/output.rs`):**
+
+- Change `JsonOut::write` signature from `(env: &Envelope) ->
+  ()` to `(env: &Envelope, filter: Option<&mut
+  query::ndjson::Filter>) -> anyhow::Result<()>`.
+  - Filter `None`: serialize → emit (existing behavior).
+  - Filter `Some(f)`:
+    - Convert env to `serde_json::Value`.
+    - Call `f.on_line(&value)?`.
+    - If returned string is non-empty: emit through
+      `transcript::emit_stdout`. (Slurp mode returns empty;
+      output is deferred to end-of-stream.)
+- Each streaming verb call site:
+  - Constructs `let mut select = args.format.select_filter()?`
+    once at verb entry.
+  - Replaces `JsonOut::write(&env)` with `JsonOut::write(&env,
+    select.as_mut())?` in the per-frame loop.
+  - At end-of-stream, if `select` is Some: call
+    `f.finish()?`; emit if non-empty.
+- The runtime-error and raw-non-string error paths in
+  `Filter::on_line` and `Filter::finish` already return
+  `Err(QueryError)`; the streaming wrapper translates these
+  to `error::emit` + early exit (`ExitKind::NoMatches` for
+  runtime/raw, `ExitKind::Error` for parse — but parse errors
+  are caught at construction time in `select_filter`, so
+  the streaming `on_line`/`finish` path only ever sees
+  runtime/raw errors).
+
+**Renderer::dispatch fix + plumbing (`src/verbs/output.rs`):**
+
+- Replace `println!("{}", serde_json::to_string(row)?)` with
+  the same filter-aware emission path used by `JsonOut::write`.
+  - One construction of `Filter` at dispatch entry.
+  - Per-row: `JsonOut::write(&env_for_row, filter.as_mut())?`
+    semantics (extracted into a private helper to avoid
+    duplication).
+  - End-of-stream `finish()` flush.
+- This **also fixes the pre-existing transcript-bypass gap**
+  (line 107). Per CLAUDE.md "fix on first surface" + "sweep
+  the pattern", the gap is in the same family as the new
+  filter plumbing — both are "JSON output goes through
+  transcript and through filter if set" — and gets fixed in
+  the same commit.
+
+**Bespoke JSON emitters (NOT skipped):**
+
+- `fleet::emit_json` (`src/commands/fleet.rs:807`): currently
+  hand-rolls JSON via `println!`. Refactor to build a
+  `serde_json::Value` envelope, then route through the same
+  filter-aware emission path used by `OutputDoc::print_json`.
+  Adds `--select` support uniformly without changing fleet's
+  output schema.
+- `help::json::render_full` / `render_topic`: currently
+  pre-renders the help registry to a static JSON string.
+  Wrap the rendered string: parse to Value, apply filter if
+  set, emit. Single-shot, no streaming concerns. Lets agents
+  do `inspect help all --json --select '.topics[].name'` for
+  discovery.
+- `setup::print_json` (`src/commands/setup.rs:210`): the
+  cleanest fix is migrating to `OutputDoc::print_json`
+  (consistency with all other envelope verbs); fall back to
+  local filter integration if migration is too invasive for
+  C2's scope. Decision made at implementation time based on
+  the actual diff shape.
+
+**Per-verb help (`src/cli.rs` LONG_* constants):**
+
+- Add a one-line `SELECTING:` pointer to each verb's
+  `LONG_*` block. Format:
+  ```
+  SELECTING
+    Use `--select '<jq filter>'` to extract a field or shape
+    the output. Examples:
+      $ inspect <verb> [args] --json --select '.summary' -r
+      $ inspect <verb> [args] --json --select '.data | length'
+    See `inspect help select` for the filter language.
+  ```
+  Match the existing `LONG_AUDIT_LS` "ORDERING + JSON
+  PROJECTION" precedent. Don't write a paragraph per verb —
+  the editorial topic in C3 carries the depth.
+
+**Exit-code contract (stable from C2):**
+
+- `0`: filter produced ≥ 1 result.
+- `1`: filter produced zero results, runtime error, or
+  raw-non-string error.
+- `2`: filter parse error, `--select` without JSON-class
+  format, clap arg error.
+
+Identical to `inspect query`'s exit-code shape from C1, so
+agents only learn one contract.
+
+**Catalog entry deferral note:** the `ERROR_CATALOG` row that
+gives filter errors a `see: inspect help select` cross-link
+ships in **C3**, not C2. The reason is that the
+`every_catalog_row_points_at_a_real_topic_or_none` test
+requires the topic to exist, and the `select` editorial topic
+ships in C3. C2's filter errors render as `error: --select …`
+without a `see:` line; C3 lights it up. **This is not a
+deferral** — it's a sequencing dependency between two commits
+that ship in this same release. Re-routing to a generic
+existing topic (e.g. `formats`) was considered but rejected:
+the right link is `select`, and a transient one-commit
+window without it is cleaner than a misleading link that
+gets re-targeted in C3.
 
 **Acceptance tests** (new test file
 `tests/jaq_select_v013.rs` — separate from
 `phase_f_v013.rs` because it cuts across every verb and
 keeping the cross-cut visible aids future refactors):
 
-- `f19_status_select_summary_field` — invoke
-  `inspect status arte --json --select '.summary'` against a
-  test profile, assert one line of compact JSON containing
-  the summary string.
-- `f19_status_select_raw_summary` — same with
-  `--select-raw`, assert unquoted UTF-8.
-- `f19_audit_ls_select_first_id` — assert
-  `--select '.data.entries[0].id'` returns the newest entry's
-  ID (proves the L7 envelope path is correct end-to-end).
-- `f19_audit_ls_select_array_length` — assert
-  `--select '.data.entries | length'` returns a number.
-- `f19_compose_ps_select_state_per_service` — assert
-  `--select '.data.services[] | {name, state}'` returns N
-  lines of compact JSON.
-- `f19_select_requires_json` — invoke without `--json`,
-  assert exit 2 + clap usage error mentioning `--json`.
-- `f19_select_conflicts_with_quiet` — invoke with `--json
-  --quiet --select '.summary'`, assert exit 2 + clap
-  usage error.
-- `f19_select_parse_error_exit_2` — invoke with `--select
-  '.['`, assert exit 2 + stderr matches
-  `error: --select filter:` + `hint: inspect help select`.
-- `f19_select_runtime_error_exit_1` — invoke with `--select
-  '1 + "x"'`, assert exit 1 + stderr matches
-  `error: --select runtime:`.
-- `f19_select_zero_results_exit_1` — invoke with a filter
-  that yields no values, assert exit 1, empty stdout.
-- `f19_select_raw_non_string_errors` — invoke with
-  `--select '.count' --select-raw` against an envelope where
-  `.count` is a number, assert exit 1 + stderr matches
-  `error: --select-raw: filter yielded non-string`.
-- `f19_run_stream_select_per_frame` — fake-host
-  `inspect run … --stream --json --select '.line'` against
-  three frames, assert three lines.
-- `f19_run_stream_select_slurp` — same with
-  `--select-slurp '. | length'`, assert single line `3`.
-- `f19_audit_grep_history_select_per_line` — assert per-line
-  filter on the NDJSON history stream.
+Per-chokepoint coverage:
+
+- `f19_outputdoc_select_summary` (envelope chokepoint) —
+  any `OutputDoc`-emitting verb (e.g. `audit ls --json
+  --select '.summary'`); assert single compact JSON string.
+- `f19_outputdoc_select_raw` — same with `--select-raw`,
+  assert unquoted UTF-8.
+- `f19_outputdoc_select_data_path` — `audit ls --json
+  --select '.data.entries[0].id'`; proves the L7 envelope
+  path is reachable.
+- `f19_outputdoc_select_array_length` — `--select
+  '.data.entries | length'`; assert numeric.
+- `f19_jsonout_streaming_per_frame` — `inspect history
+  show <id> --json --select '.line'` (or any streaming
+  verb without a remote dependency); assert N lines.
+- `f19_jsonout_streaming_slurp` — same with
+  `--select-slurp 'length'`; assert single numeric line.
+- `f19_renderer_dispatch_per_row` — any per-record verb
+  using `Renderer::dispatch` (e.g. `inspect ps --json
+  --select '.service'`); assert per-row filter is applied.
+- `f19_renderer_dispatch_transcript_capture` — same call
+  with `INSPECT_TRANSCRIPT=…`; assert the transcript file
+  contains the post-filter output (proves the
+  `println` → `emit_stdout` fix landed and the filter
+  output is what's audited, consistent with the existing
+  `--quiet` precedent).
+
+Bespoke-emitter coverage:
+
+- `f19_fleet_select_envelope` — `inspect fleet status
+  --json --select '.namespaces | length'` against a test
+  fleet; assert numeric.
+- `f19_help_json_select_topic_names` — `inspect help all
+  --json --select '.topics[].id'`; assert ≥ 1 line.
+- `f19_setup_select_namespace_field` (if migration to
+  OutputDoc happens in C2) or
+  `f19_setup_select_local_filter` (if local plumbing) —
+  whichever shape lands.
+
+Validation + error-class coverage:
+
+- `f19_select_requires_json_format` — `inspect status
+  --select '.x'` (no `--json`), assert exit 2 + stderr
+  contains `--select requires --json or --jsonl`.
+- `f19_select_with_csv_errors` — `inspect status --csv
+  --select '.x'`, same exit 2.
+- `f19_select_quiet_conflict_via_json` — `--json --quiet`
+  is already mutex; `--quiet --select '.x'` falls through
+  to "select requires JSON" error. Assert exit 2.
+- `f19_select_parse_error_exit_2` — `--select '.['`;
+  assert exit 2 + stderr matches `error: --select filter:`
+  (no `see:` line in C2; C3 adds it).
+- `f19_select_runtime_error_exit_1` — `--select '1 +
+  "x"'`; assert exit 1 + stderr matches `error:
+  --select runtime:`.
+- `f19_select_zero_results_exit_1` — filter yielding no
+  values; assert exit 1 + empty stdout.
+- `f19_select_raw_non_string_errors` — `--select '.count'
+  --select-raw` against an envelope with numeric `.count`;
+  assert exit 1 + stderr matches `error: --select-raw:`
+  `filter yielded non-string`.
+- `f19_select_raw_requires_select` — `--select-raw`
+  alone (no `--select`); assert clap requires-error,
+  exit 2.
+- `f19_select_slurp_requires_select` — same shape for
+  `--select-slurp`.
+
+Help discoverability:
+
+- `f19_status_help_mentions_select` — `inspect status
+  --help | grep -i 'select'`; assert non-empty match
+  (proves the `LONG_*` SELECTING pointer landed).
+- `f19_audit_ls_help_mentions_select` — same for `audit
+  ls`.
+
+Total ≈ 18-20 tests. The test file has helpers for
+constructing test envelopes / temp-dir audit logs / fake
+servers so tests don't depend on a real SSH host.
 
 **Pre-commit gate:** full suite must be ≤ 28 + 1 = 29 suites
 green (the new test file). The ttl-zero flake described in
@@ -545,10 +770,14 @@ test count grows by ~14.
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-grep -nE '"select"|select_raw|select_slurp' src/cli.rs | head    # ≥ 3
-grep -nE 'SelectArgs' src/cli.rs                                 # struct + many uses
-inspect status --help 2>&1 | grep -E 'select'                    # mentioned
-inspect audit ls --help 2>&1 | grep -E 'select'                  # mentioned
+grep -nE 'pub select(_raw|_slurp)?:' src/format/mod.rs           # 3 lines
+grep -nE 'select_filter' src/format/mod.rs src/verbs/output.rs   # helper + uses
+grep -nE 'select.*:.*Option<.*str>' src/cli.rs                   # HelpArgs+FleetArgs additions
+grep -n 'transcript::emit_stdout\|println!' src/verbs/output.rs  # NO println for JSON branch
+inspect status --help 2>&1 | grep -i 'select'                    # SELECTING line present
+inspect audit ls --help 2>&1 | grep -i 'select'                  # SELECTING line present
+inspect fleet status --help 2>&1 | grep -i 'select'              # SELECTING line present
+inspect help all --help 2>&1 | grep -i 'select'                  # SELECTING line present
 cargo test --test jaq_select_v013 2>&1 | grep -E 'test result'   # all pass
 cargo test 2>&1 | grep -E '^test result|^running' | tail -40     # clean
 ```
@@ -792,30 +1021,49 @@ accordingly:
   clean — if dead-code lint is firing on `query::*`, the
   verb is not consuming everything yet.
 - **Case C — `inspect query` passes its smoke recipes but
-  no `SelectArgs` in `src/cli.rs`.** C1 done, C2 not
-  started. Open C2.
-- **Case D — `SelectArgs` in `src/cli.rs`, but `tests/jaq_select_v013.rs`
-  does not exist OR fails.** Mid-C2. Re-read git diff;
-  identify which verbs already received `SelectArgs`
-  (search for `SelectArgs` references). Continue from the
-  next un-touched verb in the authoritative C2 list. Run
-  C2 post-conditions before proceeding.
-- **Case E — C2 post-conditions green, but `| jq` still in
-  help/MANUAL/RUNBOOK/SMOKE.** Mid-C3. Re-run the
-  `grep -RnE '\| jq '` sweep, finish remaining files. The
-  C3 post-conditions checklist tells you when you're done.
-- **Case F — C3 post-conditions green, but no `F19` row in
+  `commands/query.rs` filter errors still use raw
+  `eprintln!` instead of `error::emit`.** C1 done, C1-fixup
+  not started. Open the C1-fixup commit: route the three
+  filter-error stderr lines (parse / runtime / raw-non-
+  string) through `crate::error::emit` with normalized
+  labels ("filter parse:" / "filter runtime:" /
+  "filter --raw:" — no "error" word in the label since
+  `error::emit` adds the prefix).
+- **Case D — C1-fixup landed but no `select` field in
+  `FormatArgs` (`src/format/mod.rs`).** C2 not started.
+  Open C2 starting with `FormatArgs` extension.
+- **Case E — `FormatArgs.select` exists but `OutputDoc::print_json`
+  signature still returns `()`.** Mid-C2. Either the
+  envelope chokepoint or the streaming chokepoint has
+  not been wired yet. Re-read `git diff HEAD`;
+  identify which of the three chokepoints (OutputDoc,
+  JsonOut, Renderer::dispatch) is incomplete and continue.
+  The post-conditions grep on `transcript::emit_stdout` /
+  `println!` in `src/verbs/output.rs` tells you whether
+  the Renderer transcript-bypass fix landed.
+- **Case F — C2 post-conditions green, but `| jq` still in
+  help/MANUAL/RUNBOOK/SMOKE OR no `select.md` topic.**
+  Mid-C3. Re-run the `grep -RnE '\| jq '` sweep, finish
+  remaining files. Verify `inspect help select` renders.
+  Verify the new `ERROR_CATALOG` row pointing at "select"
+  is in `src/error.rs`. The C3 post-conditions checklist
+  tells you when you're done.
+- **Case G — C3 post-conditions green, but no `F19` row in
   the backlog.** Mid-C4. Run the C4 closure list; almost
   always this means CHANGELOG / backlog updates are pending.
-- **Case G — All post-conditions green; F19 row says ✅ Done.**
-  F19 is shipped. Run the full pre-commit gate one final
-  time as a paranoia check; if green, F19 is closed.
+- **Case H — All post-conditions green; F19 row says
+  ✅ Done; branch is `v0.1.3-jaq`.** F19 is shipped on
+  the branch. Run the full pre-commit gate one final time
+  as a paranoia check; if green, merge `v0.1.3-jaq` back
+  into `v0.1.3` (`git checkout v0.1.3 && git merge --ff-only
+  v0.1.3-jaq`), delete the local + remote `v0.1.3-jaq`, and
+  F19 is closed.
 
 If at any point the state is internally inconsistent (e.g.
-`SelectArgs` referenced from a verb that doesn't compile),
-**read the actual `git diff HEAD` first** before deciding
-what to do — the document says what the plan *was*; the diff
-says what actually happened.
+`FormatArgs.select` referenced from a chokepoint that
+doesn't compile), **read the actual `git diff HEAD` first**
+before deciding what to do — the document says what the
+plan *was*; the diff says what actually happened.
 
 ---
 
