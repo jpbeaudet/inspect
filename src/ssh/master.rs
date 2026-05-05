@@ -776,6 +776,17 @@ struct InteractiveAuthConfig {
     /// Tail of the "all attempts exhausted" error message:
     /// `"ssh <kind> auth for '<ns>' failed after N attempt(s); aborting. hint: <hint>"`.
     final_hint: &'static str,
+    /// First-connect UX: when `true` and `target.key_path` is `Some`,
+    /// run a local `ssh-keygen -y -f <key>` pre-flight against the
+    /// entered secret BEFORE spawning the full ssh master. A wrong
+    /// passphrase fails locally in ~10ms (just key-file decryption);
+    /// the alternative is a full SSH handshake against the remote
+    /// host (TCP + KEX + auth) which is ~1-3s on a typical
+    /// internet-RTT host. ssh-add gets ~10ms retries for the same
+    /// reason — local-only verification. Only meaningful for key
+    /// auth (a password is the *server's* secret; nothing local
+    /// to validate against). Password auth sets this `false`.
+    pre_validate_locally: bool,
 }
 
 impl InteractiveAuthConfig {
@@ -792,6 +803,7 @@ impl InteractiveAuthConfig {
             final_hint: "verify the passphrase against the key directly \
                          (e.g. `ssh-keygen -y -f <key_path>`), then retry. \
                          see: inspect help ssh",
+            pre_validate_locally: true,
         }
     }
 
@@ -807,7 +819,68 @@ impl InteractiveAuthConfig {
             on_success: Some(maybe_warn_password_auth),
             final_hint: "verify the password against the host directly, then retry. \
                          see: inspect help ssh",
+            // Password auth has nothing local to validate against —
+            // the secret is the remote sshd's, not a local key file.
+            pre_validate_locally: false,
         }
+    }
+}
+
+/// First-connect UX optimization: validate that `secret` (already
+/// placed in the env var named `env_var`) decrypts the local key
+/// file at `key_path`, BEFORE spawning the full ssh master. A
+/// wrong passphrase fails here in ~10ms (just local key-file
+/// decryption — no network); without this, every wrong-passphrase
+/// retry costs a full ssh handshake (TCP + KEX + auth + close)
+/// against the remote host, which on internet RTT is ~1-3s.
+///
+/// Mechanism: `ssh-keygen -y -f <key_path>` reads the private key,
+/// asks for the passphrase, and writes the public key on success.
+/// We set `SSH_ASKPASS_REQUIRE=force` so ssh-keygen invokes our
+/// askpass helper (which echoes the env-var value) instead of
+/// prompting on the TTY. stdout/stderr are swallowed — we only
+/// care about the exit code.
+///
+/// Returns `Ok(())` if the passphrase decrypts the key (local
+/// fast-path: the network attempt that follows is now reasonably
+/// likely to succeed). Returns `Err(...)` with a parsed
+/// "wrong passphrase" hint when ssh-keygen rejects, so the
+/// per-attempt warning surfaces a meaningful root cause instead
+/// of a network-side `Permission denied (publickey)` that
+/// arrived ~2 seconds later.
+///
+/// Defensive against environments where ssh-keygen is missing
+/// (the binary is shipped with every OpenSSH client and is on
+/// PATH everywhere we run today, but if it's somehow absent the
+/// returned error chains to "install openssh-client" rather than
+/// silently false-positive).
+fn validate_key_passphrase_locally(key_path: &Path, askpass: &AskpassScript) -> Result<()> {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.arg("-y").arg("-f").arg(key_path);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+    for (k, v) in askpass.env_vars() {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().with_context(|| {
+        "failed to invoke 'ssh-keygen' for local passphrase validation \
+         (is openssh-client installed and on PATH?)"
+            .to_string()
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_string();
+    if stderr.is_empty() {
+        Err(anyhow!(
+            "ssh-keygen rejected passphrase (exit {})",
+            output.status.code().unwrap_or(-1)
+        ))
+    } else {
+        Err(anyhow!("ssh-keygen rejected passphrase: {stderr}"))
     }
 }
 
@@ -864,14 +937,47 @@ fn run_interactive_master_with_retries(
         }
         std::env::set_var(config.env_var, &secret);
         let askpass = AskpassScript::new(config.env_var)?;
-        let result = run_master_with_opts(
-            target,
-            ttl,
-            socket,
-            &askpass.env_vars(),
-            /*batch=*/ false,
-            config.ssh_opts,
-        );
+        // First-connect UX: when configured (key auth only), pre-
+        // validate the passphrase locally via `ssh-keygen -y -f`
+        // before spending an SSH handshake. A wrong passphrase
+        // fails here in milliseconds rather than ~1-3s for a full
+        // network attempt (matches ssh-add's retry feel).
+        let result: Result<()> = if config.pre_validate_locally {
+            match target.key_path.as_deref() {
+                Some(key_path) => match validate_key_passphrase_locally(key_path, &askpass) {
+                    Ok(()) => run_master_with_opts(
+                        target,
+                        ttl,
+                        socket,
+                        &askpass.env_vars(),
+                        /*batch=*/ false,
+                        config.ssh_opts,
+                    ),
+                    Err(e) => Err(e),
+                },
+                // No key_path on the target (shouldn't happen for
+                // key auth — the resolver enforces it — but stay
+                // defensive: skip pre-validation, fall back to the
+                // full network attempt.)
+                None => run_master_with_opts(
+                    target,
+                    ttl,
+                    socket,
+                    &askpass.env_vars(),
+                    /*batch=*/ false,
+                    config.ssh_opts,
+                ),
+            }
+        } else {
+            run_master_with_opts(
+                target,
+                ttl,
+                socket,
+                &askpass.env_vars(),
+                /*batch=*/ false,
+                config.ssh_opts,
+            )
+        };
         std::env::remove_var(config.env_var);
         // L2 (v0.1.3): save BEFORE wiping if requested AND the master
         // came up. Backend errors are warnings, not hard failures.
@@ -1152,5 +1258,151 @@ mod interactive_retry_parity_tests {
         // entirely on the retry path.
         let key = InteractiveAuthConfig::key_passphrase();
         assert!(key.ssh_opts.is_empty());
+    }
+
+    #[test]
+    fn pre_validate_locally_only_set_for_key_auth() {
+        // Local pre-validation requires a local key file to
+        // decrypt against. Password auth has no local artifact —
+        // the secret is the remote sshd's, so pre-validation is
+        // impossible by definition. Pinning the asymmetry here so
+        // a future refactor can't silently flip the password flavor
+        // and start spawning ssh-keygen against nothing.
+        assert!(InteractiveAuthConfig::key_passphrase().pre_validate_locally);
+        assert!(!InteractiveAuthConfig::password().pre_validate_locally);
+    }
+}
+
+#[cfg(test)]
+mod local_passphrase_validation_tests {
+    //! End-to-end test of the `ssh-keygen -y -f` local pre-flight.
+    //! Generates a real ed25519 keypair with a known passphrase
+    //! into a tempdir, then exercises both the right-passphrase and
+    //! wrong-passphrase paths via the same `AskpassScript +
+    //! validate_key_passphrase_locally` pipeline that
+    //! `run_interactive_master_with_retries` uses in production.
+    //!
+    //! Skipped when ssh-keygen is not on PATH (CI hosts without
+    //! openssh-client installed). The CLAUDE.md pre-commit gate
+    //! runs on dev machines that have OpenSSH so this is the
+    //! authoritative behavior pin; environment-skipped CI is OK
+    //! because `pre_validate_locally_only_set_for_key_auth`
+    //! covers the structural contract regardless.
+    use super::*;
+
+    /// Serialize tests that mutate `INSPECT_INTERACTIVE_PASSPHRASE`.
+    /// Mirror of the pattern documented in CLAUDE.md "WSL `cargo`
+    /// PATH" / `cancel::tests::test_lock` — `std::env::set_var` is
+    /// process-global and unsafe across threads, so any test touching
+    /// the same key must take this mutex. Without it, parallel test
+    /// runs alternate values mid-flight and the askpass child reads
+    /// whichever value was set most recently.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn ssh_keygen_available() -> bool {
+        Command::new("ssh-keygen")
+            .arg("-?")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.code().is_some())
+            .unwrap_or(false)
+    }
+
+    fn generate_encrypted_ed25519(dir: &Path, passphrase: &str) -> PathBuf {
+        let key_path = dir.join("id_ed25519_test");
+        let status = Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&key_path)
+            .arg("-N")
+            .arg(passphrase)
+            .arg("-C")
+            .arg("inspect-test-key")
+            .arg("-q")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("ssh-keygen -t ed25519");
+        assert!(status.success(), "ssh-keygen keygen failed");
+        key_path
+    }
+
+    #[test]
+    fn right_passphrase_validates_in_milliseconds() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let key = generate_encrypted_ed25519(tmp.path(), "correct-horse-battery-staple");
+        // Set the env var the askpass script reads through.
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "correct-horse-battery-staple");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let started = std::time::Instant::now();
+        let result = validate_key_passphrase_locally(&key, &askpass);
+        let elapsed = started.elapsed();
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(
+            result.is_ok(),
+            "right passphrase must validate; got {:?}",
+            result.err()
+        );
+        // Local validation should be ≪ 1s on any reasonable host —
+        // pin a generous ceiling that still catches a regression
+        // where someone accidentally re-introduces a network call.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "local validation took {elapsed:?}, expected <2s"
+        );
+    }
+
+    #[test]
+    fn wrong_passphrase_rejected_locally() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let key = generate_encrypted_ed25519(tmp.path(), "the-real-passphrase");
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "wrong-on-purpose");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let result = validate_key_passphrase_locally(&key, &askpass);
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(
+            result.is_err(),
+            "wrong passphrase must be rejected; got Ok unexpectedly"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("ssh-keygen rejected passphrase"),
+            "error must surface ssh-keygen rejection root cause; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_key_file_surfaces_clean_error() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = tmp.path().join("nope");
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "anything");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let result = validate_key_passphrase_locally(&nonexistent, &askpass);
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(result.is_err());
     }
 }

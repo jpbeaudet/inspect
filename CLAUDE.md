@@ -411,6 +411,27 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   can run any read/write/lifecycle verb without the user's
   passphrase env var present in the spawn.
 
+- **Key-auth retries pre-validate locally via `ssh-keygen -y -f`.**
+  Each wrong-passphrase attempt is filtered through a local
+  `ssh-keygen -y -f <key_path>` decryption check (askpass-fed,
+  no network) BEFORE spawning the full ssh master. Wrong-
+  passphrase fail-fast in milliseconds; only the right-passphrase
+  attempt incurs the network round-trip. The shape matches
+  `ssh-add`'s retry feel. `validate_key_passphrase_locally` lives
+  next to `run_interactive_master_with_retries` and is gated by
+  the `pre_validate_locally: true` flag on
+  `InteractiveAuthConfig::key_passphrase()` (false on
+  `::password()` because there's no local artifact for password
+  auth — the secret is the remote sshd's). Three integration
+  tests in `local_passphrase_validation_tests` cover the right /
+  wrong / missing-key paths against a real ssh-keygen-generated
+  ed25519 keypair (skipped if ssh-keygen is not on PATH; the
+  parity-test
+  `pre_validate_locally_only_set_for_key_auth` covers the
+  structural contract regardless). Pre-validation only matters
+  for the WRONG-passphrase path; a correct passphrase still
+  needs the master start so a network round-trip is unavoidable.
+
 - **Key-auth and password-auth interactive prompts share the same
   retry loop.** Both flavors go through
   `run_interactive_master_with_retries` in `src/ssh/master.rs`, which

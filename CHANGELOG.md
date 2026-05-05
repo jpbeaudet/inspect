@@ -155,6 +155,82 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **Key-auth retries now fail-fast locally (~10ms) instead of
+  burning an SSH handshake (~1-3s) per wrong attempt.** Same
+  release-smoke turn that fixed the 1-vs-3 retry asymmetry: the
+  three retry attempts felt sluggish on `inspect connect arte`
+  vs `ssh-add ~/.ssh/id_ed25519`, even though both are doing
+  "is this passphrase right for this key?" The cause: ssh-add
+  decrypts the key file locally (no network); inspect was
+  spawning a full `ssh -fN user@host` master per attempt, which
+  has to TCP-connect, KEX, attempt auth, and only THEN reject
+  the wrong passphrase — ~1-3s on internet RTT, plus 2-3
+  internal askpass retries inside ssh's `load_identity_file`
+  with the same wrong value before giving up.
+
+  **Fix.** Each wrong-passphrase retry on the key-auth path
+  now goes through `validate_key_passphrase_locally` first —
+  a local `ssh-keygen -y -f <key_path>` invocation fed via
+  the same askpass mechanism. ssh-keygen returns a non-zero
+  exit when the passphrase doesn't decrypt the key, in
+  milliseconds, no network. Only the correct-passphrase
+  attempt proceeds to spawn the full ssh master (which still
+  needs the network handshake for the actual session start —
+  unavoidable). Matches the speed of ssh-add's encrypted-key
+  retries.
+
+  Password auth gets `pre_validate_locally: false` because the
+  password is the remote sshd's secret, not a local artifact —
+  there's nothing to pre-validate against. Password retries
+  still cost one handshake each, which is the inherent cost of
+  remote-secret verification.
+
+  - `InteractiveAuthConfig` gains a `pre_validate_locally: bool`
+    field. `key_passphrase()` constructor sets it `true`,
+    `password()` sets it `false`. The retry loop in
+    `run_interactive_master_with_retries` runs the local
+    pre-flight when configured + `target.key_path` is `Some`,
+    falling through to the network attempt only on local
+    success (or when no key_path is configured — defensive
+    fallback that should be unreachable for key auth since the
+    resolver enforces `key_path`).
+  - `validate_key_passphrase_locally(key_path, askpass)`:
+    spawns `ssh-keygen -y -f <key_path>` with `stdin=null`,
+    `stdout=null`, `stderr=piped`, askpass env vars applied via
+    the same `AskpassScript::env_vars()` we use for `ssh -fN`.
+    On non-zero exit, surfaces the captured stderr in the
+    error chain so the per-attempt warning has a meaningful
+    root cause (`ssh-keygen rejected passphrase: ...`) rather
+    than an ssh-side `Permission denied (publickey)` that
+    arrived 2s later.
+  - 3 new integration tests in `local_passphrase_validation_tests`
+    cover right / wrong / missing-key paths against a real
+    `ssh-keygen -t ed25519`-generated keypair in a tempdir.
+    `right_passphrase_validates_in_milliseconds` pins a
+    generous `<2s` ceiling that still catches a regression
+    where someone accidentally re-introduces a network call.
+    Tests are gated on ssh-keygen-availability; the parity
+    structural test
+    `pre_validate_locally_only_set_for_key_auth` covers the
+    static contract on environments without OpenSSH.
+  - `ENV_INTERACTIVE_PASSPHRASE` mutation in tests is now
+    serialized through a per-module `env_lock()` mutex
+    (mirror of `cancel::tests::test_lock`) so parallel test
+    runs do not race on the process-global env.
+  - `src/help/content/ssh.md` CREDENTIAL RESOLUTION gains a
+    paragraph explaining the local-pre-validation mechanism;
+    `CLAUDE.md ### SSH ControlMaster reuse` gains the
+    invariant.
+
+  Field-validated against arte (encrypted ed25519): three
+  retries on `inspect connect` show `warning: ssh passphrase
+  attempt N/3 failed` lines that fire instantly after pressing
+  enter rather than after a perceptible network pause.
+  `time inspect connect arte` with 1 wrong + 1 right shows
+  `user 0m0.563s` (CPU time across the full flow) — vs the
+  ~10s wall clock that pure-handshake retries would burn on
+  3 wrong attempts. All 28 test suites + 3 new tests green.
+
 - **F13 auto-reauth aborted on a single wrong passphrase keystroke;
   password-auth had three retries — key-auth had zero.** Surfaced
   immediately after fixing the first-connect host-key trap, when

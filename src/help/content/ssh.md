@@ -44,6 +44,17 @@ CREDENTIAL RESOLUTION (in order)
   verb. Empty input on any prompt aborts immediately without
   consuming an attempt slot.
 
+  Key-auth retries are LOCAL: each wrong-passphrase attempt
+  is validated by `ssh-keygen -y -f <key_path>` in-process,
+  which fails in milliseconds (just key-file decryption) rather
+  than spending a full SSH handshake against the remote host
+  for a guaranteed-to-fail auth attempt. Matches the speed of
+  `ssh-add` retries on encrypted keys. Only the right-
+  passphrase attempt incurs the network round-trip (the actual
+  master start). Password auth cannot pre-validate locally —
+  the secret is the remote sshd's, not a local artifact — so
+  password retries still cost a handshake each.
+
 CONFIGURATION
   Environment variables (primary):
     INSPECT_<NS>_HOST, _USER, _KEY_PATH, _PORT
