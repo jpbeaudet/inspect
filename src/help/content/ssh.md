@@ -20,17 +20,29 @@ CREDENTIAL RESOLUTION (in order)
     2. User's ~/.ssh/config ControlMaster (alive)        reuse
     3. ssh-agent with key loaded                         use
     4. key_passphrase_env (servers.toml) set             read from env
-    5. Interactive prompt (rpassword)
+    5. OS keychain (if previously --save-passphrase'd)   read from store
+    6. Interactive prompt (rpassword) — up to 3 attempts then
+       abort with a chained `ssh-keygen -y -f <key_path>`
+       verification hint and `see: inspect help ssh`. F13
+       auto-reauth on a stale ControlMaster shares this loop.
 
   Password auth (L4, `auth = "password"`):
     1. Existing inspect-managed control socket (alive)   reuse
     2. User's ~/.ssh/config ControlMaster (alive)        reuse
     3. password_env (servers.toml) set                   read from env
-    4. Interactive prompt — up to 3 attempts then abort with
+    4. OS keychain (if previously --save-passphrase'd)   read from store
+    5. Interactive prompt — up to 3 attempts then abort with
        a chained hint to `inspect help ssh`.
     Key auth is force-disabled at the ssh layer
     (PubkeyAuthentication=no) so an agent-loaded key cannot
     pre-empt the operator's intent to authenticate by password.
+
+  Both flavors share the same retry loop and per-attempt UX
+  (`Enter ... attempt N/3:` prompt; `warning: ssh
+  passphrase|password attempt N/3 failed` between attempts) so
+  a typo on the auto-reauth prompt does not abort the whole
+  verb. Empty input on any prompt aborts immediately without
+  consuming an attempt slot.
 
 CONFIGURATION
   Environment variables (primary):

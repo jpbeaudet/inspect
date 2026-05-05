@@ -27,6 +27,18 @@ const SSH_BIN: &str = "ssh";
 /// muscle-memory does not lock the operator out repeatedly.
 pub const PASSWORD_MAX_ATTEMPTS: usize = 3;
 
+/// Smoke-caught (post-F13): how many wrong key passphrases we tolerate
+/// during a single `inspect connect` (or F13 auto-reauth) interactive
+/// flow before aborting. Pinned to the same cap as
+/// [`PASSWORD_MAX_ATTEMPTS`] so the key-auth and password-auth paths
+/// have indistinguishable retry UX — typo on the auto-reauth prompt
+/// used to abort the entire verb (`auto-reauth for 'arte' failed`)
+/// after a single wrong attempt, while password auth gave the
+/// operator three tries. The shared
+/// [`run_interactive_master_with_retries`] helper enforces both caps
+/// off the same loop body so the two paths cannot drift apart again.
+pub const PASSPHRASE_MAX_ATTEMPTS: usize = 3;
+
 /// How `inspect connect` ultimately authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -413,44 +425,19 @@ pub fn start_master(
         });
     }
 
-    // (5) Interactive.
+    // (5) Interactive — N-attempt retry loop shared with the
+    // password-auth path so wrong passphrase / wrong password have
+    // identical UX. F13 auto-reauth rides this loop too because
+    // `reauth_namespace` calls `start_master`.
     if auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let prompt = format!(
-            "Enter passphrase for SSH key (namespace '{namespace}', host {host}): ",
-            host = target.host
-        );
-        let mut secret = rpassword::prompt_password(&prompt)?;
-        if secret.is_empty() {
-            return Err(anyhow!("empty passphrase; aborting"));
-        }
-        // Place the secret into a private env var that the askpass helper
-        // reads, then immediately wipe our local copy.
-        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &secret);
-        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE)?;
-        let result = run_master(
+        return run_interactive_master_with_retries(
+            namespace,
             target,
             ttl,
             &socket,
-            &askpass.env_vars(),
-            /*batch=*/ false,
+            auth.save_to_keychain,
+            InteractiveAuthConfig::key_passphrase(),
         );
-        // Always remove the env var afterward, success or failure.
-        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
-        // L2 (v0.1.3): if --save-passphrase was set AND the master
-        // came up, persist the secret to the OS keychain BEFORE
-        // wiping it. Backend errors are warnings, not hard failures —
-        // the master is already running so the connect verb has
-        // succeeded.
-        if result.is_ok() && auth.save_to_keychain {
-            save_credential_to_keychain(namespace, &secret, "key passphrase");
-        }
-        zeroize_string(&mut secret);
-        result.context("ssh master failed using interactive passphrase")?;
-        return Ok(ConnectOutcome {
-            auth_mode: AuthMode::InteractivePrompt,
-            socket: Some(socket),
-            ttl: ttl.to_string(),
-        });
     }
 
     let env_hint = match auth.passphrase_env {
@@ -724,7 +711,9 @@ fn start_master_password(
         }
     }
 
-    // Path B: interactive prompt with up to PASSWORD_MAX_ATTEMPTS retries.
+    // Path B: interactive prompt — N-attempt retry loop shared with
+    // the key-auth path so wrong-password and wrong-passphrase have
+    // identical UX.
     if !(auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin())) {
         return Err(anyhow!(
             "namespace '{namespace}' uses password auth but no \
@@ -736,60 +725,187 @@ fn start_master_password(
         ));
     }
 
+    run_interactive_master_with_retries(
+        namespace,
+        target,
+        ttl,
+        socket,
+        auth.save_to_keychain,
+        InteractiveAuthConfig::password(),
+    )
+}
+
+/// Configuration for [`run_interactive_master_with_retries`]: the
+/// per-flavor knobs (env-var name, prompt label, auth-mode result,
+/// ssh `-o` opts, success/failure hint text) that differ between the
+/// key-passphrase and password code paths. Everything else — the loop
+/// shape, attempt counter, eprintln warning format, env-var
+/// set/remove, askpass setup, secret zeroize, keychain save — is
+/// shared.
+struct InteractiveAuthConfig {
+    /// `PASSPHRASE_MAX_ATTEMPTS` for key auth, `PASSWORD_MAX_ATTEMPTS`
+    /// for password auth.
+    max_attempts: usize,
+    /// `ENV_INTERACTIVE_PASSPHRASE` for key auth,
+    /// `ENV_INTERACTIVE_PASSWORD` for password auth.
+    env_var: &'static str,
+    /// Inserted into the rpassword prompt:
+    /// `"Enter <prompt_label> (namespace 'arte', host ..., attempt 1/3): "`.
+    /// Key auth: `"passphrase for SSH key"`. Password auth: `"SSH password"`.
+    prompt_label: &'static str,
+    /// `"passphrase"` / `"password"` — singular noun used for the
+    /// `"empty <kind>; aborting"` error and the
+    /// `"warning: ssh <kind> attempt N/3 failed"` line.
+    kind: &'static str,
+    /// `"key passphrase"` / `"SSH password"` — passed to
+    /// [`save_credential_to_keychain`] so the operator notice on
+    /// successful save names the credential type clearly.
+    save_kind: &'static str,
+    /// `AuthMode::InteractivePrompt` / `AuthMode::InteractivePassword`
+    /// — populates the [`ConnectOutcome::auth_mode`] of the success
+    /// path so JSON callers and the SUMMARY trailer can branch.
+    auth_mode: AuthMode,
+    /// Empty `&[]` for key auth; [`PASSWORD_AUTH_SSH_OPTS`] for
+    /// password auth (forces `PreferredAuthentications=password`,
+    /// `PubkeyAuthentication=no`, `NumberOfPasswordPrompts=1`).
+    ssh_opts: &'static [&'static str],
+    /// Hook called once after a successful master start. None for
+    /// key auth; `Some(maybe_warn_password_auth)` for password auth
+    /// (one-time "password auth is less secure" warning).
+    on_success: Option<fn(&str)>,
+    /// Tail of the "all attempts exhausted" error message:
+    /// `"ssh <kind> auth for '<ns>' failed after N attempt(s); aborting. hint: <hint>"`.
+    final_hint: &'static str,
+}
+
+impl InteractiveAuthConfig {
+    fn key_passphrase() -> Self {
+        Self {
+            max_attempts: PASSPHRASE_MAX_ATTEMPTS,
+            env_var: ENV_INTERACTIVE_PASSPHRASE,
+            prompt_label: "passphrase for SSH key",
+            kind: "passphrase",
+            save_kind: "key passphrase",
+            auth_mode: AuthMode::InteractivePrompt,
+            ssh_opts: &[],
+            on_success: None,
+            final_hint: "verify the passphrase against the key directly \
+                         (e.g. `ssh-keygen -y -f <key_path>`), then retry. \
+                         see: inspect help ssh",
+        }
+    }
+
+    fn password() -> Self {
+        Self {
+            max_attempts: PASSWORD_MAX_ATTEMPTS,
+            env_var: ENV_INTERACTIVE_PASSWORD,
+            prompt_label: "SSH password",
+            kind: "password",
+            save_kind: "SSH password",
+            auth_mode: AuthMode::InteractivePassword,
+            ssh_opts: PASSWORD_AUTH_SSH_OPTS,
+            on_success: Some(maybe_warn_password_auth),
+            final_hint: "verify the password against the host directly, then retry. \
+                         see: inspect help ssh",
+        }
+    }
+}
+
+/// Smoke-caught (post-F13): the shared prompt-attempt-warn-retry loop
+/// for both interactive auth flavors. The key-auth path used to be a
+/// single-shot prompt — one wrong passphrase aborted the entire
+/// connect (and any F13 auto-reauth) with `auto-reauth for '<ns>'
+/// failed`, while password auth had three attempts. The two paths
+/// now share this helper so the trap class — "two interactive auth
+/// flavors with divergent retry UX" — cannot reappear.
+///
+/// Per-attempt:
+/// 1. `rpassword::prompt_password` reads the secret. Empty input
+///    aborts the loop immediately (operator gave up).
+/// 2. The secret is placed into the configured env var; the askpass
+///    helper points at the env var; ssh runs with
+///    `SSH_ASKPASS_REQUIRE=force` and resolves the passphrase /
+///    password through the helper.
+/// 3. The env var is removed, the secret optionally persisted to
+///    the OS keychain (`--save-passphrase`), and the local copy
+///    zeroized — regardless of success or failure.
+/// 4. On `Ok`, return [`ConnectOutcome`] with the configured
+///    [`AuthMode`]; the caller-supplied `on_success` hook fires
+///    (e.g. `maybe_warn_password_auth`).
+/// 5. On `Err`, emit `warning: ssh <kind> attempt N/M failed` to
+///    stderr and continue.
+///
+/// After all attempts exhausted, emit a final error chaining to
+/// `inspect help ssh` and the auth-flavor-specific recovery hint.
+fn run_interactive_master_with_retries(
+    namespace: &str,
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    save_to_keychain: bool,
+    config: InteractiveAuthConfig,
+) -> Result<ConnectOutcome> {
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 1..=PASSWORD_MAX_ATTEMPTS {
+    for attempt in 1..=config.max_attempts {
         let prompt = format!(
-            "Enter SSH password (namespace '{namespace}', host {host}, attempt {attempt}/{max}): ",
+            "Enter {label} (namespace '{namespace}', host {host}, attempt {attempt}/{max}): ",
+            label = config.prompt_label,
             host = target.host,
-            max = PASSWORD_MAX_ATTEMPTS,
+            max = config.max_attempts,
         );
         let mut secret = rpassword::prompt_password(&prompt)?;
         if secret.is_empty() {
             // Empty input is equivalent to giving up; do not consume an attempt slot.
             zeroize_string(&mut secret);
-            return Err(anyhow!("empty password; aborting. see: inspect help ssh"));
+            return Err(anyhow!(
+                "empty {kind}; aborting. see: inspect help ssh",
+                kind = config.kind
+            ));
         }
-        std::env::set_var(ENV_INTERACTIVE_PASSWORD, &secret);
-        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSWORD)?;
+        std::env::set_var(config.env_var, &secret);
+        let askpass = AskpassScript::new(config.env_var)?;
         let result = run_master_with_opts(
             target,
             ttl,
             socket,
             &askpass.env_vars(),
             /*batch=*/ false,
-            PASSWORD_AUTH_SSH_OPTS,
+            config.ssh_opts,
         );
-        std::env::remove_var(ENV_INTERACTIVE_PASSWORD);
-        // L2 (v0.1.3): save to keychain BEFORE wiping if requested
-        // AND the master came up. Mirrors the key-auth path.
-        if result.is_ok() && auth.save_to_keychain {
-            save_credential_to_keychain(namespace, &secret, "SSH password");
+        std::env::remove_var(config.env_var);
+        // L2 (v0.1.3): save BEFORE wiping if requested AND the master
+        // came up. Backend errors are warnings, not hard failures.
+        if result.is_ok() && save_to_keychain {
+            save_credential_to_keychain(namespace, &secret, config.save_kind);
         }
         zeroize_string(&mut secret);
         match result {
             Ok(()) => {
-                maybe_warn_password_auth(namespace);
+                if let Some(hook) = config.on_success {
+                    hook(namespace);
+                }
                 return Ok(ConnectOutcome {
-                    auth_mode: AuthMode::InteractivePassword,
+                    auth_mode: config.auth_mode,
                     socket: Some(socket.to_path_buf()),
                     ttl: ttl.to_string(),
                 });
             }
             Err(e) => {
                 eprintln!(
-                    "warning: ssh password attempt {attempt}/{max} failed",
-                    max = PASSWORD_MAX_ATTEMPTS
+                    "warning: ssh {kind} attempt {attempt}/{max} failed",
+                    kind = config.kind,
+                    max = config.max_attempts,
                 );
                 last_err = Some(e);
             }
         }
     }
-
     Err(anyhow!(
-        "ssh password auth for '{namespace}' failed after {n} attempt(s); \
-         aborting. hint: verify the password against the host directly, then retry. \
-         see: inspect help ssh\nlast error: {last}",
-        n = PASSWORD_MAX_ATTEMPTS,
+        "ssh {kind} auth for '{namespace}' failed after {n} attempt(s); \
+         aborting. hint: {hint}\nlast error: {last}",
+        kind = config.kind,
+        n = config.max_attempts,
+        hint = config.final_hint,
         last = last_err
             .as_ref()
             .map(|e| e.to_string())
@@ -949,5 +1065,92 @@ mod accept_new_tests {
             args.iter().any(|a| a == "BatchMode=yes"),
             "batch=true must still pass BatchMode=yes; args={args:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod interactive_retry_parity_tests {
+    //! Smoke-caught (post-F13): the key-auth interactive prompt was a
+    //! single-shot — one wrong passphrase aborted the whole connect
+    //! (and any F13 auto-reauth) with `auto-reauth for '<ns>' failed`,
+    //! while password auth had 3 retries. The two paths now share
+    //! [`run_interactive_master_with_retries`] so the cap, prompt
+    //! shape, and warning format cannot drift apart again. These
+    //! structural tests pin the parity contract — if anyone changes
+    //! one of the [`InteractiveAuthConfig`] constructors without
+    //! considering the other, these break.
+    use super::*;
+
+    #[test]
+    fn key_and_password_share_max_attempts() {
+        let key = InteractiveAuthConfig::key_passphrase();
+        let pw = InteractiveAuthConfig::password();
+        assert_eq!(
+            key.max_attempts, pw.max_attempts,
+            "key and password auth must use the same retry cap so a typo \
+             on F13 auto-reauth has the same UX as a typo on password auth"
+        );
+        // Pin the actual cap too — the help text + MANUAL + warnings
+        // all say "3 attempts"; if we ever raise it we want a
+        // deliberate cross-surface sweep, not a silent change.
+        assert_eq!(key.max_attempts, 3);
+    }
+
+    #[test]
+    fn key_and_password_use_distinct_env_vars_and_modes() {
+        let key = InteractiveAuthConfig::key_passphrase();
+        let pw = InteractiveAuthConfig::password();
+        // Distinct env vars so a key-auth retry can't ever pick up a
+        // stale password value (or vice-versa) from a previous attempt.
+        assert_ne!(key.env_var, pw.env_var);
+        // Distinct AuthMode discriminators so JSON consumers /
+        // SUMMARY trailers can branch on which flavor authenticated.
+        assert_ne!(key.auth_mode, pw.auth_mode);
+        assert_eq!(key.auth_mode, AuthMode::InteractivePrompt);
+        assert_eq!(pw.auth_mode, AuthMode::InteractivePassword);
+    }
+
+    #[test]
+    fn each_config_has_non_empty_user_facing_strings() {
+        // Defensive: empty `kind` would render as
+        // `warning: ssh  attempt 1/3 failed` (double space) or
+        // `empty ; aborting` — caught here, not in the field.
+        for c in [
+            InteractiveAuthConfig::key_passphrase(),
+            InteractiveAuthConfig::password(),
+        ] {
+            assert!(!c.prompt_label.is_empty());
+            assert!(!c.kind.is_empty());
+            assert!(!c.save_kind.is_empty());
+            assert!(!c.final_hint.is_empty());
+            // Every final-hint must chain to `inspect help ssh` per
+            // CLAUDE.md "Error messages chain to recovery."
+            assert!(
+                c.final_hint.contains("inspect help ssh"),
+                "final_hint for {kind:?} must chain to `inspect help ssh`",
+                kind = c.kind
+            );
+        }
+    }
+
+    #[test]
+    fn password_config_carries_password_auth_ssh_opts() {
+        // Without these opts a wrong-password retry would silently
+        // fall through to key auth (PubkeyAuthentication=yes default)
+        // and burn the operator's PASSWORD_MAX_ATTEMPTS budget on a
+        // key path they never asked for.
+        let pw = InteractiveAuthConfig::password();
+        assert!(pw.ssh_opts.contains(&"PreferredAuthentications=password"));
+        assert!(pw.ssh_opts.contains(&"PubkeyAuthentication=no"));
+        assert!(pw.ssh_opts.contains(&"NumberOfPasswordPrompts=1"));
+    }
+
+    #[test]
+    fn key_config_does_not_force_password_auth_opts() {
+        // Symmetric guard: a key-auth retry must NOT pass
+        // password-auth ssh opts or it would defeat key-based auth
+        // entirely on the retry path.
+        let key = InteractiveAuthConfig::key_passphrase();
+        assert!(key.ssh_opts.is_empty());
     }
 }

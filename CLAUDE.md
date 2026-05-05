@@ -411,6 +411,28 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   can run any read/write/lifecycle verb without the user's
   passphrase env var present in the spawn.
 
+- **Key-auth and password-auth interactive prompts share the same
+  retry loop.** Both flavors go through
+  `run_interactive_master_with_retries` in `src/ssh/master.rs`, which
+  enforces the same cap (3 attempts), prompt format
+  (`Enter <label> (namespace 'arte', host ..., attempt N/3):`),
+  per-miss warning (`warning: ssh <kind> attempt N/3 failed`), and
+  final chained-hint shape. Pre-fix, key auth was a single-shot — one
+  wrong passphrase on F13 auto-reauth aborted the whole verb with
+  `auto-reauth for '<ns>' failed` while password auth had three
+  retries. The two paths now share `InteractiveAuthConfig` so the
+  trap class — "two interactive auth flavors with divergent retry
+  UX" — cannot reappear. The
+  `interactive_retry_parity_tests` module pins
+  `max_attempts == 3` on both flavors, distinct env-var names + auth
+  modes, non-empty user-facing strings, `inspect help ssh` in every
+  final hint, and the password-only `PASSWORD_AUTH_SSH_OPTS`
+  (`PreferredAuthentications=password`, `PubkeyAuthentication=no`,
+  `NumberOfPasswordPrompts=1`) staying off the key-auth path. New
+  interactive-auth flavors (e.g. PIN-auth, FIDO2 PIN, second-factor
+  prompts) MUST go through the same helper or these tests break —
+  intentionally — to force a sweep across both flavors.
+
 - **Every ssh-spawn site sets `StrictHostKeyChecking=accept-new`.**
   inspect's askpass is a passphrase helper — it returns the value
   of an env var, blindly. OpenSSH's default

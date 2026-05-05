@@ -155,6 +155,76 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **F13 auto-reauth aborted on a single wrong passphrase keystroke;
+  password-auth had three retries — key-auth had zero.** Surfaced
+  immediately after fixing the first-connect host-key trap, when
+  the operator typed a deliberately wrong passphrase on the F13
+  auto-reauth prompt and got `auto-reauth for 'arte' failed:
+  reauth 'arte'` after one ssh-side `Permission denied (publickey)`
+  — exit non-zero, verb aborted, operator forced to rerun. The
+  password-auth path (`start_master_password`, lines 707-754
+  pre-refactor) had a 3-attempt loop with attempt counter and
+  per-miss warning. The key-auth path (`start_master`, line 416-453
+  pre-refactor) had a single-shot prompt + propagation. F13
+  auto-reauth (`reauth_namespace`) calls `start_master`, so it
+  inherited the no-retry behavior — the F13 auto-reauth UX gap
+  was strictly worse than the password-auth UX gap, which is the
+  inverse of what an operator would expect for the recovery flow.
+
+  **Fix.** Both interactive flavors now share
+  `run_interactive_master_with_retries` in `src/ssh/master.rs`,
+  parameterized by `InteractiveAuthConfig::key_passphrase()` /
+  `::password()`. The shared helper enforces:
+
+    - Same cap (`PASSPHRASE_MAX_ATTEMPTS = PASSWORD_MAX_ATTEMPTS = 3`).
+    - Same prompt shape: `Enter <label> (namespace '<ns>',
+      host <h>, attempt N/3):`.
+    - Same per-miss warning: `warning: ssh <kind> attempt N/3
+      failed` to stderr; loop continues.
+    - Same final error on exhaustion: `ssh <kind> auth for '<ns>'
+      failed after 3 attempt(s); aborting. hint: <flavor-specific>
+      see: inspect help ssh\nlast error: <ssh stderr>`.
+    - Empty input on any prompt aborts immediately without
+      consuming an attempt slot (matches the pre-existing
+      password-path behavior).
+    - Same env-var lifecycle (`set_var` before askpass, `remove_var`
+      after run, zeroize the local copy) and same keychain-save
+      timing (`if result.is_ok() && save_to_keychain`, BEFORE
+      zeroize) on both flavors.
+
+  Per-flavor knobs that differ legitimately (env-var name —
+  `INSPECT_INTERACTIVE_PASSPHRASE` vs `INSPECT_INTERACTIVE_PASSWORD`;
+  ssh `-o` opts — `[]` vs `PASSWORD_AUTH_SSH_OPTS`; success hook —
+  `None` vs `Some(maybe_warn_password_auth)`; chained recovery hint
+  — `ssh-keygen -y -f <key_path>` vs "verify the password against
+  the host directly") live in the `InteractiveAuthConfig`
+  constructor for that flavor and nowhere else, so a future drift
+  attempt has to physically edit one of the constructors.
+
+  - 5 unit tests in `ssh::master::interactive_retry_parity_tests`
+    pin the contract: `max_attempts` parity (and the literal
+    `== 3`), distinct env-var names + auth modes, non-empty
+    user-facing strings on every config, `inspect help ssh` in
+    every final hint, and the password-only
+    `PASSWORD_AUTH_SSH_OPTS` staying off the key path. New
+    interactive-auth flavors (e.g. FIDO2 PIN, hardware-token PIN)
+    MUST go through the same helper or these break.
+  - `src/help/content/ssh.md` CREDENTIAL RESOLUTION reflows so
+    both flavors document the retry contract and reference the
+    `ssh-keygen -y -f` recovery; an "Empty input on any prompt
+    aborts immediately" note is added so an agent reading the
+    topic before driving the verb knows the keystroke contract.
+  - `CLAUDE.md` `### SSH ControlMaster reuse` gains a new
+    field-validated invariant capturing the parity contract +
+    the test module that pins it.
+
+  Field-validated end-to-end against arte (encrypted ed25519,
+  fresh shell): three attempts on `inspect connect`, three
+  attempts on F13 auto-reauth via `inspect run`, recovery
+  succeeds on attempt 2/3 or 3/3, exhaustion shows the
+  `ssh-keygen -y -f` chain. All 28 test suites + 5 new tests
+  green.
+
 - **🔴 First-connect to an unknown host hung in a tight askpass
   loop (CRITICAL).** Surfaced live during release-smoke when
   arte's entry was wiped from `~/.ssh/known_hosts` after a
