@@ -155,6 +155,122 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **🔴 First-connect to an unknown host hung in a tight askpass
+  loop (CRITICAL).** Surfaced live during release-smoke when
+  arte's entry was wiped from `~/.ssh/known_hosts` after a
+  codespace restart. `target/release/inspect connect arte`
+  prompted for the passphrase, the operator typed it, and then
+  ssh hung silently. Verbose ssh (`-vvv`) showed
+  `read_passphrase: requested to askpass` repeating 41+ times
+  before the operator ^C'd. Diagnostic askpass (env-gated dump
+  of what the askpass child sees) revealed the root cause: ssh
+  was invoking askpass to answer the host-key confirmation
+  prompt
+  (`Are you sure you want to continue connecting (yes/no/
+  [fingerprint])?`) — but inspect's askpass is a *passphrase*
+  helper that returns the value of an env var, so it returned
+  the passphrase string. ssh rejected that as "neither yes/no/
+  fingerprint", reprompted with `Please type 'yes', 'no' or
+  the fingerprint:`, askpass returned the same value, ssh
+  reprompted — infinite loop. This had been masked through all
+  of v0.1.3 because every smoke run had arte already in
+  known_hosts; F13 yesterday "worked" only because the host
+  was already trusted.
+  Yesterday's F13 auto-reauth path on stale ControlMaster
+  inherits the same trap (a fresh shell after a codespace
+  restart often loses BOTH the master AND the known_hosts
+  entry), so this regressed the entire reauth flow for any
+  first-time / re-provisioned host.
+
+  **Fix.** Every ssh-spawn site now sets
+  `-o StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6):
+  unknown hosts are auto-added to `known_hosts` on first
+  connect (operator sees a single
+  `Warning: Permanently added '<host>' (ED25519) to the list
+  of known hosts.` line on stderr), but a *changed* key still
+  aborts with `Host key verification failed.` — caught by
+  `ssh_precheck::classify` and routed to the existing
+  `host_key_changed_hint` MITM warning.
+
+  - `src/ssh/master.rs::build_master_command` (extracted from
+    `run_master_with_opts` for testability) now appends
+    `-o StrictHostKeyChecking=accept-new` to every master
+    start. Both the BatchMode probe (step 3 of the auth
+    ladder) and the interactive-prompt path inherit the flag.
+  - `src/discovery/ssh_precheck.rs::build_precheck_command`
+    (extracted from `run` for testability) does the same. The
+    BatchMode-yes precheck against an unknown host previously
+    misclassified as `HostKeyChanged` (the MITM warning
+    surface) on first connect; under accept-new it succeeds
+    silently, which matches the contract that "first-connect
+    is normal, key-change is the security-sensitive event."
+  - Dispatch sites (`run_remote`, `run_remote_streaming`,
+    `run_remote_streaming_capturing`) ride the already-
+    verified ControlMaster channel, so they inherit the
+    trust decision and need no change.
+  - `src/help/content/ssh.md` gains a `FIRST-CONNECT HOST KEY`
+    section explaining the askpass-loop trap and the
+    accept-new fix; the SECURITY section's "No auto-trust of
+    unknown host keys" line was removed (it's no longer
+    accurate; the security model is now "auto-trust on first,
+    refuse on change", documented inline).
+  - `docs/MANUAL.md` §3.3 gains a "First-time connect to an
+    unknown host" subsection mirroring the help-topic prose.
+  - 3 regression tests
+    (`ssh::master::accept_new_tests::build_master_command_includes_accept_new`,
+    `ssh::master::accept_new_tests::build_master_command_batch_probe_includes_accept_new`,
+    `discovery::ssh_precheck::tests::precheck_command_includes_accept_new`)
+    pin the flag presence at the command-builder layer so the
+    trap can't silently regress.
+
+  Field-validated end-to-end against arte (OVH, encrypted
+  ed25519, fresh shell with no known_hosts entry) running
+  `target/release/inspect connect arte` →
+  `inspect disconnect arte` → reconnect → `pkill -9 -f
+  ControlPath=...arte.sock` (to simulate codespace restart
+  stale-master) → `inspect run arte 'echo reauth-works'`
+  triggering F13 auto-reauth → all five steps PASS.
+  CLAUDE.md `### SSH ControlMaster reuse` updated with the
+  new field-validated invariant so future ssh-spawn sites
+  must include the flag.
+
+- **`inspect add --non-interactive`: documented `INSPECT_<NS>_HOST=...`
+  env-var form was fictional.** MANUAL.md §3.2 advertised a headless-
+  setup recipe (`INSPECT_ARTE_HOST=... INSPECT_ARTE_USER=... inspect
+  add arte --non-interactive`), but `src/commands/add.rs` only
+  consults CLI flags — the env vars were never read. An agent
+  following the manual got `missing required value for 'host' in
+  non-interactive mode` with no hint that the env-var form was a
+  doc claim, not an implementation. Caught live as the very first
+  command of the smoke session that exercised the new
+  LLM-trap-fix-on-first-surface policy. Sweep landed in one commit
+  per the policy (extinguish the class, not the instance):
+    - `docs/MANUAL.md` §3.2 rewritten to show the working
+      `--host` / `--user` / `--key-path` / `--port` /
+      `--key-passphrase-env` flag form with a real-shaped example.
+    - `LONG_ADD` in `src/cli.rs` rewritten to enumerate the
+      required-flag set under `--non-interactive` and explicitly
+      disclaim the env-var form ("There is NO env-var form
+      (`INSPECT_<NS>_HOST=...` is not consulted)") so an agent
+      reading `inspect add --help` cannot fall into the same trap.
+    - `AddArgs.long_about` (the inline duplicate of the same prose
+      that had drifted from `LONG_ADD`) replaced with
+      `long_about = LONG_ADD` so there's a single source of truth.
+    - The error message itself now chains to recovery:
+      `missing required value for 'host' in non-interactive mode\n
+       hint: pass `--host <value>` on the command line (env vars
+       like INSPECT_<NS>_HOST are not consulted)` so an operator
+       hitting the failure gets the fix in the same line. The
+       `_` in field names like `key_path` is converted to `-` to
+       match the actual flag name (`--key-path`).
+    - 3 regression tests in `tests/phase_f_v013.rs::smoke_add_*`
+      pinning all three layers: success path with required flags,
+      failure-with-hint shape, and `--help` output disclaiming
+      the env-var form.
+    - Help-search index cap raised 128 → 144 KB to fit the new
+      LONG_ADD prose (per CLAUDE.md "raise the cap, do not trim
+      docs"; cap-raise log in `src/help/search.rs`).
+
 - **🔴 SIGPIPE panic on `inspect <verb> | head -N` (CRITICAL).**
   Surfaced live during the v0.1.3 release smoke when
   `inspect compose logs arte/luminary-atlas --tail 50 --match

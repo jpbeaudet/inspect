@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn index_size_under_128kb() {
+    fn index_size_under_144kb() {
         // Cap raise history (only ever raised, never trimmed):
         //   50 KB → 64 KB in v0.1.2 (bundle + watch topic prose)
         //   64 KB → 80 KB in v0.1.3 (L7 redaction model)
@@ -232,10 +232,18 @@ mod tests {
         //                              discovery.md, L10 drift
         //                              port_changes contract +
         //                              JSON envelope example)
+        //  128 KB → 144 KB in v0.1.3 release-smoke (LONG_ADD prose
+        //                              expanded to disclaim the
+        //                              fictional INSPECT_<NS>_HOST
+        //                              env-var form after the
+        //                              MANUAL.md §3.2 LLM-trap
+        //                              surfaced live; per CLAUDE.md
+        //                              "Help-surface discipline" the
+        //                              cap is raised, not trimmed)
         // Still small enough that the index loads instantly even on
         // the smallest dev VMs.
         let n = index_byte_size();
-        assert!(n <= 128 * 1024, "index is {n} bytes, exceeds 128 KB cap");
+        assert!(n <= 144 * 1024, "index is {n} bytes, exceeds 144 KB cap");
     }
 
     #[test]

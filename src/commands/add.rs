@@ -99,8 +99,19 @@ fn collect_value(
         if optional {
             return Ok(None);
         }
+        // Chain to recovery: tell the operator the exact flag to pass.
+        // The `label` carries any parenthetical context, so for the
+        // optional-only `key_passphrase_env (optional, env var name)`
+        // we strip the parenthetical to keep the flag suggestion tight.
+        let flag = label
+            .split_whitespace()
+            .next()
+            .unwrap_or(label)
+            .replace('_', "-");
         return Err(anyhow!(
-            "missing required value for '{label}' in non-interactive mode"
+            "missing required value for '{label}' in non-interactive mode\n\
+             hint: pass `--{flag} <value>` on the command line \
+             (env vars like INSPECT_<NS>_HOST are not consulted)"
         ));
     }
     prompt_string(label, optional)

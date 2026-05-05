@@ -85,12 +85,21 @@ const SEE_ALSO_COMPOSE: &str =
 
 const LONG_ADD: &str = "\
 Register or update a namespace's SSH credentials. Idempotent: running \
-`add` again with new flags rewrites the entry.
+`add` again with new flags rewrites the entry (pass `--force` to \
+overwrite an existing entry without re-prompting).
+
+`--non-interactive` requires every value to be supplied on the \
+command line — `--host`, `--user`, `--key-path` are the minimum; \
+`--port` defaults to 22; `--key-passphrase-env` is optional. The \
+verb errors with `missing required value for '<field>'` instead of \
+prompting when a required field is absent. There is NO env-var \
+form (`INSPECT_<NS>_HOST=...` is not consulted); pass values as \
+flags.
 
 EXAMPLES
   $ inspect add arte
   $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod
-  $ inspect add staging --non-interactive --force";
+  $ inspect add staging --non-interactive --host s.example --user ops --key-path ~/.ssh/s --force";
 
 const LONG_LIST: &str = "\
 Print every configured namespace with its host, user, and last-known \
@@ -1408,12 +1417,7 @@ pub struct HelpArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    long_about = "Register or update a namespace's SSH credentials. Idempotent: \
-running `add` again with new flags rewrites the entry.\n\n\
-EXAMPLES\n  \
-  $ inspect add arte\n  \
-  $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod\n  \
-  $ inspect add staging --non-interactive --force",
+    long_about = LONG_ADD,
     after_help = SEE_ALSO_DISCOVER,
 )]
 pub struct AddArgs {

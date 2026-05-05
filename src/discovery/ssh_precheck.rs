@@ -50,12 +50,16 @@ pub enum PrecheckOutcome {
 /// `PrecheckOutcome::Ok`. The semantics are identical (ssh would
 /// have succeeded over the master anyway) and avoid the spurious
 /// re-auth attempt.
-pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
-    let socket = socket_path(namespace);
-    if matches!(check_socket(&socket, target), MasterStatus::Alive) {
-        return PrecheckOutcome::Ok;
-    }
-
+/// Build the precheck `ssh BatchMode=yes ... true` command without
+/// spawning it. Extracted so unit tests can assert on the argument
+/// list — notably that `StrictHostKeyChecking=accept-new` is present
+/// so the precheck does not misclassify a *first*-time connect to an
+/// unknown host as `HostKeyChanged` (which surfaces an MITM warning
+/// in [`host_key_changed_hint`]). Under accept-new the unknown host
+/// is auto-added to `~/.ssh/known_hosts`; subsequent runs with a
+/// *changed* key still fail with `Host key verification failed.`,
+/// which the classifier catches.
+fn build_precheck_command(target: &SshTarget) -> Command {
     let connect_timeout = std::env::var("INSPECT_SSH_CONNECT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -65,6 +69,7 @@ pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
     cmd.arg("-o").arg("BatchMode=yes");
     cmd.arg("-o")
         .arg(format!("ConnectTimeout={connect_timeout}"));
+    cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
     cmd.args(target.base_args());
     // Honor operator-supplied raw ssh args (ProxyJump, UserKnownHostsFile,
     // ...). Same env var the master/exec layers use.
@@ -75,6 +80,16 @@ pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
     }
     cmd.arg(&target.host);
     cmd.arg("true");
+    cmd
+}
+
+pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
+    let socket = socket_path(namespace);
+    if matches!(check_socket(&socket, target), MasterStatus::Alive) {
+        return PrecheckOutcome::Ok;
+    }
+
+    let mut cmd = build_precheck_command(target);
 
     // Inherit stdin from null implicitly; capture stdout/stderr.
     let output = match cmd.output() {
@@ -304,5 +319,33 @@ mod tests {
         fn _shape_check(ns: &str, t: &SshTarget) -> PrecheckOutcome {
             run(ns, t)
         }
+    }
+
+    /// Smoke-caught regression (paired with
+    /// `master::accept_new_tests::*`): the precheck must also pass
+    /// `StrictHostKeyChecking=accept-new` so a first-time connect to
+    /// an unknown host is not misclassified as `HostKeyChanged`
+    /// (which surfaces the MITM warning in
+    /// [`host_key_changed_hint`]). Under accept-new the unknown host
+    /// is auto-added to known_hosts; subsequent runs against a
+    /// *changed* key still fail with `Host key verification failed.`,
+    /// which the classifier catches.
+    #[test]
+    fn precheck_command_includes_accept_new() {
+        let cmd = build_precheck_command(&t());
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "precheck must include StrictHostKeyChecking=accept-new so \
+             first-connect to an unknown host does not misroute through \
+             HostKeyChanged; args={args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "BatchMode=yes"),
+            "precheck must still keep BatchMode=yes; args={args:?}"
+        );
     }
 }

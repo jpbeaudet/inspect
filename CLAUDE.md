@@ -411,6 +411,30 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   can run any read/write/lifecycle verb without the user's
   passphrase env var present in the spawn.
 
+- **Every ssh-spawn site sets `StrictHostKeyChecking=accept-new`.**
+  inspect's askpass is a passphrase helper — it returns the value
+  of an env var, blindly. OpenSSH's default
+  `StrictHostKeyChecking=ask`, combined with our
+  `SSH_ASKPASS_REQUIRE=force`, routes the host-key
+  confirmation prompt (`Are you sure you want to continue
+  connecting (yes/no/[fingerprint])?`) through askpass on every
+  first-connect — askpass returns the passphrase value, ssh
+  rejects it as "neither yes/no/fingerprint", reprompts, and
+  burns turns in a tight loop until the operator ^C's. The fix
+  is one `-o StrictHostKeyChecking=accept-new` per ssh-spawn
+  site (`build_master_command` and `build_precheck_command`
+  both have it; the dispatch path runs through the master
+  socket so it inherits the already-verified channel). The
+  *changed*-key case still aborts with `Host key verification
+  failed.`, which `ssh_precheck::classify` catches as
+  `HostKeyChanged` and routes to `host_key_changed_hint`. New
+  ssh-spawn sites (verbs that build a Command for `ssh` directly
+  rather than dispatching through the master socket) MUST also
+  ride `accept-new` or they re-introduce the trap. The two
+  unit tests in `master::accept_new_tests` and
+  `ssh_precheck::tests::precheck_command_includes_accept_new`
+  pin the contract.
+
 ### Smoke-runbook + recipe traps
 
 - **Set `SMOKE_CTR` explicitly in every terminal session.** It does
@@ -443,3 +467,78 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   search index over the cap in `src/help/search.rs`, **raise the
   cap, don't trim docs.** Precedent: 50→64 KB (v0.1.2), 64→80 KB
   (v0.1.3).
+
+### LLM-trap fix-on-first-surface (mandatory)
+
+When help text, runbook prose, or an error message confuses the
+agent **even once** during smoke or normal driving, fix it
+immediately — same turn, same commit. The threshold is **one
+confused turn**, not N. Agents are supposed to drop into this tool
+cold from `--help` and the runbook; if a single re-read was needed
+to understand a contract, that's a bug in the surface, not a
+"you'll learn it" note for the next session.
+
+Two non-negotiable parts:
+
+1. **Fix on first surface.** Do not "make a note to fix later." Do
+   not bundle traps into a separate cleanup commit. The fix lands
+   in the same commit that closes the smoke turn the trap caught,
+   *or* as its own commit before continuing the smoke. Continuing
+   past an unfixed trap is forbidden.
+
+2. **Sweep the same pattern across the codebase.** If the trap is
+   "`audit ls --json` emits a bare array but the help string
+   implied an envelope," the fix is **not** just `audit ls`'s help
+   — it's a search for every other verb whose help has the same
+   ambiguity (`audit show`, `audit grep`, etc.) and a fix to all
+   of them in the same commit. The same applies to runbook
+   recipes, error messages, and clap doc-comments. The trap is a
+   symptom of a class of confusion; the class gets the fix, not
+   just the instance. Even items not in the currently-tagged
+   backlog are in scope — if a v0.1.2-era help string has the
+   same trap shape, it gets swept too.
+
+Field-validated examples already in the tree:
+
+- `34ae25d` standardized **five** audit verbs on the L7 envelope
+  in one commit after `audit ls` was the first to surface the
+  trap. Fix didn't stop at `ls`; it swept `show` / `grep` / `gc` /
+  `verify` simultaneously.
+- `8aeda74` rewrote both `LONG_GREP` and `LONG_FIND` after the
+  agent hit the `--path`/`--name` muscle-memory trap on `find` —
+  the same trap was latent on `grep`'s help, so both surfaces
+  got the defensive section in one commit.
+- `29358d8` attached the new `.data.entry` path documentation to
+  `audit show`'s clap doc the moment a single `{id_prefix}`-leak
+  smoke turn caught the error template — fixed both the template
+  and the discoverability gap together.
+
+When a fix would touch >5 surfaces, *still* do them all in one
+commit; don't split. The point is to extinguish the trap class
+in one breath, not to amortize it.
+
+### Smoke-test scope discipline
+
+When driving the release smoke (`docs/SMOKE_v0.1.3.md` and
+successors), every command must come from the runbook. **No
+free-hand exploration until every phase has passed cleanly.**
+
+Reasons:
+
+- The runbook's coverage is the gate; an agent that wanders off
+  to "just check X" introduces unscored cycles and loses the
+  systematic-coverage signal.
+- Side-trips against a real production host carry blast radius
+  the runbook is specifically designed to scope. The smoke's
+  "all writes label `inspect-smoke=*`" / "all paths under
+  `/tmp/inspect-smoke-*`" / "P7 cleanup is idempotent and
+  comprehensive" invariants only hold if commands stay
+  on-script.
+- Finding a class of bugs nobody designed a phase for is a
+  legitimate v0.1.5 input, not a v0.1.3 release-gate input.
+
+After a clean P1→P7 PASS, the agent **may** do exploratory free
+runs to surface new traps that didn't fire on the runbook
+recipes. Those become P8+ candidates for the v0.1.4 / v0.1.5
+smoke iteration. Until the in-scope phases are green, the
+smoke is the only acceptable workload against the host.

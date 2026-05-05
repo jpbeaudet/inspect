@@ -109,16 +109,27 @@ inspect add arte
 ```
 
 This is interactive. It walks you through host, user, key path, and
-optional Docker socket location, and writes the result to your local
-config. You can also pre-set everything via environment variables —
-useful for headless setups:
+(optionally) the env-var name that holds your key passphrase, and
+writes the result to `~/.inspect/servers.toml` (mode `0600`).
+
+For headless setups, pass every value on the command line and add
+`--non-interactive` so the verb errors instead of prompting on a
+missing field:
 
 ```sh
-INSPECT_ARTE_HOST=arte.example.com \
-INSPECT_ARTE_USER=ops \
-INSPECT_ARTE_KEY_PATH=~/.ssh/id_ed25519 \
-inspect add arte --non-interactive
+inspect add arte --non-interactive \
+  --host arte.example.com \
+  --user ops \
+  --key-path ~/.ssh/id_ed25519 \
+  --port 22 \
+  --key-passphrase-env ARTE_KEY_PASS
 ```
+
+`--key-passphrase-env` is optional; without it, `inspect connect`
+will prompt for the passphrase via `SSH_ASKPASS` the first time the
+master comes up. Re-running `inspect add <ns>` against an existing
+namespace requires `--force` (it idempotently overwrites the entry
+in `servers.toml`).
 
 ### 3.3 Open a persistent session
 
@@ -130,6 +141,20 @@ This unlocks the SSH agent / key once and keeps a `ControlMaster`
 socket open for the rest of the shell, so subsequent `inspect`
 invocations do not prompt for a passphrase. See §15 for the full
 SSH lifecycle.
+
+**First-time connect to an unknown host.** `inspect` runs every
+ssh master invocation under `StrictHostKeyChecking=accept-new`,
+so the first connect to a host not yet in `~/.ssh/known_hosts`
+auto-adds the server's public host key (you'll see a one-line
+`Warning: Permanently added '<host>' (ED25519) to the list of
+known hosts.` on stderr) and proceeds straight to the passphrase
+prompt. Subsequent connects with a *changed* key still fail with
+`Host key verification failed.` — that case is treated as a
+security-sensitive event (see `inspect help ssh` → SECURITY) and
+chains to a `ssh-keygen -R <host>` recovery hint. To verify a
+fingerprint out-of-band before first connect, run
+`ssh-keyscan <host>` and compare against the operator's
+published fingerprint, then add it to `known_hosts` manually.
 
 ### 3.4 Discover the topology
 

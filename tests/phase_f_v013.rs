@@ -9596,3 +9596,76 @@ fn smoke_sigpipe_no_panic_on_early_pipe_close() {
         "stderr contains a panic backtrace. stderr={stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Smoke regression — `inspect add --non-interactive` LLM-trap fix
+// (Caught live during the v0.1.3 release smoke against arte: an agent
+// followed MANUAL.md §3.2's documented `INSPECT_<NS>_HOST=...` env-var
+// recipe and got "missing required value for 'host' in non-interactive
+// mode" because the verb only consults flags, not env vars. Fix swept
+// MANUAL.md, LONG_ADD, AddArgs's inline long_about, and the error
+// message itself; this test pins the documented contract: with the
+// three required flags supplied, the verb succeeds; without them, the
+// error spells out the exact flag to pass and explicitly disclaims
+// the env-var form so the same trap can't repeat.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_add_non_interactive_succeeds_with_required_flags() {
+    let sb = Sandbox::new(json!([]));
+    sb.cmd()
+        .args([
+            "add",
+            "arte",
+            "--non-interactive",
+            "--host",
+            "arte.example.invalid",
+            "--user",
+            "ops",
+            "--key-path",
+            "/tmp/nonexistent_key_for_test",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("namespace 'arte'").and(contains("added")));
+}
+
+#[test]
+fn smoke_add_non_interactive_missing_host_emits_flag_hint() {
+    let sb = Sandbox::new(json!([]));
+    sb.cmd()
+        .args([
+            "add",
+            "arte",
+            "--non-interactive",
+            "--user",
+            "ops",
+            "--key-path",
+            "/tmp/key",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            contains("missing required value for 'host'")
+                .and(contains("hint: pass `--host <value>`"))
+                .and(contains(
+                    "env vars like INSPECT_<NS>_HOST are not consulted",
+                )),
+        );
+}
+
+#[test]
+fn smoke_add_help_documents_no_env_var_form() {
+    let sb = Sandbox::new(json!([]));
+    let assert = sb.cmd().args(["add", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("There is NO env-var") || stdout.contains("not consulted"),
+        "`inspect add --help` must explicitly disclaim the env-var form so the \
+         MANUAL.md §3.2 trap can't repeat. stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("--host") && stdout.contains("--user") && stdout.contains("--key-path"),
+        "`inspect add --help` must show the working flag form. stdout was: {stdout}"
+    );
+}

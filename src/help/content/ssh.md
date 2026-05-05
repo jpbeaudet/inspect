@@ -62,6 +62,31 @@ CONTROL SOCKETS
   Stale sockets are auto-detected and cleaned up on the next
   command.
 
+FIRST-CONNECT HOST KEY (v0.1.3)
+  Every inspect ssh invocation runs under
+  `StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6). On first
+  connect to a host not yet in `~/.ssh/known_hosts`, ssh
+  auto-adds the server's public key and proceeds to the
+  passphrase / password prompt. You'll see a single
+  `Warning: Permanently added '<host>' (ED25519) to the list of
+  known hosts.` line on stderr.
+
+  Without accept-new, OpenSSH defaults to
+  `StrictHostKeyChecking=ask`, which under the askpass-only
+  passphrase pipeline (`SSH_ASKPASS_REQUIRE=force`) routes the
+  host-key confirmation prompt through inspect's askpass helper
+  — but the helper returns the passphrase value as the answer,
+  ssh sees neither `yes`/`no`/<fingerprint>, and reprompts in
+  a tight infinite loop.
+
+  Subsequent connects with a *changed* host key still fail with
+  `Host key verification failed.` — see SECURITY below for
+  what to do (verify out-of-band, then `ssh-keygen -R <host>`).
+  To verify a fingerprint out-of-band before first connect, run
+  `ssh-keyscan <host>` and compare against the operator's
+  published fingerprint, then add the key to `known_hosts`
+  manually before `inspect connect`.
+
 PASSWORD AUTH (L4, v0.1.3)
   Operator path on a legacy or locked-down host that does not
   accept keys:
@@ -149,8 +174,12 @@ SECURITY
   Passwords and passphrases are never written to inspect's own
   files; the only persistent path is the OS keychain (option 2
   above), and only when explicitly opted into. Keys are never
-  inlined on disk (env only). No auto-trust of unknown host
-  keys. Socket mode 600. Sockets are never shared across users.
+  inlined on disk (env only). Unknown host keys are auto-added
+  to `~/.ssh/known_hosts` on first connect (see FIRST-CONNECT
+  HOST KEY above for the full rationale), but a *changed* key
+  still aborts the connect with `Host key verification failed.`
+  — verify out-of-band before running `ssh-keygen -R <host>`.
+  Socket mode 600. Sockets are never shared across users.
   Password auth uses the same SSH_ASKPASS pipeline as passphrase
   delivery — the secret stays in process memory and is wiped
   immediately after the ssh master starts.

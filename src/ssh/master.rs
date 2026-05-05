@@ -479,18 +479,32 @@ fn run_master(
     run_master_with_opts(target, ttl, socket, extra_env, batch, &[])
 }
 
-/// L4 (v0.1.3): like `run_master` but with caller-supplied ssh `-o`
-/// options appended (e.g. `PreferredAuthentications=password` for
-/// the password-auth branch). Each entry is a single `KEY=VALUE`
-/// string, applied as `-o KEY=VALUE`.
-fn run_master_with_opts(
+/// Build the `ssh -fN` master-start command without spawning it.
+/// Extracted from [`run_master_with_opts`] so unit tests can assert on
+/// the argument list (notably the `StrictHostKeyChecking=accept-new`
+/// flag that prevents the first-connect-to-unknown-host askpass loop —
+/// see the field-validated invariants in `CLAUDE.md`).
+///
+/// `StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6) auto-adds an
+/// unknown host's key to `~/.ssh/known_hosts` on first connect. If the
+/// host's key later changes, ssh refuses to connect with
+/// `Host key verification failed.`, which `ssh_precheck::classify`
+/// catches and surfaces as a security-sensitive HostKeyChanged error.
+/// Without this flag, OpenSSH defaults to `StrictHostKeyChecking=ask`,
+/// which under `SSH_ASKPASS_REQUIRE=force` invokes our askpass for the
+/// host-key confirmation prompt — but the askpass returns the
+/// passphrase value (it's a passphrase helper, not a yes/no helper),
+/// so ssh sees garbage, reprompts, and we burn turns in a tight loop
+/// until the operator ^C's. (Smoke-caught: arte's known_hosts entry
+/// was wiped on codespace restart, F13's auto-reauth path hung 41+
+/// askpass invocations into the host-key prompt loop.)
+fn build_master_command(
     target: &SshTarget,
     ttl: &str,
     socket: &Path,
-    extra_env: &[(OsString, OsString)],
     batch: bool,
     extra_ssh_opts: &[&str],
-) -> Result<()> {
+) -> Command {
     let mut cmd = Command::new(SSH_BIN);
     cmd.arg("-fN") // background master, no remote command
         .arg("-o")
@@ -504,7 +518,9 @@ fn run_master_with_opts(
         .arg("-o")
         .arg("ServerAliveCountMax=3")
         .arg("-o")
-        .arg(format!("ConnectTimeout={}", connect_timeout_secs()));
+        .arg(format!("ConnectTimeout={}", connect_timeout_secs()))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new");
     apply_extra_opts(&mut cmd);
     for opt in extra_ssh_opts {
         cmd.arg("-o").arg(opt);
@@ -513,6 +529,22 @@ fn run_master_with_opts(
         cmd.arg("-o").arg("BatchMode=yes");
     }
     cmd.args(target.base_args()).arg(&target.host);
+    cmd
+}
+
+/// L4 (v0.1.3): like `run_master` but with caller-supplied ssh `-o`
+/// options appended (e.g. `PreferredAuthentications=password` for
+/// the password-auth branch). Each entry is a single `KEY=VALUE`
+/// string, applied as `-o KEY=VALUE`.
+fn run_master_with_opts(
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    extra_env: &[(OsString, OsString)],
+    batch: bool,
+    extra_ssh_opts: &[&str],
+) -> Result<()> {
+    let mut cmd = build_master_command(target, ttl, socket, batch, extra_ssh_opts);
 
     cmd.stdin(Stdio::null());
     // Surface stderr so operators can see ssh's diagnostics directly
@@ -852,5 +884,70 @@ mod g5_tests {
         assert!(msg.contains("control socket path"), "msg={msg}");
         assert!(msg.contains("INSPECT_HOME"), "msg={msg}");
         assert!(msg.contains("inspect help ssh"), "msg={msg}");
+    }
+}
+
+#[cfg(test)]
+mod accept_new_tests {
+    use super::{build_master_command, SshTarget};
+    use std::path::PathBuf;
+
+    fn target() -> SshTarget {
+        SshTarget {
+            host: "example".into(),
+            user: "ops".into(),
+            port: 22,
+            key_path: Some(PathBuf::from("/tmp/k")),
+        }
+    }
+
+    fn args_as_strings(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Smoke-caught regression: a first-time connect to a host not in
+    /// `~/.ssh/known_hosts` hung in a tight askpass loop because
+    /// OpenSSH's default `StrictHostKeyChecking=ask` invoked our
+    /// passphrase-only askpass for the host-key confirmation prompt,
+    /// which returned the passphrase as the answer (neither
+    /// `yes`/`no`/`fingerprint`), and ssh reprompted forever.
+    /// `accept-new` makes ssh auto-add the unknown host's key to
+    /// known_hosts on first connect; HostKeyChanged still surfaces
+    /// for changed keys via the precheck classifier.
+    #[test]
+    fn build_master_command_includes_accept_new() {
+        let socket = PathBuf::from("/tmp/inspect-test.sock");
+        let cmd = build_master_command(&target(), "4h", &socket, false, &[]);
+        let args = args_as_strings(&cmd);
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "build_master_command must include StrictHostKeyChecking=accept-new \
+             so first-connect to an unknown host does not loop in askpass; \
+             args={args:?}"
+        );
+    }
+
+    /// The same flag must be present in the BatchMode probe (the
+    /// agent / passphrase-less attempt that runs before the
+    /// interactive prompt). Without it, the probe against an unknown
+    /// host fails with `Host key verification failed.` instead of
+    /// the agent-related auth error, which would wedge the auth
+    /// ladder before the prompt path could fire.
+    #[test]
+    fn build_master_command_batch_probe_includes_accept_new() {
+        let socket = PathBuf::from("/tmp/inspect-test.sock");
+        let cmd = build_master_command(&target(), "4h", &socket, true, &[]);
+        let args = args_as_strings(&cmd);
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "BatchMode probe must also accept-new so first-connect doesn't \
+             misroute through HostKeyChanged; args={args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "BatchMode=yes"),
+            "batch=true must still pass BatchMode=yes; args={args:?}"
+        );
     }
 }
