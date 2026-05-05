@@ -254,9 +254,22 @@ Prefer native Rust implementations over external crates. Only add a dependency w
 2. The crate has years of production use and active maintenance
 3. There is no reasonable way to implement it in under 500 lines of our own code
 
-Current approved dependencies exist for strong reasons (openssh, tokio, clap, serde, sha2, rpassword, zeroize, similar, comfy-table, crossterm, indicatif, ratatui). Everything else — parsers, formatters, pipeline stages, template engines, protocol handlers — we write ourselves.
+Current approved dependencies exist for strong reasons (openssh, tokio, clap, serde, sha2, rpassword, zeroize, similar, comfy-table, crossterm, indicatif, ratatui, jaq). Everything else — parsers, formatters, pipeline stages, template engines, protocol handlers — we write ourselves.
 
 When in doubt, write it native. Open source implementations are reference material, not imports.
+
+### `jaq` rationale (2026-05-05)
+
+`jaq` is the pure-Rust implementation of the jq filter language, approved as a dependency for the future `--select` / `--query` flag on JSON-emitting verbs (v0.1.5 stabilization-sweep candidate). The decision criteria were considered explicitly because every alternative (write a 200-line dotted-path subset, link `libjq` via `jq-rs`, document `jq` as an external recipe dependency) was viable:
+
+1. **Stable language reference.** jq's filter language has been a stable spec since ~2012; we're adopting a frozen DSL, not chasing a moving target. The "we control the surface" argument that normally favors a hand-rolled subset doesn't gain us anything here — the surface stays compatible with every existing jq doc / recipe / SO answer / agent's prior knowledge.
+2. **Years of production use + active maintenance.** `jaq` has been on crates.io since 2021, is actively maintained by Michael Färber, and tracks libjq's behavior closely. Meets criterion 2 of the dependency policy.
+3. **Reimplementation cost.** A faithful jq implementation is well over 500 lines (recursive descent, generators, ~500 builtin functions, regex). A 200-line dotted-path-only subset is feasible but creates a permanent "almost-jq except…" translation cost — every divergence is a future LLM-trap, exactly the kind of surface the agent-friendliness policies exist to prevent.
+4. **Zero learning curve for the agentic audience.** Agents already know jq; documenting `inspect <verb> --json --select '.data.foo'` as "jq syntax" is one sentence rather than a custom subset doc.
+
+Use sites must keep jaq behind a clean abstraction (a single `query::eval(filter, value)` helper) so a future swap (back to native, or to a different engine) is mechanical. Binary-size impact: ~500 KB-1 MB on the optimized binary; acceptable given the agent-UX gain.
+
+The actual `--select` flag implementation is a v0.1.5 backlog item; this entry records the dependency-policy decision so it doesn't have to be re-debated when v0.1.5 opens.
 
 ## Naming + scope
 

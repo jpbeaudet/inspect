@@ -42,6 +42,14 @@ flate2 = "1"
 # Service (GNOME Keyring / KDE Wallet) with pure-Rust crypto so we don't
 # depend on system OpenSSL.
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+# v0.1.3 release-smoke follow-on: pure-Rust jq filter language so
+# `inspect <verb> --json --select '<filter>'` works on a fresh
+# install without an external `jq` dependency. See CLAUDE.md
+# Dependency Policy "jaq rationale (2026-05-05)" for the decision
+# trace. Pinned at major version to track jq language semantics.
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
