@@ -84,8 +84,7 @@ fn show(args: CacheShowArgs) -> Result<ExitKind> {
         },
     );
     let fmt = args.format.resolve()?;
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
 fn clear(args: CacheClearArgs) -> Result<ExitKind> {
@@ -135,8 +134,7 @@ fn clear(args: CacheClearArgs) -> Result<ExitKind> {
     let summary = format!("cleared {} runtime cache entrie(s)", cleared.len());
     let doc = OutputDoc::new(summary, json!({ "cleared": cleared }));
     let fmt = args.format.resolve()?;
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
 fn fmt_age_opt(age: Option<u64>) -> String {

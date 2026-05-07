@@ -56,6 +56,9 @@ fn load(path: &std::path::Path) -> Result<Bundle> {
 /// source of truth — a bundle that ran a year ago is queryable as
 /// long as its entries haven't aged out per L5 retention.
 fn status(args: BundleStatusArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let store = AuditStore::open()?;
     let entries = store.all()?;
     // Resolve prefix to a unique bundle_id.
@@ -149,12 +152,15 @@ fn status(args: BundleStatusArgs) -> Result<ExitKind> {
                 "entries": single,
             }));
         }
+        let mut select = args.format.select_filter()?;
         JsonOut::write(
             &Envelope::new("local", "bundle", "bundle.status")
                 .put("bundle_id", bundle_id.clone())
                 .put("entries_total", bundle_entries.len())
                 .put("steps", step_rows),
-        );
+            select.as_mut(),
+        )?;
+        crate::verbs::output::flush_filter(select.as_mut())?;
         return Ok(ExitKind::Success);
     }
 

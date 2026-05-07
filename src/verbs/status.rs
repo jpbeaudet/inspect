@@ -287,9 +287,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         data_lines.push(format!("compose_projects: {compose_total}"));
     }
 
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 /// F1 helper: rewrite a service-less selector (`arte`, `prod-*`,
 /// `arte~staging`) into its all-services equivalent (`arte/*` etc.)

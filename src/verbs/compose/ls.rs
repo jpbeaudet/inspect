@@ -133,8 +133,7 @@ pub fn run(args: ComposeLsArgs) -> Result<ExitKind> {
         crate::tee_eprintln!("warning: {w}");
     }
 
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
 /// Read compose projects from the namespace's cached profile.

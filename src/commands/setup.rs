@@ -5,7 +5,6 @@
 use anyhow::Context;
 
 use crate::cli::SetupArgs;
-use crate::commands::list::json_string;
 use crate::config::namespace::validate_namespace_name;
 use crate::config::resolver;
 use crate::discovery::{
@@ -24,7 +23,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     let target = SshTarget::from_resolved(&resolved)?;
 
     if args.check_drift {
-        return drift_only(&resolved.name, &target, args.format.is_json());
+        return drift_only(&resolved.name, &target, &args.format);
     }
 
     // P13: --retry-failed re-runs discovery and merges *only* services
@@ -45,7 +44,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
             .with_context(|| format!("setup --retry-failed '{}'", resolved.name))?;
         let merged = merge_retry(&prev, &fresh);
         if args.format.is_json() {
-            print_json(&merged, "retry-failed");
+            print_json(&merged, "retry-failed", args.format.select_spec())?;
         } else {
             print_human(&merged, "retry-failed");
         }
@@ -56,7 +55,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     if !args.force {
         if let Ok(Some(prev)) = load_profile(&resolved.name) {
             if !is_stale(&prev) {
-                return print_existing(&prev, args.format.is_json());
+                return print_existing(&prev, &args.format);
             }
         }
     }
@@ -74,14 +73,18 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
         .with_context(|| format!("setup '{}'", resolved.name))?;
 
     if args.format.is_json() {
-        print_json(&profile, "discovered");
+        print_json(&profile, "discovered", args.format.select_spec())?;
     } else {
         print_human(&profile, "discovered");
     }
     Ok(ExitKind::Success)
 }
 
-fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Result<ExitKind> {
+fn drift_only(
+    namespace: &str,
+    target: &SshTarget,
+    format: &crate::format::FormatArgs,
+) -> anyhow::Result<ExitKind> {
     // Skip the SSH precheck when there's no cached profile: drift_only
     // will short-circuit to NoCache without ever touching the network,
     // and we shouldn't burn an ssh round-trip (or fail tests on hosts
@@ -96,29 +99,36 @@ fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Res
         DriftStatus::Fresh => "fresh",
         DriftStatus::Drifted { .. } => "drifted",
     };
-    if as_json {
-        let body = match &status {
+    if format.is_json() {
+        // F19 (v0.1.3): build the envelope as a `serde_json::Value` so
+        // `--select` can be applied through the shared
+        // `print_json_value` chokepoint. `format_diff_json` returns an
+        // already-serialized JSON string, which we re-parse so it can
+        // ride inside the structured envelope.
+        let env = match &status {
             DriftStatus::Drifted {
                 current,
                 cached,
                 diff,
-            } => format!(
-                "{{\"schema_version\":1,\"namespace\":{ns},\"drift\":{lbl},\
-                 \"current_fingerprint\":{c},\"cached_fingerprint\":{p},\
-                 \"diff\":{d}}}",
-                ns = json_string(namespace),
-                lbl = json_string(label),
-                c = json_string(current),
-                p = json_string(cached),
-                d = format_diff_json(diff),
-            ),
-            _ => format!(
-                "{{\"schema_version\":1,\"namespace\":{ns},\"drift\":{lbl}}}",
-                ns = json_string(namespace),
-                lbl = json_string(label),
-            ),
+            } => {
+                let diff_json: serde_json::Value = serde_json::from_str(&format_diff_json(diff))
+                    .map_err(|e| anyhow::anyhow!("internal: drift diff json reparse: {e}"))?;
+                serde_json::json!({
+                    "schema_version": 1,
+                    "namespace": namespace,
+                    "drift": label,
+                    "current_fingerprint": current,
+                    "cached_fingerprint": cached,
+                    "diff": diff_json,
+                })
+            }
+            _ => serde_json::json!({
+                "schema_version": 1,
+                "namespace": namespace,
+                "drift": label,
+            }),
         };
-        println!("{body}");
+        crate::verbs::output::print_json_value(&env, format.select_spec())?;
     } else {
         println!("SUMMARY: drift check for '{namespace}': {label}");
         if let DriftStatus::Drifted { diff, .. } = &status {
@@ -130,9 +140,9 @@ fn drift_only(namespace: &str, target: &SshTarget, as_json: bool) -> anyhow::Res
     Ok(ExitKind::Success)
 }
 
-fn print_existing(p: &Profile, as_json: bool) -> anyhow::Result<ExitKind> {
-    if as_json {
-        print_json(p, "cache-hit");
+fn print_existing(p: &Profile, format: &crate::format::FormatArgs) -> anyhow::Result<ExitKind> {
+    if format.is_json() {
+        print_json(p, "cache-hit", format.select_spec())?;
     } else {
         print_human(p, "cache-hit");
     }
@@ -207,9 +217,19 @@ fn print_human(p: &Profile, status: &str) {
     );
 }
 
-fn print_json(p: &Profile, status: &str) {
+fn print_json(
+    p: &Profile,
+    status: &str,
+    select: Option<(&str, bool, bool)>,
+) -> anyhow::Result<ExitKind> {
     // We don't emit the full profile here — that's what `inspect profile`
     // is for. We emit a stable summary envelope.
+    //
+    // F19 (v0.1.3): build the envelope as a `serde_json::Value` and
+    // route through `print_json_value` so `--select` works the same way
+    // it does on every other JSON-emitting verb. The pre-fix form
+    // hand-rolled JSON via `format!`/`println!` and bypassed both the
+    // transcript chokepoint and the filter.
     let containers = p
         .services
         .iter()
@@ -225,22 +245,23 @@ fn print_json(p: &Profile, status: &str) {
         .iter()
         .filter(|s| matches!(s.kind, ServiceKind::Systemd))
         .count();
-    println!(
-        "{{\"schema_version\":1,\"namespace\":{ns},\"status\":{st},\"host\":{h},\"discovered_at\":{ts},\
-         \"counts\":{{\"containers\":{c},\"host_listeners\":{hl},\"systemd_units\":{u},\"volumes\":{v},\"networks\":{n},\"images\":{i}}},\
-         \"warnings\":{w}}}",
-        ns = json_string(&p.namespace),
-        st = json_string(status),
-        h = json_string(&p.host),
-        ts = json_string(&p.discovered_at),
-        c = containers,
-        hl = host_lst,
-        u = units,
-        v = p.volumes.len(),
-        n = p.networks.len(),
-        i = p.images.len(),
-        w = serde_json::to_string(&p.warnings).unwrap_or_else(|_| "[]".into()),
-    );
+    let env = serde_json::json!({
+        "schema_version": 1,
+        "namespace": p.namespace,
+        "status": status,
+        "host": p.host,
+        "discovered_at": p.discovered_at,
+        "counts": {
+            "containers": containers,
+            "host_listeners": host_lst,
+            "systemd_units": units,
+            "volumes": p.volumes.len(),
+            "networks": p.networks.len(),
+            "images": p.images.len(),
+        },
+        "warnings": p.warnings,
+    });
+    crate::verbs::output::print_json_value(&env, select)
 }
 
 fn b(x: bool) -> char {

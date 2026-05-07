@@ -246,7 +246,16 @@ pub fn print_human(prefix_svc: &str, body: &str) {
 
 /// JSON-out variant: emit a single envelope keyed on the namespace
 /// recorded by the source plus a `svc` field for the merged stream.
-pub fn print_json(namespace: &str, svc: &str, body: &str) {
+///
+/// `filter` is the F19 (v0.1.3) `--select` streaming filter, threaded
+/// through the same chokepoint as the non-merged path so `--select`
+/// covers both flavors uniformly.
+pub fn print_json(
+    namespace: &str,
+    svc: &str,
+    body: &str,
+    filter: Option<&mut crate::query::ndjson::Filter>,
+) -> anyhow::Result<()> {
     JsonOut::write(
         &Envelope::new(namespace, "logs", "logs")
             .with_service(svc)
@@ -255,7 +264,8 @@ pub fn print_json(namespace: &str, svc: &str, body: &str) {
                 crate::format::safe::safe_machine_line(body).as_ref(),
             )
             .put("merged", true),
-    );
+        filter,
+    )
 }
 
 #[cfg(test)]

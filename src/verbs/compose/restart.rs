@@ -138,9 +138,10 @@ pub fn run(args: ComposeRestartArgs) -> Result<ExitKind> {
         )
         .with_meta("selector", args.selector.clone())
         .with_quiet(args.format.quiet);
-        crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
+        let exit =
+            crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())?;
         eprintln!("Re-run with --apply to execute");
-        return Ok(ExitKind::Success);
+        return Ok(exit);
     }
 
     match gate.confirm(Confirm::LargeFanout, services.len(), "Continue?") {
@@ -243,13 +244,11 @@ pub fn run(args: ComposeRestartArgs) -> Result<ExitKind> {
         "inspect audit ls --limit 5",
         "review the audit entries this verb just appended",
     ));
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
+    let exit =
+        crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())?;
 
-    Ok(if bad == 0 {
-        ExitKind::Success
-    } else {
-        ExitKind::Error
-    })
+    // Per-step failure exit class takes precedence over filter-class.
+    Ok(if bad == 0 { exit } else { ExitKind::Error })
 }
 
 /// Fetch the project's compose file body and return the first 12

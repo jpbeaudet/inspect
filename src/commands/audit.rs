@@ -17,30 +17,48 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     // helpers — it walks files directly so we don't pre-load every
     // entry just to discard most of them.
     if let AuditCommand::Gc(o) = &args.command {
+        // F19 (v0.1.3): exercise the format mutex (e.g.
+        // `--select` without `--json`) before walking the
+        // audit tree — same shape as the other subcommands.
+        o.format.resolve()?;
         return gc(o);
     }
     let store = AuditStore::open()?;
     let entries = store.all()?;
     match args.command {
-        AuditCommand::Ls(o) => list(
-            &entries,
-            o.format.is_json(),
-            Some(o.limit),
-            o.reason.as_deref(),
-        ),
-        AuditCommand::Show(o) => show(&entries, &o.id, o.format.is_json()),
-        AuditCommand::Grep(o) => grep(&entries, &o.pattern, o.format.is_json()),
-        AuditCommand::Verify(o) => verify(&entries, o.format.is_json()),
+        AuditCommand::Ls(o) => {
+            let format = o.format.clone();
+            // F19 (v0.1.3): activate the FormatArgs mutex check
+            // (e.g. `--select` without `--json` → exit 2).
+            format.resolve()?;
+            list(&entries, &format, Some(o.limit), o.reason.as_deref())
+        }
+        AuditCommand::Show(o) => {
+            let format = o.format.clone();
+            format.resolve()?;
+            show(&entries, &o.id, &format)
+        }
+        AuditCommand::Grep(o) => {
+            let format = o.format.clone();
+            format.resolve()?;
+            grep(&entries, &o.pattern, &format)
+        }
+        AuditCommand::Verify(o) => {
+            let format = o.format.clone();
+            format.resolve()?;
+            verify(&entries, &format)
+        }
         AuditCommand::Gc(_) => unreachable!("handled above"),
     }
 }
 
 fn list(
     entries: &[crate::safety::AuditEntry],
-    json: bool,
+    format: &crate::format::FormatArgs,
     limit: Option<usize>,
     reason_filter: Option<&str>,
 ) -> Result<ExitKind> {
+    let json = format.is_json();
     let n_total = entries.len();
     // Newest first.
     let mut sorted: Vec<_> = entries.iter().collect();
@@ -99,12 +117,11 @@ fn list(
             ),
             None => format!("{n_total} audit entry/entries (showing {take})"),
         };
-        OutputDoc::new(summary, json!({ "entries": entries }))
+        return OutputDoc::new(summary, json!({ "entries": entries }))
             .with_meta("count", take)
             .with_meta("total", n_total)
             .with_meta("order", "newest_first")
-            .print_json();
-        return Ok(ExitKind::Success);
+            .print_json(format.select_spec());
     }
 
     let mut r = Renderer::new();
@@ -157,12 +174,16 @@ fn truncate_reason(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> Result<ExitKind> {
+fn show(
+    entries: &[crate::safety::AuditEntry],
+    id_prefix: &str,
+    format: &crate::format::FormatArgs,
+) -> Result<ExitKind> {
     let Some(e) = entries.iter().find(|e| e.id.starts_with(id_prefix)) else {
         crate::error::emit(format!("no audit entry matches id prefix '{id_prefix}'"));
         return Ok(ExitKind::Error);
     };
-    if json {
+    if format.is_json() {
         // v0.1.3 envelope discipline: `audit show <id> --json` now
         // emits the standard `{schema_version, summary, data, next,
         // meta}` envelope with the full `AuditEntry` (revert block
@@ -170,12 +191,11 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
         // pretty-printed `AuditEntry`, inconsistent with every other
         // envelope verb.
         let entry_value = serde_json::to_value(e)?;
-        OutputDoc::new(
+        return OutputDoc::new(
             format!("audit {} ({})", e.id, e.verb),
             json!({ "entry": entry_value }),
         )
-        .print_json();
-        return Ok(ExitKind::Success);
+        .print_json(format.select_spec());
     }
     let mut r = Renderer::new();
     r.summary(format!("audit {} ({})", e.id, e.verb));
@@ -238,7 +258,11 @@ fn show(entries: &[crate::safety::AuditEntry], id_prefix: &str, json: bool) -> R
     Ok(ExitKind::Success)
 }
 
-fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<ExitKind> {
+fn grep(
+    entries: &[crate::safety::AuditEntry],
+    pat: &str,
+    format: &crate::format::FormatArgs,
+) -> Result<ExitKind> {
     let needle = pat.to_lowercase();
     let mut r = Renderer::new();
     // Newest-first to match `audit ls`.
@@ -256,7 +280,7 @@ fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<
         })
         .collect();
     let hits = matches.len();
-    if json {
+    if format.is_json() {
         // v0.1.3 envelope discipline: same shape as `audit ls --json`
         // — single envelope with `data.matches` as the array. Same
         // projection (id/ts/verb/selector/exit + revert summary) so
@@ -279,14 +303,22 @@ fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<
                 })
             })
             .collect();
-        OutputDoc::new(
+        let exit = OutputDoc::new(
             format!("audit grep '{pat}': {hits} match(es)"),
             json!({ "matches": arr }),
         )
         .with_meta("count", hits)
         .with_meta("order", "newest_first")
         .with_meta("pattern", pat)
-        .print_json();
+        .print_json(format.select_spec())?;
+        // Preserve the "no matches → exit 1" semantic: even if the
+        // filter swallows everything, the underlying-data hits-count
+        // signal still applies.
+        return Ok(if hits > 0 && matches!(exit, ExitKind::Success) {
+            ExitKind::Success
+        } else {
+            ExitKind::NoMatches
+        });
     } else {
         for e in &matches {
             r.data_line(format!(
@@ -320,7 +352,10 @@ fn grep(entries: &[crate::safety::AuditEntry], pat: &str, json: bool) -> Result<
 /// always edit `~/.inspect/audit/*.jsonl` and recompute matching
 /// snapshots. For tamper-evidence, forward audit entries to an
 /// append-only sink (syslog, journald, or a remote collector).
-fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind> {
+fn verify(
+    entries: &[crate::safety::AuditEntry],
+    format: &crate::format::FormatArgs,
+) -> Result<ExitKind> {
     let snaps = SnapshotStore::open()?;
     let mut checked = 0usize;
     let mut missing: Vec<(String, String)> = Vec::new(); // (id, snapshot path)
@@ -357,7 +392,7 @@ fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind>
     }
 
     let bad = missing.len() + mismatched.len();
-    if json {
+    if format.is_json() {
         // v0.1.3 envelope discipline.
         let summary = format!(
             "audit verify: {} entries, {checked} with snapshots, {} missing, {} mismatched",
@@ -365,7 +400,7 @@ fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind>
             missing.len(),
             mismatched.len()
         );
-        OutputDoc::new(
+        let exit = OutputDoc::new(
             summary,
             json!({
                 "entries_total": entries.len(),
@@ -377,12 +412,10 @@ fn verify(entries: &[crate::safety::AuditEntry], json: bool) -> Result<ExitKind>
                 "ok": bad == 0,
             }),
         )
-        .print_json();
-        return Ok(if bad == 0 {
-            ExitKind::Success
-        } else {
-            ExitKind::Error
-        });
+        .print_json(format.select_spec())?;
+        // The verify-result exit class (Error if any snapshot mismatched
+        // or missing) takes precedence over filter-class exit codes.
+        return Ok(if bad != 0 { ExitKind::Error } else { exit });
     }
 
     let mut r = Renderer::new();
@@ -426,8 +459,7 @@ fn gc(args: &AuditGcArgs) -> Result<ExitKind> {
     };
     let report = run_gc(&policy, args.dry_run)?;
     if args.format.is_json() {
-        emit_gc_json(&report);
-        return Ok(ExitKind::Success);
+        return emit_gc_json(&report, &args.format);
     }
     let mut r = Renderer::new();
     let prefix = if report.dry_run {
@@ -474,7 +506,7 @@ fn gc(args: &AuditGcArgs) -> Result<ExitKind> {
     Ok(ExitKind::Success)
 }
 
-fn emit_gc_json(r: &GcReport) {
+fn emit_gc_json(r: &GcReport, format: &crate::format::FormatArgs) -> Result<ExitKind> {
     // v0.1.3 envelope discipline.
     let prefix = if r.dry_run { "would delete" } else { "deleted" };
     let summary = format!(
@@ -499,7 +531,7 @@ fn emit_gc_json(r: &GcReport) {
             "deleted_snapshot_hashes": r.deleted_snapshot_hashes,
         }),
     )
-    .print_json();
+    .print_json(format.select_spec())
 }
 
 fn format_bytes(b: u64) -> String {

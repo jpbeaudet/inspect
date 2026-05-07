@@ -15,6 +15,9 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
@@ -41,6 +44,12 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     }
 
     let mut any_lines = false;
+
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted. Threaded into both the merged-mode closures and the
+    // per-step (batch + follow) emission paths.
+    let mut select = args.format.select_filter()?;
 
     // P5 (v0.1.1): merged multi-container view. We honor --since-last
     // and the log-driver gate per source, then dispatch to the merger
@@ -119,6 +128,13 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         } else {
             60
         };
+        // F19 (v0.1.3): the merged closures emit one envelope per
+        // merged line — they need the streaming filter handle so that
+        // `--select` covers merged output too. The closure captures
+        // `&mut select` directly (FnMut); on a per-frame filter
+        // failure inside `print_json`, we surface via `error::emit`
+        // and continue (matching the streaming contract — a long-
+        // running follow must not abort on one bad frame).
         let total = if args.follow {
             crate::verbs::merged::follow_merged(
                 runner.as_ref(),
@@ -127,13 +143,16 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 args.show_secrets,
                 |m| {
                     if json {
-                        crate::verbs::merged::print_json(
+                        if let Err(e) = crate::verbs::merged::print_json(
                             // The MergeSource borrows namespace as &str; we
                             // re-derive it from svc_idx into the source list.
                             sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
                             &m.svc,
                             &m.line,
-                        );
+                            select.as_mut(),
+                        ) {
+                            crate::error::emit(format!("merged emit: {e}"));
+                        }
                     } else {
                         crate::verbs::merged::print_human(&m.svc, &m.line);
                     }
@@ -147,17 +166,23 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 args.show_secrets,
                 |m| {
                     if json {
-                        crate::verbs::merged::print_json(
+                        if let Err(e) = crate::verbs::merged::print_json(
                             sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
                             &m.svc,
                             &m.line,
-                        );
+                            select.as_mut(),
+                        ) {
+                            crate::error::emit(format!("merged emit: {e}"));
+                        }
                     } else {
                         crate::verbs::merged::print_human(&m.svc, &m.line);
                     }
                 },
             )?
         };
+        if json {
+            crate::verbs::output::flush_filter(select.as_mut())?;
+        }
         return Ok(if total > 0 {
             ExitKind::Success
         } else if !args.match_re.is_empty() && !args.follow {
@@ -226,7 +251,8 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                                 .with_service(&svc_name)
                                 .put("error", msg.as_str())
                                 .put("log_driver", driver.as_str()),
-                        );
+                            select.as_mut(),
+                        )?;
                     } else {
                         crate::tee_eprintln!("{msg}");
                     }
@@ -255,6 +281,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 args.format.is_json(),
                 args.show_secrets,
                 &mut any_lines,
+                &mut select,
             );
             continue;
         }
@@ -307,7 +334,8 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                             "line",
                             crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
                     &masked,
@@ -316,6 +344,10 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc_name);
             }
         }
+    }
+
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     Ok(if any_lines {
@@ -537,6 +569,14 @@ fn stream_follow(
     json: bool,
     show_secrets: bool,
     any_lines: &mut bool,
+    // F19 (v0.1.3): per-frame `--select` streaming filter. Threaded
+    // in from the verb's run loop as `&mut Option<Filter>` so the
+    // closure can re-borrow `select.as_mut()` per frame and we don't
+    // have to wrestle with Option<&mut T> reborrowing through a
+    // closure boundary. Per-frame filter errors are emitted to
+    // stderr and the stream continues (a long-running follow must
+    // not abort on one bad frame).
+    select: &mut Option<crate::query::ndjson::Filter>,
 ) {
     const MAX_RECONNECTS: u32 = 3;
     let mut attempt: u32 = 0;
@@ -556,14 +596,17 @@ fn stream_follow(
             };
             got_any = true;
             if json {
-                JsonOut::write(
+                if let Err(e) = JsonOut::write(
                     &Envelope::new(namespace, "logs", "logs")
                         .with_service(svc_name)
                         .put(
                             "line",
                             crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                ) {
+                    crate::error::emit(format!("logs follow emit: {e}"));
+                }
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
                     &masked,

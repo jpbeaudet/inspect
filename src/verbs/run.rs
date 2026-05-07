@@ -501,6 +501,15 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted. The streaming line closure captures a `&mut Option<…>`
+    // re-borrow each per-step iteration; the post-stream summary
+    // envelope at the bottom of this verb shares the same filter so a
+    // single `--select '.line'` (or `select(.phase==…)`) covers both
+    // stream frames and the run-level summary uniformly.
+    let mut select = args.format.select_filter()?;
+
     // F12 (v0.1.3): per-invocation env overrides. Validate once,
     // before the per-step loop, so a typo in `--env` short-circuits
     // the whole run instead of failing N times.
@@ -765,6 +774,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             let svc_name_ref = &svc_name;
             let redactor_ref = &redactor;
             let truncated_lines_ref = &mut truncated_lines;
+            // F19 (v0.1.3): per-step re-borrow of the verb-level
+            // `--select` filter handle so the streaming closure can
+            // reach it without owning it across per-step iterations.
+            let select_ref: &mut Option<crate::query::ndjson::Filter> = &mut select;
             let runner_ref = runner.as_ref();
             let outcome = crate::exec::dispatch::dispatch_with_reauth(
                 ns_name_ref,
@@ -817,7 +830,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                                 masked
                             };
                             if json {
-                                JsonOut::write(
+                                if let Err(e) = JsonOut::write(
                                     &Envelope::new(ns_name_ref, "run", "run")
                                         .with_service(svc_name_ref)
                                         .put(
@@ -825,7 +838,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                                             crate::format::safe::safe_machine_line(&masked)
                                                 .as_ref(),
                                         ),
-                                );
+                                    select_ref.as_mut(),
+                                ) {
+                                    crate::error::emit(format!("run stream emit: {e}"));
+                                }
                             } else {
                                 let safe =
                                     crate::format::safe::safe_terminal_line(&masked, line_budget);
@@ -1071,13 +1087,20 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // read the verb-level outcome (ok/failed counts +
         // failure_class) in one structured record. Streaming line
         // envelopes earlier in the run remain unchanged.
+        // F19 (v0.1.3): the same `--select` filter that gated the
+        // streaming line envelopes also gates this summary envelope,
+        // so a single `--select '.phase'` (or
+        // `select(.failure_class!=null)`) covers both per-frame and
+        // verb-level emission uniformly.
         JsonOut::write(
             &Envelope::new(&args.selector, "run", "run")
                 .put("phase", "summary")
                 .put("ok", ok)
                 .put("failed", bad)
                 .put("failure_class", verb_failure_class),
-        );
+            select.as_mut(),
+        )?;
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     // F13: when every failure shared the same transport class, exit

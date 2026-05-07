@@ -41,6 +41,11 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     if args.json {
         // HP-4: full surface envelope, or single-topic envelope when a
         // topic is named alongside `--json`.
+        // F19 (v0.1.3): when `--select` is set, route the rendered
+        // envelope through the same `print_json_value` chokepoint
+        // every other JSON verb uses — so `inspect help all --json
+        // --select '.topics[].id'` works for topic discovery without
+        // parsing the full registry.
         let pretty = help::json::pretty_default();
         let body = match args.topic.as_deref() {
             None | Some("all") => help::json::render_full(pretty),
@@ -49,6 +54,14 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
                 None => return unknown_topic(name),
             },
         };
+        if let Some(filter) = args.select.as_deref() {
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| anyhow::anyhow!("internal: help json reparse: {e}"))?;
+            return crate::verbs::output::print_json_value(
+                &value,
+                Some((filter, args.select_raw, args.select_slurp)),
+            );
+        }
         return render(&body);
     }
 
@@ -164,6 +177,9 @@ mod tests {
             search: None,
             json: false,
             verbose: false,
+            select: None,
+            select_raw: false,
+            select_slurp: false,
         }
     }
 

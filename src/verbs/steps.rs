@@ -414,6 +414,14 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
 
     let manifest_step_names: Vec<String> = manifest.steps.iter().map(|s| s.name.clone()).collect();
 
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted. Wrapped in a Mutex (zero-cost in sequential mode) so
+    // the parallel execution path can share the single filter
+    // instance across worker threads.
+    let select: Mutex<Option<crate::query::ndjson::Filter>> =
+        Mutex::new(args.format.select_filter()?);
+
     let mut results: Vec<StepResult> = Vec::with_capacity(manifest.steps.len());
     let mut composite_payload_items: Vec<serde_json::Value> = Vec::new();
     let mut stopped_at: Option<String> = None;
@@ -522,13 +530,18 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 crate::tee_println!("STEP {} ▶ (across {} target(s))", spec.name, target_count);
             }
         } else {
+            // F19 (v0.1.3): step-begin envelopes flow through the same
+            // `--select` filter as per-target stream lines and the
+            // step-end envelope.
+            let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
             JsonOut::write(
                 &Envelope::new(&parent_label, "run", "step")
                     .put("steps_run_id", steps_run_id.as_str())
                     .put("step_name", spec.name.as_str())
                     .put("phase", "begin")
                     .put("target_count", target_count as i64),
-            );
+                sel.as_mut(),
+            )?;
         }
 
         // L13 (v0.1.3): branch on `parallel: true` per spec. The
@@ -560,6 +573,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             script_path: script_path.as_deref(),
             timeout_secs,
             user_env: &user_env,
+            select: &select,
         };
         let per_target_results: Vec<TargetStepResult> = if spec.parallel && resolved.len() > 1 {
             run_targets_parallel(
@@ -698,6 +712,9 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 }
             }
         } else {
+            // F19 (v0.1.3): step-end envelopes flow through the same
+            // `--select` filter (see step-begin emission above).
+            let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
             JsonOut::write(
                 &Envelope::new(&parent_label, "run", "step")
                     .put("steps_run_id", steps_run_id.as_str())
@@ -712,7 +729,8 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                             .count() as i64,
                     )
                     .put("target_count", target_count as i64),
-            );
+                sel.as_mut(),
+            )?;
         }
 
         composite_payload_items.push(composite_item_for_spec(spec));
@@ -1018,6 +1036,14 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         r.print();
     }
 
+    if json {
+        // F19 (v0.1.3): end-of-stream slurp flush so a `--select-slurp`
+        // filter sees its accumulated buffer rendered before the verb
+        // exits. No-op for per-frame mode.
+        let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
+        crate::verbs::output::flush_filter(sel.as_mut())?;
+    }
+
     Ok(if parent_exit == 0 {
         ExitKind::Success
     } else {
@@ -1044,6 +1070,12 @@ struct PerTargetCtx<'a> {
     script_path: Option<&'a str>,
     timeout_secs: u64,
     user_env: &'a [(String, String)],
+    /// F19 (v0.1.3): shared `--select` streaming filter handle. Behind
+    /// a `Mutex` because steps can run in parallel mode (one filter
+    /// instance shared across all per-target threads — same writer-
+    /// lock pattern as the stdout `tee_println!` serialization). In
+    /// sequential mode the lock is uncontended and zero-cost.
+    select: &'a Mutex<Option<crate::query::ndjson::Filter>>,
 }
 
 /// L13 (v0.1.3): clamp `parallel_max` to its default-or-ceiling.
@@ -1270,13 +1302,21 @@ fn run_one_target(
                     if !json {
                         crate::tee_println!("{label_for_step} | {masked}");
                     } else {
-                        JsonOut::write(
+                        // F19 (v0.1.3): grab the shared filter mutex
+                        // for the duration of this emit. Per-frame
+                        // filter errors go to stderr and the stream
+                        // continues.
+                        let mut sel = ctx.select.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Err(e) = JsonOut::write(
                             &Envelope::new(&label_for_step, "run", "step")
                                 .put("steps_run_id", steps_run_id)
                                 .put("step_name", spec.name.as_str())
                                 .put("target", label_for_step.as_str())
                                 .put("line", masked.as_ref()),
-                        );
+                            sel.as_mut(),
+                        ) {
+                            crate::error::emit(format!("steps stream emit: {e}"));
+                        }
                     }
                     drop(_g);
                     let line_with_nl_bytes = masked.len() + 1;

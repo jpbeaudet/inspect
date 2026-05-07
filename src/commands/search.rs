@@ -20,6 +20,11 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
+    // F19 (v0.1.3): validate the format/--select combination up front
+    // so a `--select` without `--json` lands the canonical exit-2
+    // usage error before we touch the network or the LogQL parser.
+    args.format.resolve()?;
+
     // L3: the resolver delegates to `alias::expand_recursive` so a
     // parameterized `@svc-logs(svc=pulse)` call site, including
     // multi-level chains, expands once before the LogQL parser sees
@@ -39,7 +44,13 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                 "next": [],
                 "meta": {}
             });
-            println!("{env}");
+            // F19 (v0.1.3): a search-parse error is itself an envelope
+            // emission; route through `print_json_value` so `--select`
+            // applies even on the error path. Filter parse-errors here
+            // bubble as exit 2 (handled by main); runtime errors and
+            // zero-yield filters still return Error so the operator's
+            // original parse-failure exit code stands.
+            crate::verbs::output::print_json_value(&env, args.format.select_spec())?;
         } else {
             eprint!("{}", e.render(query));
         }
@@ -80,7 +91,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                     "next": [],
                     "meta": { "query": args.query, "cancelled": cancelled }
                 });
-                println!("{env}");
+                crate::verbs::output::print_json_value(&env, args.format.select_spec())?;
             } else if cancelled {
                 println!("SUMMARY: cancelled by signal");
                 println!("DATA:");
@@ -101,27 +112,39 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     match result {
         ExecOutput::Log(r) => {
             if args.format.is_json() {
-                emit_log_json(&args, &r.records);
+                // F19 (v0.1.3): `--select` can swallow every record into
+                // an empty result set; the helper returns `NoMatches`
+                // for that case, which is the right exit code regardless
+                // of whether the underlying record list was empty.
+                let kind = emit_log_json(&args, &r.records)?;
+                Ok(match kind {
+                    ExitKind::Success if r.records.is_empty() => ExitKind::NoMatches,
+                    other => other,
+                })
             } else {
                 emit_log_human(&args, &r.records);
+                Ok(if r.records.is_empty() {
+                    ExitKind::NoMatches
+                } else {
+                    ExitKind::Success
+                })
             }
-            Ok(if r.records.is_empty() {
-                ExitKind::NoMatches
-            } else {
-                ExitKind::Success
-            })
         }
         ExecOutput::Metric(samples) => {
             if args.format.is_json() {
-                emit_metric_json(&args, &samples);
+                let kind = emit_metric_json(&args, &samples)?;
+                Ok(match kind {
+                    ExitKind::Success if samples.is_empty() => ExitKind::NoMatches,
+                    other => other,
+                })
             } else {
                 emit_metric_human(&args, &samples);
+                Ok(if samples.is_empty() {
+                    ExitKind::NoMatches
+                } else {
+                    ExitKind::Success
+                })
             }
-            Ok(if samples.is_empty() {
-                ExitKind::NoMatches
-            } else {
-                ExitKind::Success
-            })
         }
     }
 }
@@ -184,7 +207,7 @@ fn default_record_limit() -> usize {
     }
 }
 
-fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
+fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) -> Result<ExitKind> {
     // L7 (v0.1.3): redact lines on the JSON path too, so consumers
     // (LLM agents, jq pipelines, log shippers) never see verbatim
     // secrets. PEM-block lines are dropped from the record stream
@@ -241,7 +264,7 @@ fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
             "phase": 10
         }
     });
-    println!("{env}");
+    crate::verbs::output::print_json_value(&env, args.format.select_spec())
 }
 
 fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
@@ -267,7 +290,7 @@ fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) 
     );
 }
 
-fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
+fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) -> Result<ExitKind> {
     let env = json!({
         "schema_version": 1,
         "summary": format!("{} series", samples.len()),
@@ -275,7 +298,7 @@ fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
         "next": [],
         "meta": { "query": args.query, "phase": 7 }
     });
-    println!("{env}");
+    crate::verbs::output::print_json_value(&env, args.format.select_spec())
 }
 
 fn truncate(s: &str, n: usize) -> String {

@@ -32,7 +32,6 @@ use std::thread;
 use anyhow::{anyhow, Result};
 
 use crate::cli::FleetArgs;
-use crate::commands::list::json_string;
 use crate::config::groups;
 use crate::config::resolver as ns_resolver;
 use crate::error::ExitKind;
@@ -267,7 +266,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
             let ok = results.iter().filter(|r| r.exit == 0).count();
             let failed = total - ok;
             if args.json {
-                emit_json(&args.verb, &results, total, ok, failed);
+                emit_json(&args, &results, total, ok, failed)?;
             } else {
                 emit_human(&args.verb, &results, total, ok, failed);
             }
@@ -295,7 +294,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     let failed = total - ok;
 
     if args.json {
-        emit_json(&args.verb, &results, total, ok, failed);
+        emit_json(&args, &results, total, ok, failed)?;
     } else {
         emit_human(&args.verb, &results, total, ok, failed);
     }
@@ -804,28 +803,50 @@ fn emit_human(verb: &str, results: &[NsResult], total: usize, ok: usize, failed:
     }
 }
 
-fn emit_json(verb: &str, results: &[NsResult], total: usize, ok: usize, failed: usize) {
-    let mut s = String::from("{\"schema_version\":1,\"fleet\":{\"verb\":");
-    s.push_str(&json_string(verb));
-    s.push_str(",\"namespaces\":[");
-    for (i, r) in results.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!(
-            "{{\"name\":{name},\"exit\":{exit},\"stdout\":{stdout},\"stderr\":{stderr}}}",
-            name = json_string(&r.namespace),
-            exit = r.exit,
-            stdout = json_string(&r.stdout),
-            stderr = json_string(&r.stderr),
-        ));
-    }
-    s.push_str("]},\"summary\":{");
-    s.push_str(&format!(
-        "\"total\":{total},\"ok\":{ok},\"failed\":{failed}"
-    ));
-    s.push_str("}}");
-    println!("{s}");
+fn emit_json(
+    args: &FleetArgs,
+    results: &[NsResult],
+    total: usize,
+    ok: usize,
+    failed: usize,
+) -> anyhow::Result<()> {
+    // F19 (v0.1.3): build the envelope as a `serde_json::Value` so
+    // `--select` can be applied uniformly through the same chokepoint
+    // as every other JSON-emitting verb (`OutputDoc::print_json` /
+    // `print_json_value`). Pre-fix this path hand-rolled JSON via
+    // string concatenation and emitted with `println!` — both shapes
+    // are now obsolete: the post-filter output is what reaches
+    // stdout, and the bare-`println!` transcript bypass goes away
+    // alongside.
+    let namespaces: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.namespace,
+                "exit": r.exit,
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+            })
+        })
+        .collect();
+    let env = serde_json::json!({
+        "schema_version": 1,
+        "fleet": {
+            "verb": args.verb,
+            "namespaces": namespaces,
+        },
+        "summary": {
+            "total": total,
+            "ok": ok,
+            "failed": failed,
+        },
+    });
+    let select = args
+        .select
+        .as_deref()
+        .map(|f| (f, args.select_raw, args.select_slurp));
+    crate::verbs::output::print_json_value(&env, select)?;
+    Ok(())
 }
 
 #[cfg(test)]

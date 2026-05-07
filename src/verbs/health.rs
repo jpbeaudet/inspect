@@ -180,9 +180,7 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
         }
     }
 
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
 struct ProbeResult {

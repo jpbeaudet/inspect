@@ -155,13 +155,12 @@ pub fn run(args: RecipeArgs) -> Result<ExitKind> {
         ));
     }
     let fmt = args.format.resolve()?;
-    crate::format::render::render_doc(&doc_out, &fmt, &data_lines)?;
+    let exit =
+        crate::format::render::render_doc(&doc_out, &fmt, &data_lines, args.format.select_spec())?;
 
-    Ok(if any_failed {
-        ExitKind::Error
-    } else {
-        ExitKind::Success
-    })
+    // The recipe-failure exit class (Error if any step exited non-zero)
+    // takes precedence over filter-class exit codes.
+    Ok(if any_failed { ExitKind::Error } else { exit })
 }
 
 struct StepResult {

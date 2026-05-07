@@ -88,9 +88,10 @@ pub fn run(args: ComposePullArgs) -> Result<ExitKind> {
         )
         .with_meta("selector", args.selector.clone())
         .with_quiet(args.format.quiet);
-        crate::format::render::render_doc(&doc, &fmt, &[cmd])?;
+        let exit =
+            crate::format::render::render_doc(&doc, &fmt, &[cmd], args.format.select_spec())?;
         eprintln!("Re-run with --apply to execute");
-        return Ok(ExitKind::Success);
+        return Ok(exit);
     }
     match gate.confirm(Confirm::Always, 1, "Continue?") {
         ConfirmResult::Aborted(why) => {
@@ -195,11 +196,8 @@ pub fn run(args: ComposePullArgs) -> Result<ExitKind> {
     .with_quiet(args.format.quiet);
     // Streaming output already hit stdout; the human renderer's
     // DATA section stays empty so we don't double-print.
-    crate::format::render::render_doc(&doc, &fmt, &[])?;
+    let exit = crate::format::render::render_doc(&doc, &fmt, &[], args.format.select_spec())?;
 
-    Ok(if out.ok() {
-        ExitKind::Success
-    } else {
-        ExitKind::Error
-    })
+    // Exec failure exit class takes precedence over filter-class.
+    Ok(if out.ok() { exit } else { ExitKind::Error })
 }

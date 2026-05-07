@@ -89,8 +89,16 @@ fn resolve_slice(args: &CatArgs) -> Result<Option<LineSlice>> {
 }
 
 pub fn run(args: CatArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
     let slice = resolve_slice(&args)?;
+
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
 
     let mut printed_any = false;
     let mut errored_any = false;
@@ -130,7 +138,8 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                         .put("path", path)
                         .put("error", out.stderr.trim())
                         .put("exit", out.exit_code),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 crate::tee_eprintln!(
                     "{}: cat failed (exit {}): {}",
@@ -171,7 +180,8 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                         .put("path", path)
                         .put("n", n as u64)
                         .put("line", masked.as_ref()),
-                );
+                    select.as_mut(),
+                )?;
             }
         } else if let Some(sl) = slice {
             for (idx, line) in out.stdout.lines().enumerate() {
@@ -198,6 +208,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
     }
 
     if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
         return Ok(if printed_any {
             ExitKind::Success
         } else {

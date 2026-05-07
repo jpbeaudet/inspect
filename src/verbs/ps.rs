@@ -63,6 +63,6 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
     }
     human.summary(format!("{count} container(s) running"));
     human.next("inspect status <sel> for health rollup");
-    human.dispatch(&fmt)?;
-    Ok(ExitKind::Success)
+    let select = args.format.select_filter()?;
+    human.dispatch(&fmt, select)
 }

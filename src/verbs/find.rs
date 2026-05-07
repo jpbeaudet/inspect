@@ -10,7 +10,15 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(args: FindArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
+
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
 
     let mut total_hits = 0usize;
     for step in iter_steps(&nses, &targets) {
@@ -75,7 +83,8 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
                     &Envelope::new(&step.ns.namespace, "dir", format!("dir:{path}"))
                         .with_service(step.service().unwrap_or("_"))
                         .put("path", masked.as_ref()),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 crate::tee_println!(
                     "{}{}: {masked}",
@@ -84,6 +93,9 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
                 );
             }
         }
+    }
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
     if total_hits == 0 {
         if !args.format.is_json() {

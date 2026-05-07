@@ -16,6 +16,16 @@ use crate::transcript::rotate::{list_transcripts, read_transcript, run_rotate, R
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 
 pub fn run(args: HistoryArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2). Each
+    // subcommand has its own format block — touching them
+    // all in one place keeps the contract uniform.
+    match &args.command {
+        HistoryCommand::Show(o) => o.format.resolve()?,
+        HistoryCommand::List(o) => o.format.resolve()?,
+        HistoryCommand::Clear(o) => o.format.resolve()?,
+        HistoryCommand::Rotate(o) => o.format.resolve()?,
+    };
     match args.command {
         HistoryCommand::Show(o) => show(&o),
         HistoryCommand::List(o) => list(&o),
@@ -72,6 +82,11 @@ fn show(o: &crate::cli::HistoryShowArgs) -> Result<ExitKind> {
     let audit_filter = o.audit_id.as_deref();
     let json = o.format.is_json();
 
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // the top of the streaming loop so a parse error fails fast before
+    // any frame is emitted.
+    let mut select = o.format.select_filter()?;
+
     let mut hit_blocks = 0usize;
     let mut json_emitted = false;
     let mut human_buf: Vec<String> = Vec::new();
@@ -123,12 +138,17 @@ fn show(o: &crate::cli::HistoryShowArgs) -> Result<ExitKind> {
                                 .map(|n| serde_json::Value::Number(n.into()))
                                 .unwrap_or(serde_json::Value::Null),
                         ),
-                );
+                    select.as_mut(),
+                )?;
                 json_emitted = true;
             } else {
                 human_buf.push(block.full.clone());
             }
         }
+    }
+
+    if json {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     if !json {
@@ -171,6 +191,7 @@ fn list(o: &crate::cli::HistoryListArgs) -> Result<ExitKind> {
     entries.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(b.date.cmp(&a.date)));
 
     if o.format.is_json() {
+        let mut select = o.format.select_filter()?;
         for e in &entries {
             let bytes = std::fs::metadata(&e.path).map(|m| m.len()).unwrap_or(0);
             JsonOut::write(
@@ -187,8 +208,10 @@ fn list(o: &crate::cli::HistoryListArgs) -> Result<ExitKind> {
                             .unwrap_or("")
                             .to_string(),
                     ),
-            );
+                select.as_mut(),
+            )?;
         }
+        crate::verbs::output::flush_filter(select.as_mut())?;
         return Ok(ExitKind::Success);
     }
     let mut r = Renderer::new();
@@ -287,6 +310,7 @@ fn clear(o: &crate::cli::HistoryClearArgs) -> Result<ExitKind> {
         }
     }
     if o.format.is_json() {
+        let mut select = o.format.select_filter()?;
         JsonOut::write(
             &Envelope::new("local", "history", "history.clear")
                 .put("namespace", o.namespace.clone())
@@ -294,7 +318,9 @@ fn clear(o: &crate::cli::HistoryClearArgs) -> Result<ExitKind> {
                 .put("deleted_count", deleted_paths.len())
                 .put("deleted_bytes", deleted_bytes)
                 .put("deleted_files", deleted_paths.clone()),
-        );
+            select.as_mut(),
+        )?;
+        crate::verbs::output::flush_filter(select.as_mut())?;
         return Ok(ExitKind::Success);
     }
     let mut r = Renderer::new();
@@ -320,14 +346,15 @@ fn clear(o: &crate::cli::HistoryClearArgs) -> Result<ExitKind> {
 fn rotate(o: &crate::cli::HistoryRotateArgs) -> Result<ExitKind> {
     let report = run_rotate(None)?;
     if o.format.is_json() {
-        emit_rotate_json(&report);
+        emit_rotate_json(&report, &o.format)?;
         return Ok(ExitKind::Success);
     }
     render_rotate_human(&report);
     Ok(ExitKind::Success)
 }
 
-fn emit_rotate_json(r: &RotateReport) {
+fn emit_rotate_json(r: &RotateReport, format: &crate::format::FormatArgs) -> Result<()> {
+    let mut select = format.select_filter()?;
     JsonOut::write(
         &Envelope::new("local", "history", "history.rotate")
             .put("deleted_count", r.deleted_count)
@@ -341,7 +368,10 @@ fn emit_rotate_json(r: &RotateReport) {
             .put("deleted_files", r.deleted_files.clone())
             .put("compressed_files", r.compressed_files.clone())
             .put("evicted_files", r.evicted_files.clone()),
-    );
+        select.as_mut(),
+    )?;
+    crate::verbs::output::flush_filter(select.as_mut())?;
+    Ok(())
 }
 
 fn render_rotate_human(r: &RotateReport) {

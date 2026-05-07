@@ -141,6 +141,16 @@ comma-list, or `@group`). Results stream as they arrive; failed \
 namespaces appear with error rows but do not abort the run unless \
 `--abort-on-error` is set.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {fleet:{verb,namespaces:[…]}, summary:{total,ok,failed}}):
+      $ inspect fleet --ns '@prod' status --json --select '.summary'
+      $ inspect fleet --ns '@prod' status --json \\
+            --select '.fleet.namespaces[] | select(.exit != 0) | .name' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect fleet --ns 'prod-*' status
   $ inspect fleet --ns @prod restart pulse --apply
@@ -149,6 +159,16 @@ EXAMPLES
 const LONG_WHY: &str = "\
 Diagnostic walk for a service: status, recent errors, health, and \
 connectivity from one selector. The built-in `why` recipe.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{services:[…], totals:{…}}, summary, …}):
+      $ inspect why arte/atlas --json --select '.data.totals'
+      $ inspect why arte/atlas --json \\
+            --select '.data.services[] | select(.failing > 0) | .service' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect why arte/atlas
@@ -169,6 +189,16 @@ const LONG_CONNECTIVITY: &str = "\
 Print the connectivity matrix for the selected services. With `--probe`, \
 live-test each declared edge with bash /dev/tcp.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{services:[…], totals:{services,edges,open,closed,probed}}}):
+      $ inspect connectivity arte --json --select '.data.totals'
+      $ inspect connectivity arte --probe --json \\
+            --select '.data.services[].edges[] | select(.open == false)'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect connectivity arte
   $ inspect connectivity arte/atlas --probe
@@ -178,6 +208,15 @@ const LONG_RECIPE: &str = "\
 Run a multi-step diagnostic or remediation recipe. Built-in recipes are \
 listed in `inspect help recipes`. User recipes live under \
 ~/.inspect/recipes/<name>.yaml. Mutating recipes require `--apply`.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{recipe, steps:[{argv,exit_code,stdout,stderr}…], totals}}):
+      $ inspect recipe disk-audit arte --json --select '.data.steps[] | select(.exit_code != 0)'
+      $ inspect recipe deploy-check arte --json --select '.data.steps[].argv | join(\" \")' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect recipe deploy-check arte
@@ -191,6 +230,16 @@ NOTE:     for a live one-shot 'grep -r' against a single target path, use 'inspe
 
 LogQL query across logs, files, and discovery sources. Queries are \
 always single-quoted. The pipeline is the LogQL DSL, not the shell.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{kind:\"log\", records:[{server,service,line,…}…]}, summary, …}):
+      $ inspect search '{server=\"arte\"} |= \"error\"' --json --select '.data.records[].line' --select-raw
+      $ inspect search '{server=~\"prod-.*\"} |= \"timeout\"' --json \\
+            --select '.data.records | length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect search '{server=\"arte\", source=\"logs\"} |= \"error\"' --since 1h
@@ -218,6 +267,15 @@ EXAMPLES
 const LONG_CONNECTIONS: &str = "\
 List active inspect-managed SSH sessions, with TTL remaining and the \
 path to each control socket.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {connections:[{namespace,host,socket,status,auth,session_ttl,…}…]}):
+      $ inspect connections --json --select '.connections[] | select(.status == \"alive\") | .namespace' --select-raw
+      $ inspect connections --json --select '.connections | length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect connections
@@ -358,6 +416,15 @@ Run discovery against a namespace and persist its profile (containers, \
 volumes, networks, listeners, remote tooling). Cached profiles live \
 under ~/.inspect/profiles/.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {namespace, status, host, counts:{containers,…}, warnings:[…]}):
+      $ inspect setup arte --json --select '.counts'
+      $ inspect setup arte --check-drift --json --select '.drift' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect setup arte
   $ inspect setup prod-eu --force
@@ -365,6 +432,15 @@ EXAMPLES
 
 const LONG_PROFILE: &str = "\
 Print the cached discovery profile for a namespace.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {namespace, status, drift, profile:{services:[…], volumes:[…], networks:[…], …}}):
+      $ inspect profile arte --json --select '.profile.services[] | .name' --select-raw
+      $ inspect profile arte --json --select '.profile.services | length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect profile arte
@@ -407,6 +483,15 @@ const LONG_RESOLVE: &str = "\
 Resolve a selector against discovered profiles and print the target \
 list. Useful to test selector grammar before a real verb call.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON output
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (output: array of {namespace, kind, service, path}):
+      $ inspect resolve 'prod-*/atlas' --json --select '.[].namespace' --select-raw
+      $ inspect resolve 'prod-*' --json --select 'length'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect resolve arte/storage
   $ inspect resolve 'prod-*/atlas'
@@ -424,6 +509,15 @@ EXAMPLES
 const LONG_STATUS: &str = "\
 Service inventory and health rollup for the selected targets.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{services:[…], state, totals:{…}, compose_projects}, summary, …}):
+      $ inspect status arte --json --select '.summary' --select-raw
+      $ inspect status 'prod-*' --json --select '.data.services[] | select(.healthy == false)'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect status arte
   $ inspect status arte/atlas
@@ -433,6 +527,15 @@ const LONG_HEALTH: &str = "\
 Detailed health checks for the selected services. Calls each service's \
 declared health endpoint and reports per-check status.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (envelope: {data:{probes:[{server,service,healthy,detail,probe_url}…], totals}}):
+      $ inspect health 'prod-*' --json --select '.data.probes[] | select(.healthy == false)'
+      $ inspect health arte --json --select '.data.totals'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect health arte
   $ inspect health arte/atlas --json
@@ -440,6 +543,15 @@ EXAMPLES
 
 const LONG_PS: &str = "\
 List containers on the selected targets.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (one envelope per container: {server,service,image,status,raw,…}):
+      $ inspect ps 'prod-*' --json --select '. | {server, service, status}'
+      $ inspect ps arte --json --select 'select(.status | startswith(\"Up\")) | .service' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect ps arte
@@ -449,6 +561,17 @@ EXAMPLES
 const LONG_LOGS: &str = "\
 Tail or view container logs. With `--follow`, streams new records until \
 interrupted; the inner SSH session auto-resumes on transient failures.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated into one
+  array first (jq -s) — useful for finite tails, not for `--follow`.
+  Examples (one envelope per line: {server, service, line, …}):
+      $ inspect logs arte/pulse --tail 200 --json --select '.line' --select-raw
+      $ inspect logs arte/pulse --tail 1000 --json \\
+            --select-slurp --select '[.[] | select(.line | test(\"ERROR\"))] | length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect logs arte/pulse --since 30m
@@ -482,10 +605,29 @@ EXAMPLES
   $ inspect grep -i \"timeout\" 'prod-*/storage' --since 30m
   $ inspect grep \"milvus\" arte/atlas:/var/log/atlas.log
   $ inspect grep 'root' arte/api:/etc/passwd        # single-file shape
-  $ inspect grep 'panic' arte/pulse --match 'goroutine' --exclude 'health'";
+  $ inspect grep 'panic' arte/pulse --match 'goroutine' --exclude 'health'
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` collects every match into one array first.
+  Examples (one envelope per match: {server, service, _source, line, count?, …}):
+      $ inspect grep 'panic' arte/pulse --json --select '.line' --select-raw
+      $ inspect grep --count 'panic' 'prod-*/atlas' --json \\
+            --select-slurp --select 'map(.count) | add'
+  See `inspect help select` for the filter language (ships in C3).";
 
 const LONG_CAT: &str = "\
 Print the contents of a file inside a container or on the host.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` collects every line into one array first.
+  Examples (one envelope per line: {server, service, path, n, line}):
+      $ inspect cat arte/atlas:/etc/atlas.conf --json --select '.line' --select-raw
+      $ inspect cat arte/atlas:/etc/atlas.conf --json --select-slurp --select 'length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect cat arte/atlas:/etc/atlas.conf
@@ -494,6 +636,15 @@ EXAMPLES
 
 const LONG_LS: &str = "\
 List directory contents on a target.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` collects every row into one array first.
+  Examples (one envelope per entry: {server, service, path, entry}):
+      $ inspect ls arte/atlas:/etc --json --select '.entry' --select-raw
+      $ inspect ls arte/atlas:/etc --json --select-slurp --select 'length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect ls arte/atlas:/etc
@@ -520,7 +671,16 @@ EXAMPLES
   $ inspect find arte/atlas:/etc \"*.conf\"
   $ inspect find arte/_:/var/log \"*.log\"
   $ inspect find arte/api:/etc \"host*\"          # quote globs to avoid local shell expansion
-  $ inspect find 'prod-*/storage:/data'             # no pattern: list everything";
+  $ inspect find 'prod-*/storage:/data'             # no pattern: list everything
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` collects every row into one array first.
+  Examples (one envelope per hit: {server, service, path}):
+      $ inspect find arte/atlas:/etc \"*.conf\" --json --select '.path' --select-raw
+      $ inspect find arte/atlas:/var/log \"*.log\" --json --select-slurp --select 'length'
+  See `inspect help select` for the filter language (ships in C3).";
 
 const LONG_LIFECYCLE: &str = "\
 Container lifecycle (the verb form chooses the action: restart / stop / \
@@ -602,6 +762,16 @@ EXIT CODES
   1   no matching compose project / service
   2   usage error (missing service portion without --all, malformed selector,
       per-service `--volumes` or `--rmi`)
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (sub-verb shapes — see JSON SCHEMAS above):
+      $ inspect compose ls arte --json --select '.data.compose_projects[].name' --select-raw
+      $ inspect compose ps arte/luminary-onyx --json \\
+            --select '.data.services[] | {service, state}'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect compose ls arte
@@ -778,6 +948,18 @@ MULTI-STEP (F17, v0.1.3)
   <audit_id>` works without further translation. The 10 MiB
   per-(step, target) capture cap stays in effect on the audit
   side; live output is uncapped.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes each NDJSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` collects every line into one array first
+  (sane for `--steps` / batched runs; avoid on `--stream --follow`).
+  Examples (per-frame envelope: {server, service, line, …}):
+      $ inspect run arte --stream --json -- 'tail -f /var/log/syslog' \\
+            --select '.line' --select-raw
+      $ inspect run arte --json -- 'docker ps --format json' \\
+            --select-slurp --select 'length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect run arte/atlas -- env
@@ -966,6 +1148,16 @@ ORDERING + JSON PROJECTION (agent-recipe critical)
   include the `revert` block. To inspect `revert.kind` / payload /
   preview, round-trip through `inspect audit show <id> --json`.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission (same engine as `inspect query`). With
+  `--select-raw` strings emit unquoted; `--select-slurp` is a no-op
+  for the single-envelope verbs (`ls`/`show`/`grep`/`gc`/`verify`).
+  Examples:
+      $ inspect audit ls --json --select '.data.entries[0].id' --select-raw
+      $ inspect audit ls --json --select '.data.entries | length'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect audit ls
   $ inspect audit ls --json | jq -r '.[0].id'   # newest entry id
@@ -1020,6 +1212,17 @@ REDACTION
   `--show-secrets` on the originating verb bypasses redaction in
   both stdout and transcript.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (`history show --json` is NDJSON, one envelope per fenced block;
+  `list` / `rotate` / `clear` emit a single envelope):
+      $ inspect history show arte --json --select '.audit_id' --select-raw
+      $ inspect history show arte --json --select-slurp \\
+            --select '[.[] | select(.exit != 0)] | length'
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect history show arte                        # today's transcript
   $ inspect history show arte --date 2026-04-28      # one specific day
@@ -1051,6 +1254,15 @@ Subcommands:
          age, staleness, and on-disk size.
   clear  Delete cached runtime snapshot(s). With no namespace,
          clears every cached namespace.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the JSON envelope
+  before emission. With `--select-raw` strings emit unquoted (jq -r);
+  with `--select-slurp` per-stream values are aggregated first (jq -s).
+  Examples (`show` envelope: {data:{namespaces:[{ns,runtime_age,…}…]}}):
+      $ inspect cache show --json --select '.data.namespaces[] | select(.stale) | .ns' --select-raw
+      $ inspect cache show --json --select '.data.namespaces | length'
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect cache show
@@ -1144,6 +1356,17 @@ Compose step kind (L8, v0.1.3):
   audit and invokes the inverse verb locally with the original
   flag set, which is the only reliable way to undo a compose step.
 
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the `bundle status`
+  JSON envelope before emission. With `--select-raw` strings emit
+  unquoted (jq -r); `--select-slurp` is a no-op for the single-
+  envelope shape.
+  Examples (envelope: {bundle_id, entries_total, steps:[{step,kind,branches,entries}…]}):
+      $ inspect bundle status <id> --json --select '.steps[] | {step, kind}'
+      $ inspect bundle status <id> --json \\
+            --select '.steps[].branches[] | select(.status == \"failed\") | .audit_id' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
+
 EXAMPLES
   $ inspect bundle plan deploy.yaml
   $ inspect bundle apply deploy.yaml --apply --reason 'INC-1234'
@@ -1156,6 +1379,14 @@ Show in-binary documentation. Run with no topic to see the topic + \
 command index, or with a topic name for the full prose. Use `--search` \
 (HP-3) to find help by keyword and `--json` (HP-4) to get the full \
 machine-readable surface.
+
+SELECTING (F19, v0.1.3)
+  `--select '<jq filter>'` projects or reshapes the `--json` help
+  envelope before emission. With `--select-raw` strings emit unquoted
+  (jq -r). The canonical agent-discovery filter is `.topics[].id`:
+      $ inspect help all --json --select '.topics[].id' --select-raw
+      $ inspect help all --json --select '.commands[] | .name' --select-raw
+  See `inspect help select` for the filter language (ships in C3).
 
 EXAMPLES
   $ inspect help
@@ -1453,6 +1684,27 @@ pub struct HelpArgs {
     /// cases and implementation notes. (Sidecars ship in HP-6.)
     #[arg(long)]
     pub verbose: bool,
+
+    /// F19 (v0.1.3): jq-language filter applied to the JSON help
+    /// envelope before emission. Requires `--json`. Lets agents do
+    /// `inspect help all --json --select '.topics[].id'` for topic
+    /// discovery without parsing the full document. See
+    /// `inspect help select` for the filter language.
+    #[arg(long, value_name = "FILTER", requires = "json")]
+    pub select: Option<String>,
+
+    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape).
+    /// Requires `--select`.
+    #[arg(long, requires = "select")]
+    pub select_raw: bool,
+
+    /// F19 (v0.1.3): collect every NDJSON value into a single array
+    /// before evaluating the filter (the `jq -s` shape). Requires
+    /// `--select`. (Help renders as a single envelope; slurp is a no-op
+    /// here but accepted for surface-uniformity with the streaming
+    /// verbs.)
+    #[arg(long, requires = "select")]
+    pub select_slurp: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1639,6 +1891,28 @@ pub struct FleetArgs {
     /// remaining namespaces.
     #[arg(long, value_name = "N")]
     pub canary: Option<usize>,
+
+    /// F19 (v0.1.3): jq-language filter applied to the aggregate
+    /// JSON envelope before emission. Requires `--json`. Lets agents
+    /// do `inspect fleet status --ns '@prod' --json --select
+    /// '.namespaces[] | select(.unhealthy)'` to drill into the rollup
+    /// without parsing the full document. See `inspect help select`
+    /// for the filter language.
+    #[arg(long, value_name = "FILTER", requires = "json")]
+    pub select: Option<String>,
+
+    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape).
+    /// Requires `--select`.
+    #[arg(long, requires = "select")]
+    pub select_raw: bool,
+
+    /// F19 (v0.1.3): collect every NDJSON value into a single array
+    /// before evaluating the filter (the `jq -s` shape). Requires
+    /// `--select`. (Fleet renders as a single envelope; slurp is a
+    /// no-op here but accepted for surface-uniformity.)
+    #[arg(long, requires = "select")]
+    pub select_slurp: bool,
+
     /// Inner verb to run (e.g. `status`, `restart`, `setup`).
     pub verb: String,
     /// Remaining args forwarded to the inner verb.

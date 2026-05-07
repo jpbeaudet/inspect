@@ -41,10 +41,16 @@ impl Filter {
         }
     }
 
-    pub fn finish(self) -> Result<String, QueryError> {
-        let buf = match self.slurp {
-            Some(buf) => buf,
-            None => return Ok(String::new()),
+    /// End-of-stream hook. Per-frame mode returns an empty string
+    /// (nothing buffered); slurp mode evaluates the filter against
+    /// the buffered array and returns the rendered output. The slurp
+    /// buffer is taken so a second call after the first is a no-op
+    /// (idempotent), which keeps the streaming wrappers in
+    /// `JsonOut::flush_filter` from having to track "did we flush
+    /// already" state.
+    pub fn finish(&mut self) -> Result<String, QueryError> {
+        let Some(buf) = self.slurp.take() else {
+            return Ok(String::new());
         };
         let values = eval_slurp_compiled(&self.compiled, &buf)?;
         if self.raw {

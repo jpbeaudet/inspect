@@ -255,12 +255,15 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         }
     }
 
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
+    let exit =
+        crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())?;
 
+    // The "any failing service" exit class takes precedence over
+    // filter-class exit codes.
     Ok(if overall_failing > 0 {
         ExitKind::Error
     } else {
-        ExitKind::Success
+        exit
     })
 }
 

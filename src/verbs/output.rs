@@ -1,8 +1,12 @@
 //! Output contract: `SUMMARY / DATA / NEXT` blocks for human mode and
 //! versioned line-delimited JSON envelopes for `--json`.
 
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Map, Value};
+
+use crate::error::{self, ExitKind};
+use crate::query::{self, ndjson, QueryErrorKind};
 
 /// Schema version stamped on every JSON record. Bumped on breaking
 /// changes (bible §10).
@@ -89,24 +93,49 @@ impl Renderer {
     /// Phase 10.3 — render whichever output the user asked for.
     ///
     /// * `Human` falls back to [`Self::print`] (with full envelope).
-    /// * `Json` emits one envelope per line via the existing
-    ///   line-delimited writer (backward-compatible with all pre-10.3
-    ///   tests).
+    /// * `Json` emits one envelope per line via [`emit_value`] which
+    ///   routes through `transcript::emit_stdout` (the pre-F19 path
+    ///   bypassed transcript via raw `println!` — fixed in this
+    ///   commit alongside the `--select` plumbing per the
+    ///   sweep-the-pattern policy in CLAUDE.md).
     /// * `Csv` / `Tsv` / `Yaml` / `Md` / `Table` / `Format` / `Raw`
     ///   delegate to [`crate::format::render::render_rows`] using the
     ///   buffered envelopes.
-    pub fn dispatch(&self, fmt: &crate::format::OutputFormat) -> anyhow::Result<()> {
+    ///
+    /// `select` is the F19 (v0.1.3) `--select` filter (taken by value
+    /// so the dispatcher owns the borrow checker around per-row
+    /// re-borrows + the end-of-stream slurp flush). When the filter
+    /// is set and yields zero results across all rows + slurp flush,
+    /// returns `Ok(ExitKind::NoMatches)` for exit code 1 — same
+    /// "zero-results = exit 1" contract as `inspect query` and
+    /// `OutputDoc::print_json`.
+    pub fn dispatch(
+        &self,
+        fmt: &crate::format::OutputFormat,
+        mut select: Option<ndjson::Filter>,
+    ) -> Result<ExitKind> {
         use crate::format::OutputFormat as F;
         match fmt {
             F::Human => {
                 self.print();
-                Ok(())
+                Ok(ExitKind::Success)
             }
             F::Json => {
+                let select_was_set = select.is_some();
+                let mut emitted = false;
                 for row in &self.rows {
-                    println!("{}", serde_json::to_string(row)?);
+                    if emit_value(row, select.as_mut())? {
+                        emitted = true;
+                    }
                 }
-                Ok(())
+                if flush_filter_with_status(select.as_mut())? {
+                    emitted = true;
+                }
+                if select_was_set && !emitted {
+                    Ok(ExitKind::NoMatches)
+                } else {
+                    Ok(ExitKind::Success)
+                }
             }
             _ => {
                 let next: Vec<NextStep> = self
@@ -115,6 +144,7 @@ impl Renderer {
                     .map(|s| NextStep::new(s.clone(), String::new()))
                     .collect();
                 crate::format::render::render_rows(&self.rows, &self.summary, &next, fmt)
+                    .map(|_| ExitKind::Success)
             }
         }
     }
@@ -161,11 +191,165 @@ impl Envelope {
 pub struct JsonOut;
 
 impl JsonOut {
-    pub fn write(env: &Envelope) {
-        if let Ok(s) = serde_json::to_string(env) {
-            crate::transcript::emit_stdout(&s);
+    /// Emit one envelope as a JSON line. The optional `filter` is the
+    /// F19 (v0.1.3) `--select` streaming filter — when present, the
+    /// envelope is converted to `serde_json::Value`, the filter is
+    /// applied, and the rendered output (if any) is emitted in place
+    /// of the bare envelope.
+    ///
+    /// Per-frame errors:
+    /// - runtime / raw-non-string → `error::emit` + skip this frame
+    ///   (the verb keeps streaming; a per-frame error must not abort
+    ///   a long-running `inspect run --stream` or `logs --follow`).
+    /// - serialize errors → propagated as anyhow.
+    ///
+    /// Slurp mode: `filter.on_line` swallows the value into the slurp
+    /// buffer and returns an empty string; emission is deferred until
+    /// the streaming caller invokes [`flush_filter`].
+    pub fn write(env: &Envelope, filter: Option<&mut ndjson::Filter>) -> Result<()> {
+        let value = serde_json::to_value(env)
+            .map_err(|e| anyhow::anyhow!("internal: envelope serialize failed: {e}"))?;
+        emit_value(&value, filter).map(|_emitted| ())
+    }
+}
+
+/// F19 (v0.1.3): emit one value through stdout, optionally filtered.
+///
+/// Returns `true` if the call wrote one or more lines to stdout. Slurp
+/// mode and runtime/raw-non-string errors return `false` (slurp defers
+/// to flush; errors emit via `error::emit` to stderr only). The bool
+/// lets `Renderer::dispatch` track whether anything was emitted across
+/// the buffered rows, so it can return `ExitKind::NoMatches` when a
+/// `--select` filter swallows every row.
+pub(crate) fn emit_value(
+    value: &serde_json::Value,
+    filter: Option<&mut ndjson::Filter>,
+) -> Result<bool> {
+    let Some(f) = filter else {
+        let s = serde_json::to_string(value)
+            .map_err(|e| anyhow::anyhow!("internal: serialize failed: {e}"))?;
+        crate::transcript::emit_stdout(&s);
+        return Ok(true);
+    };
+    match f.on_line(value) {
+        Ok(s) if s.is_empty() => Ok(false),
+        Ok(rendered) => {
+            for line in rendered.lines() {
+                crate::transcript::emit_stdout(line);
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind == QueryErrorKind::Parse => {
+            // Parse errors are caught at construction in
+            // `select_filter()`; reaching here means a bug. Bubble
+            // anyhow so it surfaces rather than silently dropping.
+            Err(anyhow::anyhow!("filter parse: {}", e.message))
+        }
+        Err(e) => {
+            let label = match e.kind {
+                QueryErrorKind::RawNonString => "filter --raw",
+                _ => "filter runtime",
+            };
+            error::emit(format!("{}: {}", label, e.message));
+            Ok(false)
         }
     }
+}
+
+/// F19 (v0.1.3): flush a streaming `Filter`'s slurp buffer at end-of-
+/// stream. No-op for per-frame mode (`finish` returns an empty string
+/// in that case). Returns the per-frame `Ok(())` / `Ok(NoMatches)` /
+/// `Err` shape so streaming verbs can propagate exit kinds uniformly.
+///
+/// Streaming verbs call this once after the per-frame loop ends:
+/// ```text
+/// for frame in stream { JsonOut::write(&env, select.as_mut())?; }
+/// flush_filter(select.as_mut())?;
+/// ```
+pub fn flush_filter(filter: Option<&mut ndjson::Filter>) -> Result<()> {
+    flush_filter_with_status(filter).map(|_| ())
+}
+
+/// Same as [`flush_filter`] but returns `true` when the slurp eval
+/// produced output. Used by `Renderer::dispatch` so a slurp-mode
+/// filter that yields a result counts toward the "emitted anything"
+/// total (otherwise the per-row counter would always be 0 for slurp
+/// and `dispatch` would return NoMatches even on a successful slurp).
+pub(crate) fn flush_filter_with_status(filter: Option<&mut ndjson::Filter>) -> Result<bool> {
+    let Some(f) = filter else { return Ok(false) };
+    match f.finish() {
+        Ok(s) if s.is_empty() => Ok(false),
+        Ok(rendered) => {
+            for line in rendered.lines() {
+                crate::transcript::emit_stdout(line);
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind == QueryErrorKind::Parse => {
+            Err(anyhow::anyhow!("filter parse: {}", e.message))
+        }
+        Err(e) => {
+            let label = match e.kind {
+                QueryErrorKind::RawNonString => "filter --raw",
+                _ => "filter runtime",
+            };
+            error::emit(format!("{}: {}", label, e.message));
+            Ok(false)
+        }
+    }
+}
+
+/// F19 (v0.1.3): emit a single JSON envelope, optionally filtered.
+///
+/// The free-function counterpart to [`OutputDoc::print_json`] for
+/// callers that hand-roll their `serde_json::Value` rather than going
+/// through the [`OutputDoc`] builder (notably `inspect search`, whose
+/// log/metric envelopes carry medium-specific shapes that don't fit
+/// the SUMMARY/DATA/NEXT mold). Behavior is identical to
+/// `OutputDoc::print_json`: same exit-code mapping, same parse/runtime
+/// error handling, same slurp/raw rendering — see that doc-comment for
+/// the full contract.
+pub fn print_json_value(value: &Value, select: Option<(&str, bool, bool)>) -> Result<ExitKind> {
+    let Some((filter, raw, slurp)) = select else {
+        let s = serde_json::to_string(value)
+            .map_err(|e| anyhow::anyhow!("internal: serialize failed: {e}"))?;
+        crate::transcript::emit_stdout(&s);
+        return Ok(ExitKind::Success);
+    };
+
+    let result = if slurp {
+        query::eval_slurp(filter, std::slice::from_ref(value))
+    } else {
+        query::eval(filter, value)
+    };
+    let values = match result {
+        Ok(v) => v,
+        Err(e) if e.kind == QueryErrorKind::Parse => {
+            return Err(anyhow::anyhow!("filter parse: {}", e.message));
+        }
+        Err(e) => {
+            error::emit(format!("filter runtime: {}", e.message));
+            return Ok(ExitKind::NoMatches);
+        }
+    };
+    if values.is_empty() {
+        return Ok(ExitKind::NoMatches);
+    }
+    let rendered = if raw {
+        match query::render_raw(&values) {
+            Ok(s) => s,
+            Err(e) => {
+                error::emit(format!("filter --raw: {}", e.message));
+                return Ok(ExitKind::NoMatches);
+            }
+        }
+    } else {
+        query::render_compact(&values)
+    };
+    for line in rendered.lines() {
+        crate::transcript::emit_stdout(line);
+    }
+    Ok(ExitKind::Success)
 }
 
 // -----------------------------------------------------------------------------
@@ -240,11 +424,26 @@ impl OutputDoc {
         self
     }
 
-    /// Print to stdout: a single JSON line for `--json` callers.
-    pub fn print_json(&self) {
-        if let Ok(s) = serde_json::to_string(self) {
-            crate::transcript::emit_stdout(&s);
-        }
+    /// Print to stdout as a single-line JSON envelope.
+    ///
+    /// `select` is the F19 (v0.1.3) `--select` triple: filter source,
+    /// raw-rendering flag, slurp flag. `None` reproduces the v0.1.2
+    /// behavior (one envelope, full shape). `Some` evaluates the
+    /// filter against the envelope and emits the rendered result.
+    ///
+    /// Exit-code mapping (returned for the verb to propagate):
+    /// - parse error → `Err(anyhow!("filter parse: …"))` → exit 2
+    ///   (top-level `error::emit` adds the canonical "error: " prefix
+    ///   and, once the C3 catalog row lands, the
+    ///   `see: inspect help select` cross-link).
+    /// - runtime / `--select-raw` non-string → `error::emit` + return
+    ///   `Ok(ExitKind::NoMatches)` → exit 1.
+    /// - zero results → `Ok(NoMatches)` → exit 1.
+    /// - success → `Ok(Success)` → exit 0.
+    pub fn print_json(&self, select: Option<(&str, bool, bool)>) -> Result<ExitKind> {
+        let value = serde_json::to_value(self)
+            .map_err(|e| anyhow::anyhow!("internal: envelope serialize failed: {e}"))?;
+        print_json_value(&value, select)
     }
 
     /// Print as SUMMARY/DATA/NEXT human blocks. Caller supplies the

@@ -19,6 +19,7 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 use unicode_width::UnicodeWidthStr;
 
+use crate::error::ExitKind;
 use crate::format::template::Template;
 use crate::format::OutputFormat;
 use crate::verbs::output::{NextStep, OutputDoc};
@@ -31,23 +32,31 @@ use crate::verbs::output::{NextStep, OutputDoc};
 /// are the pre-rendered DATA lines used in default human output; the
 /// renderer falls back to a generic projection of `doc.data` for
 /// table/csv/etc.
-pub fn render_doc(doc: &OutputDoc, fmt: &OutputFormat, human_lines: &[String]) -> Result<()> {
+///
+/// `select` is the F19 (v0.1.3) `--select` triple (filter source, raw
+/// flag, slurp flag). It is meaningful only on the JSON branch; the
+/// non-JSON branches return `Ok(Success)` because `FormatArgs::resolve`
+/// already rejects `--select` against any non-JSON-class format with
+/// a usage-class error before reaching this point.
+pub fn render_doc(
+    doc: &OutputDoc,
+    fmt: &OutputFormat,
+    human_lines: &[String],
+    select: Option<(&str, bool, bool)>,
+) -> Result<ExitKind> {
     match fmt {
         OutputFormat::Human => {
             doc.print_human(human_lines);
-            Ok(())
+            Ok(ExitKind::Success)
         }
-        OutputFormat::Json => {
-            doc.print_json();
-            Ok(())
-        }
-        OutputFormat::Yaml => render_doc_yaml(doc),
-        OutputFormat::Table => render_doc_table(doc, human_lines, false),
-        OutputFormat::Md => render_doc_markdown(doc, human_lines),
-        OutputFormat::Csv => render_doc_rows_delimited(doc, ","),
-        OutputFormat::Tsv => render_doc_rows_delimited(doc, "\t"),
-        OutputFormat::Format(tpl) => render_doc_template(doc, tpl),
-        OutputFormat::Raw => render_doc_raw(doc, human_lines),
+        OutputFormat::Json => doc.print_json(select),
+        OutputFormat::Yaml => render_doc_yaml(doc).map(|_| ExitKind::Success),
+        OutputFormat::Table => render_doc_table(doc, human_lines, false).map(|_| ExitKind::Success),
+        OutputFormat::Md => render_doc_markdown(doc, human_lines).map(|_| ExitKind::Success),
+        OutputFormat::Csv => render_doc_rows_delimited(doc, ",").map(|_| ExitKind::Success),
+        OutputFormat::Tsv => render_doc_rows_delimited(doc, "\t").map(|_| ExitKind::Success),
+        OutputFormat::Format(tpl) => render_doc_template(doc, tpl).map(|_| ExitKind::Success),
+        OutputFormat::Raw => render_doc_raw(doc, human_lines).map(|_| ExitKind::Success),
     }
 }
 

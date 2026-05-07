@@ -53,7 +53,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
         }
     }
     renderer.summary(format!("{count} volume(s)"));
-    let __fmt = args.format.resolve()?;
-    renderer.dispatch(&__fmt)?;
-    Ok(ExitKind::Success)
+    let fmt = args.format.resolve()?;
+    let select = args.format.select_filter()?;
+    renderer.dispatch(&fmt, select)
 }

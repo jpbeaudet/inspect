@@ -99,6 +99,35 @@ pub struct FormatArgs {
     /// `--json` / `--jsonl` (those formats are already trailer-free).
     #[arg(long, conflicts_with_all = ["json", "jsonl"])]
     pub quiet: bool,
+
+    /// F19 (v0.1.3): apply a jq-language filter to the JSON output
+    /// before emission. Requires `--json` or `--jsonl`. The filter
+    /// language is the same one `jq` (and `jaq`) implement; see
+    /// `inspect help select` for the full reference.
+    ///
+    /// Examples:
+    ///   --json --select '.summary' -r
+    ///   --json --select '.data.entries | length'
+    ///   --json --select '.data.services[] | select(.healthy == false)'
+    #[arg(long, value_name = "FILTER")]
+    pub select: Option<String>,
+
+    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape)
+    /// instead of compact JSON. Errors with exit code 1 if any yield
+    /// is not a string — the alternative (silently quoting non-strings
+    /// as JSON) would let literal `"` characters reach `xargs` /
+    /// `wc -l` / shell loops and cause subtle quoting bugs. Requires
+    /// `--select`.
+    #[arg(long, requires = "select")]
+    pub select_raw: bool,
+
+    /// F19 (v0.1.3): collect every NDJSON value from the stream into a
+    /// single array before evaluating the filter (the `jq -s` shape).
+    /// Lets `length` / `map(.x) | unique` / `reduce .[] as $x (…)`
+    /// work over the whole stream. Memory is O(stream); use sparingly
+    /// on unbounded streams. Requires `--select`.
+    #[arg(long, requires = "select")]
+    pub select_slurp: bool,
 }
 
 impl FormatArgs {
@@ -151,6 +180,17 @@ impl FormatArgs {
         } else {
             OutputFormat::Human
         };
+        // F19 (v0.1.3): `--select` is a JSON-only filter. Reject it
+        // against any non-JSON-class format with the same anyhow →
+        // exit 2 path the format-mutex check uses. The `--quiet`
+        // mutex is enforced transitively: `--quiet` is already
+        // `conflicts_with_all = ["json", "jsonl"]` at clap level, so
+        // `--quiet --select` falls out of `--json` and lands here.
+        if self.select.is_some() && !matches!(fmt, OutputFormat::Json) {
+            return Err(anyhow!(
+                "--select requires --json or --jsonl (output format is {fmt:?})"
+            ));
+        }
         Ok(fmt)
     }
 
@@ -159,6 +199,41 @@ impl FormatArgs {
     /// fast paths while migrating gradually.
     pub fn is_json(&self) -> bool {
         self.json || self.jsonl
+    }
+
+    /// F19 (v0.1.3): build a streaming `query::ndjson::Filter` from the
+    /// `--select` / `--select-raw` / `--select-slurp` triple. Returns
+    /// `Ok(None)` when no filter was requested, `Ok(Some(filter))` on
+    /// successful compile, and an anyhow error keyed with the
+    /// canonical "filter parse:" prefix on parse failure (so main's
+    /// `error::emit` renders the standard `error: filter parse: …`
+    /// shape, with the C3 catalog row attaching the cross-link to
+    /// `inspect help select`).
+    ///
+    /// Streaming verbs (logs, grep, run --stream, …) call this once
+    /// at verb entry and thread `select.as_mut()` through their
+    /// per-frame loop into [`crate::verbs::output::JsonOut::write`].
+    pub fn select_filter(&self) -> Result<Option<crate::query::ndjson::Filter>> {
+        let Some(filter) = self.select.as_deref() else {
+            return Ok(None);
+        };
+        crate::query::ndjson::Filter::new(filter, self.select_raw, self.select_slurp)
+            .map(Some)
+            .map_err(|e| anyhow!("filter parse: {}", e.message))
+    }
+
+    /// F19 (v0.1.3): single-shot variant for envelope verbs that emit
+    /// one `OutputDoc` per invocation. Returns the (filter, raw,
+    /// slurp) triple as plain references so the envelope chokepoint
+    /// in [`crate::verbs::output::OutputDoc::print_json`] can call
+    /// `query::eval` / `eval_slurp` + `render_compact` / `render_raw`
+    /// directly without round-tripping through the streaming `Filter`
+    /// (which would need a `&mut` borrow that doesn't fit a single-
+    /// shot consumer).
+    pub fn select_spec(&self) -> Option<(&str, bool, bool)> {
+        self.select
+            .as_deref()
+            .map(|f| (f, self.select_raw, self.select_slurp))
     }
 }
 
@@ -208,5 +283,86 @@ mod tests {
         let mut a = args();
         a.raw = true;
         assert_eq!(a.resolve().unwrap(), OutputFormat::Raw);
+    }
+
+    // --- F19: --select validation + helpers --------------------------------
+
+    #[test]
+    fn select_with_json_resolves() {
+        let mut a = args();
+        a.json = true;
+        a.select = Some(".summary".into());
+        assert_eq!(a.resolve().unwrap(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn select_with_jsonl_resolves() {
+        let mut a = args();
+        a.jsonl = true;
+        a.select = Some(".line".into());
+        assert_eq!(a.resolve().unwrap(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn select_without_json_class_format_errors() {
+        let mut a = args();
+        // Default format is Human — `--select '.x'` should reject.
+        a.select = Some(".x".into());
+        let err = a.resolve().unwrap_err().to_string();
+        assert!(err.contains("--select"), "got: {err}");
+        assert!(err.contains("--json or --jsonl"), "got: {err}");
+    }
+
+    #[test]
+    fn select_with_csv_errors() {
+        let mut a = args();
+        a.csv = true;
+        a.select = Some(".x".into());
+        let err = a.resolve().unwrap_err().to_string();
+        assert!(err.contains("--select"));
+        assert!(err.contains("--json or --jsonl"));
+    }
+
+    #[test]
+    fn select_filter_returns_none_when_unset() {
+        let a = args();
+        let f = a.select_filter().unwrap();
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn select_filter_compiles_valid_filter() {
+        let mut a = args();
+        a.select = Some(".summary".into());
+        let f = a.select_filter().unwrap();
+        assert!(f.is_some());
+    }
+
+    #[test]
+    fn select_filter_parse_error_carries_canonical_prefix() {
+        let mut a = args();
+        // Unbalanced bracket → jaq parse error.
+        a.select = Some(".[".into());
+        let err = a.select_filter().unwrap_err().to_string();
+        assert!(
+            err.starts_with("filter parse:"),
+            "expected canonical 'filter parse:' prefix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn select_spec_returns_triple_when_set() {
+        let mut a = args();
+        a.select = Some(".data".into());
+        a.select_raw = true;
+        a.select_slurp = false;
+        let spec = a.select_spec().unwrap();
+        assert_eq!(spec, (".data", true, false));
+    }
+
+    #[test]
+    fn select_spec_returns_none_when_unset() {
+        let a = args();
+        assert!(a.select_spec().is_none());
     }
 }

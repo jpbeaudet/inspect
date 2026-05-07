@@ -10,7 +10,15 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(args: LsArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
+
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
 
     let mut any_ok = false;
     for step in iter_steps(&nses, &targets) {
@@ -54,7 +62,8 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
                         .put("path", path)
                         .put("error", out.stderr.trim())
                         .put("exit", out.exit_code),
-                );
+                    select.as_mut(),
+                )?;
             }
             continue;
         }
@@ -69,7 +78,8 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
                             "entry",
                             crate::format::safe::safe_machine_line(line).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                )?;
             }
         } else {
             let svc_part = step.service().map(|s| format!("/{s}")).unwrap_or_default();
@@ -82,6 +92,9 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
                 crate::tee_println!("{safe}");
             }
         }
+    }
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
     Ok(if any_ok {
         ExitKind::Success

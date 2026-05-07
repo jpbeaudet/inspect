@@ -243,9 +243,9 @@ pub fn run(args: PortsArgs) -> Result<ExitKind> {
     }
     renderer.summary(format!("{count} port-line(s)"));
     renderer.quiet(args.format.quiet);
-    let __fmt = args.format.resolve()?;
-    renderer.dispatch(&__fmt)?;
-    Ok(ExitKind::Success)
+    let fmt = args.format.resolve()?;
+    let select = args.format.select_filter()?;
+    renderer.dispatch(&fmt, select)
 }
 
 /// L9 (v0.1.3): recognize the `--- tcp ---` / `--- udp ---` markers

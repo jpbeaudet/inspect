@@ -20,6 +20,9 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
+    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
@@ -43,6 +46,11 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
 
     let case_insensitive = resolve_case(&args);
     let mut matches = 0usize;
+
+    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
 
     for step in iter_steps(&nses, &targets) {
         let svc_for_cursor = step.service().unwrap_or("_").to_string();
@@ -106,7 +114,8 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)
                         .put("count", n),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 crate::tee_println!("{}/{}: {n}", step.ns.namespace, svc);
             }
@@ -130,7 +139,8 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                             "line",
                             crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
                     &masked,
@@ -139,6 +149,10 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                 crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc);
             }
         }
+    }
+
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     Ok(if matches > 0 {

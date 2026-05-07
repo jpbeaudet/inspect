@@ -115,6 +115,5 @@ pub fn run(args: ComposeConfigArgs) -> Result<ExitKind> {
     .with_meta("selector", args.selector.clone())
     .with_quiet(args.format.quiet);
 
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
-    Ok(ExitKind::Success)
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
