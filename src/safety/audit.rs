@@ -504,15 +504,44 @@ impl AuditStore {
     }
 
     pub fn append(&self, entry: &AuditEntry) -> Result<()> {
-        let path = self.current_path();
-        let line = serde_json::to_string(entry)?;
-        append_locked(&path, &line)?;
-        let _ = set_file_mode_0600(&path);
+        self.append_inner(entry)?;
         // F18 (v0.1.3): cross-link from transcript → audit. First
         // audit append wins; on multi-audit verbs (F17 `--steps`)
         // the parent entry is appended first so the transcript
         // footer points at the umbrella id.
         crate::transcript::set_audit_id(&entry.id);
+        Ok(())
+    }
+
+    /// P8-C fix (v0.1.3): persist an audit entry without linking it
+    /// to the active transcript block.
+    ///
+    /// Used exclusively by side-effect audits whose IDs would otherwise
+    /// clobber the primary verb's `audit_id` in the F18 transcript
+    /// footer (`set_audit_id` is first-write-wins by design — that
+    /// rule is correct for F17 `--steps` parent/child ordering, but
+    /// would be wrong for F13 `connect.reauth`, which is appended
+    /// **before** the verb's own primary audit on the
+    /// reauth-then-retry path. Linking the reauth id into the footer
+    /// would make `inspect history show --audit-id <verb_id>` return
+    /// 0 blocks even though a block exists for that invocation —
+    /// exactly the silent-correlation gap surfaced as P8-C in the
+    /// release smoke).
+    ///
+    /// The reauth entry is still findable via `audit show`,
+    /// `audit grep`, `audit ls`, and remains forensically connected
+    /// to the verb via the F13 `retry_of` field on the verb's primary
+    /// audit (set during dispatch retry). The contract this method
+    /// breaks is solely the transcript footer link.
+    pub fn append_without_transcript_link(&self, entry: &AuditEntry) -> Result<()> {
+        self.append_inner(entry)
+    }
+
+    fn append_inner(&self, entry: &AuditEntry) -> Result<()> {
+        let path = self.current_path();
+        let line = serde_json::to_string(entry)?;
+        append_locked(&path, &line)?;
+        let _ = set_file_mode_0600(&path);
         // L5 (v0.1.3): cheap-path lazy retention check. Best-effort —
         // GC failure must never break the just-appended audit record,
         // and the marker-file guard inside `maybe_run_lazy_gc` ensures
@@ -711,6 +740,64 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].verb, "edit");
         assert_eq!(all[0].selector, "arte/atlas:/etc/atlas.conf");
+    }
+
+    /// P8-C contract (v0.1.3): `append_without_transcript_link`
+    /// persists the entry the same way `append` does, but skips the
+    /// `transcript::set_audit_id` cross-link. Used by F13 `connect.reauth`
+    /// so the side-effect reauth audit doesn't clobber the verb's
+    /// own primary audit in the F18 transcript footer.
+    #[test]
+    fn p8c_append_without_transcript_link_persists_but_does_not_link() {
+        let _guard = crate::paths::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("INSPECT_HOME", tmp.path());
+
+        // Fresh transcript context with a namespace set, so
+        // set_audit_id calls would actually mutate state.
+        crate::transcript::reset_for_test();
+        crate::transcript::init(&["inspect".into(), "test".into()]);
+        crate::transcript::set_namespace("arte");
+        assert_eq!(crate::transcript::audit_id_for_test(), None);
+
+        let s = AuditStore::open().unwrap();
+
+        // First, exercise the silent path: reauth-class audit. Persists
+        // to disk, but the transcript footer slot stays None.
+        let mut reauth = AuditEntry::new("connect.reauth", "arte");
+        reauth.args = "trigger=transport_stale".into();
+        s.append_without_transcript_link(&reauth).unwrap();
+        assert_eq!(
+            crate::transcript::audit_id_for_test(),
+            None,
+            "append_without_transcript_link must not call set_audit_id"
+        );
+
+        // Then, the verb's own primary audit. Persists AND links —
+        // the footer now points at this id, NOT the reauth id, even
+        // though the reauth was appended first in time. This is the
+        // exact ordering that breaks pre-fix on F13 reauth-then-retry.
+        let mut primary = AuditEntry::new("run", "arte");
+        primary.args = "cmd=echo".into();
+        let primary_id = primary.id.clone();
+        s.append(&primary).unwrap();
+        assert_eq!(
+            crate::transcript::audit_id_for_test(),
+            Some(primary_id),
+            "append must call set_audit_id so the verb's audit_id wins the F18 footer"
+        );
+
+        // Both entries are on disk via the regular query path —
+        // the silent variant is fully forensically discoverable.
+        let all = s.all().unwrap();
+        assert_eq!(all.len(), 2);
+        let verbs: Vec<_> = all.iter().map(|e| e.verb.as_str()).collect();
+        assert!(verbs.contains(&"connect.reauth"));
+        assert!(verbs.contains(&"run"));
+
+        crate::transcript::reset_for_test();
     }
 
     /// Concurrent `--apply` on the same audit log must not interleave

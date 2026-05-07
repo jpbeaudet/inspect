@@ -311,6 +311,26 @@ pub fn set_audit_id(id: &str) {
     }
 }
 
+/// P8-C test helper (v0.1.3): observe the linked audit_id without
+/// going through `finalize`. Lets unit tests verify the contract that
+/// `AuditStore::append_without_transcript_link` does NOT clobber the
+/// transcript footer. Cfg-gated to keep production builds free of
+/// this introspection surface.
+#[cfg(test)]
+pub fn audit_id_for_test() -> Option<String> {
+    let g = slot().lock().unwrap_or_else(|p| p.into_inner());
+    g.as_ref().and_then(|ctx| ctx.audit_id.clone())
+}
+
+/// P8-C test helper (v0.1.3): force-reset the transcript context so
+/// tests can run in isolation against the global slot. Pairs with
+/// `audit_id_for_test`. Cfg-gated.
+#[cfg(test)]
+pub fn reset_for_test() {
+    let mut g = slot().lock().unwrap_or_else(|p| p.into_inner());
+    *g = None;
+}
+
 /// Tee a stdout line. Called by the rendering layer's `emit_*`
 /// helpers — the operator-visible side-effect (println!) is the
 /// caller's responsibility; this side stays silent on stdout and

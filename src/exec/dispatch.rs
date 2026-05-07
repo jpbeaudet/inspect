@@ -98,7 +98,14 @@ pub fn dispatch_with_reauth<T>(
             format!("trigger=transport_stale,original_verb={original_verb},selector={selector}");
         e.exit = 0;
         let id = e.id.clone();
-        let _ = store.append(&e);
+        // P8-C fix (v0.1.3): the reauth entry is a side-effect of the
+        // operator's verb invocation, not the primary audit. Skip the
+        // F18 transcript link so the verb's own audit_id (appended
+        // later on retry success) wins the footer slot. The reauth
+        // entry remains discoverable via `audit show <reauth_id>` /
+        // `audit grep verb=connect.reauth` and chains forensically to
+        // the verb via the verb-side `retry_of` field.
+        let _ = store.append_without_transcript_link(&e);
         id
     });
 

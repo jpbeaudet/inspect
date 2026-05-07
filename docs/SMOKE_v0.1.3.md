@@ -616,7 +616,7 @@ operator is the workaround.
    and validates that both data frames and trailing summary frames
    flow correctly.
 
-### P8-C — F18 transcript correlation gap on `connect` entries (☐ open)
+### P8-C — F18 transcript correlation gap on `connect` entries (✅ Done — fix landed; awaiting re-smoke validation)
 
 **Repro:**
 ```sh
@@ -661,6 +661,38 @@ silent-data-loss class the v0.1.3 release ships to close.
      not "0 blocks match" as if it were a generic miss).
 3. P8 grows a recipe that validates the chosen path against a
    real arte session.
+
+**Resolution (2026-05-07).** Path (a) implemented end-to-end.
+Diagnosis: hypothesis (1) was the surface trap (connect/disconnect
+never called `transcript::set_namespace`, producing no block at
+all), and hypothesis (3) was the latent class trap (F13 reauth
+audit clobbered the verb's primary `audit_id` in the footer because
+`set_audit_id` is first-write-wins and reauth was appended first
+on the reauth-then-retry path). Fix landed all three in one commit
+per the LLM-trap fix-on-first-surface policy (sweep the class):
+
+- `src/commands/connect.rs` and `src/commands/disconnect.rs` now
+  call `transcript::set_namespace` early (covering `--show` /
+  `--set-env` / `--unset-env` / master-spawn / unknown-ns paths)
+  and emit `verb=connect` / `verb=disconnect` audit entries with
+  `revert.kind=unsupported` pointing at the inverse verb.
+- `src/safety/audit.rs` factors `AuditStore::append` into a
+  transcript-linking variant + a silent
+  `append_without_transcript_link` variant; `src/exec/dispatch.rs`
+  switches the F13 reauth append to the silent form so the verb's
+  primary audit_id wins the F18 footer slot. Reauth audit remains
+  on disk + `audit show`-discoverable.
+
+Tests pinning the contract: 1 unit (`safety::audit::tests::
+p8c_append_without_transcript_link_persists_but_does_not_link`,
+exercises the reauth-then-verb append order that breaks pre-fix)
++ 2 integration (`p8c_connect_show_writes_transcript_block_under_namespace`,
+`p8c_disconnect_against_unknown_ns_still_writes_transcript_block`).
+
+Acceptance criterion #3 (P8 recipe against real arte) is the next
+P8 dry-run — the existing recipe (4) round-trips
+`audit ls → history show --audit-id` and will validate the fix
+end-to-end without further changes.
 
 ### P8-D — `inspect run --apply` exit 2 + stderr swallow (🟡 stderr-surface fix landed; awaiting re-smoke)
 

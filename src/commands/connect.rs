@@ -10,11 +10,26 @@ use crate::config::file as config_file;
 use crate::config::namespace::{is_valid_env_key, validate_namespace_name};
 use crate::config::resolver;
 use crate::error::ExitKind;
+use crate::safety::audit::{AuditEntry, AuditStore, Revert};
 use crate::ssh::master::AuthSelection;
 use crate::ssh::{self, SshTarget};
 
 pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
+
+    // P8-C fix (v0.1.3): stamp the F18 transcript with the resolved
+    // namespace immediately so every `inspect connect <ns>`
+    // invocation lands in the per-ns transcript file, the same way
+    // every namespace-resolving verb that flows through
+    // `runtime::resolve_target` already does. Pre-fix, the connect
+    // command never called `transcript::set_namespace`, so its
+    // output never produced a fenced block — leaving an undocumented
+    // hole in the F18 contract that surfaced during the release
+    // smoke as P8-C ("history show --audit-id <connect_id>: 0
+    // blocks match"). The set call must be early enough to cover
+    // the `--show` / `--set-env` / `--unset-env` early-return paths
+    // too — those are still namespace-scoped invocations.
+    crate::transcript::set_namespace(&args.namespace);
 
     // F12 (v0.1.3): env-overlay management subcommands. These are
     // mutually exclusive with the connect-master path: `--show`,
@@ -74,6 +89,38 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
         },
     )
     .with_context(|| format!("connect '{}'", resolved.name))?;
+
+    // P8-C fix (v0.1.3): emit a structured audit entry for the
+    // connect itself so the F18 transcript footer carries an
+    // `audit_id=<id>` cross-link (matching every other
+    // namespace-resolving verb). The entry is also independently
+    // useful: it lets `audit grep verb=connect` enumerate every
+    // master-spawn event for forensics, and it gives `revert <id>
+    // --dry-run` a manual-inverse to print (`inspect disconnect
+    // <ns>`). Revert is `Unsupported` because the inverse is itself
+    // an `inspect` invocation that the local `revert` runner cannot
+    // dispatch on a remote target — the operator has to run it
+    // themselves. Failure to write the audit is intentionally
+    // best-effort: `inspect connect` is fundamentally about session
+    // ergonomics, and a momentary audit-store failure (e.g. lazy GC
+    // mid-flight) must not turn a successful connect into a
+    // user-visible error.
+    if let Ok(store) = AuditStore::open() {
+        let mut e = AuditEntry::new("connect", &resolved.name);
+        e.args = format!(
+            "auth={auth},ttl={ttl},ttl_source={src},interactive={interactive},save={save}",
+            auth = outcome.auth_mode.label(),
+            ttl = outcome.ttl,
+            src = ttl_source.label(),
+            interactive = args.interactive,
+            save = args.save_passphrase,
+        );
+        e.revert = Some(Revert::unsupported(format!(
+            "inspect disconnect {}",
+            resolved.name
+        )));
+        let _ = store.append(&e);
+    }
 
     // F12 (v0.1.3): `--detect-path` needs the master open before it
     // can ssh. Run it after start_master succeeds; on any failure

@@ -155,6 +155,88 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **`inspect connect` / `inspect disconnect` now produce F18
+  transcript blocks with `audit_id=` footers, and F13
+  `connect.reauth` no longer clobbers the verb's primary
+  `audit_id` in the footer (P8-C / F19 release-smoke).** Surfaced
+  during the F19 release-smoke prep against arte on 2026-05-07: an
+  agent ran `inspect audit ls --limit 1 --json --select
+  '.data.entries[0].id'` to grab the most recent audit id, then
+  `inspect history show --audit-id <id>`, which returned `0 blocks
+  match` for any connect-class id. Diagnosis: pre-fix, neither
+  `inspect connect <ns>` nor `inspect disconnect <ns>` called
+  `transcript::set_namespace`, so they produced **no** per-namespace
+  transcript block at all — the F18 contract had a silent hole that
+  only surfaced when an agent tried to round-trip `audit_id ↔
+  transcript block`. A second, related trap: when F13's auto-reauth
+  fired from inside another verb's dispatch, the `connect.reauth`
+  audit was appended **before** the verb's own primary audit, and
+  `transcript::set_audit_id` is first-write-wins (intentionally so
+  for F17 `--steps` parent/child ordering) — so the footer ended up
+  pointing at the reauth id instead of the verb's audit id, and
+  `--audit-id <verb_id>` returned `0 blocks` for an invocation that
+  did have a transcript block. Both shapes are exactly the
+  silent-correlation gap v0.1.3 ships to close.
+
+  **Fix — three changes, one commit (LLM-trap fix-on-first-surface
+  / sweep-the-class).** (1) `src/commands/connect.rs::run` now
+  calls `crate::transcript::set_namespace(&args.namespace)` before
+  any branch (so `--show`, `--set-env`, `--unset-env`, and the
+  master-spawn path all produce a transcript block); on master-
+  spawn success it also writes a structured `verb=connect` audit
+  entry with `args=auth=<mode>,ttl=<v>,ttl_source=<src>,
+  interactive=<bool>,save=<bool>` and
+  `revert.kind=unsupported,preview="inspect disconnect <ns>"` so
+  the F18 footer carries `audit_id=<id>` and `audit grep
+  verb=connect` enumerates every master-spawn event. (2)
+  `src/commands/disconnect.rs::run` mirrors the connect treatment:
+  early `set_namespace` (even unknown-namespace failures produce a
+  forensic block — "the operator tried; here's why it failed"),
+  plus a `verb=disconnect` audit entry with
+  `args=prior=<state>,closed=<bool>` and inverse-preview
+  `inspect connect <ns>`. (3) `src/safety/audit.rs` factors
+  `AuditStore::append` into `append` (links to transcript) +
+  `append_without_transcript_link` (does not), and
+  `src/exec/dispatch.rs` switches the F13 reauth audit append to
+  the silent variant — the reauth entry is still on disk, still
+  visible to `audit show` / `audit grep verb=connect.reauth`, but
+  it no longer contests the F18 footer slot, so the verb's primary
+  `audit_id` wins as designed.
+
+  **Why three changes, not one.** The trap class is "audit IDs
+  that don't correlate to transcript blocks." Just adding
+  `set_namespace` to connect/disconnect would have left the F13
+  reauth-ordering subcase live on every other verb (run, status,
+  logs, edit, …); just splitting `append` would have left
+  connect/disconnect with no transcript blocks at all. Fixing the
+  class in one breath matches the field-validated invariant in
+  `CLAUDE.md` ("LLM-trap fix-on-first-surface … sweep the same
+  pattern across the codebase").
+
+  **Tracker:** `docs/SMOKE_v0.1.3.md` § *P8 follow-ups* P8-C
+  entry flips to ✅ Done with this commit. The end-to-end happy
+  path (audit ls → history show --audit-id round-trip on a
+  freshly-connected namespace) is exercised by P8 recipe (4)
+  against a real arte session on the next dry-run.
+
+  **Tests.** 1 new unit test in
+  `safety::audit::tests::p8c_append_without_transcript_link_persists_but_does_not_link`
+  pins the audit-store split contract end-to-end (sets up a real
+  transcript context, calls both append paths in the
+  reauth-then-verb order that breaks pre-fix, asserts the verb's
+  primary id wins the footer slot while both entries persist to
+  disk). 2 new integration tests in `tests/phase_f_v013.rs`
+  (`p8c_connect_show_writes_transcript_block_under_namespace`,
+  `p8c_disconnect_against_unknown_ns_still_writes_transcript_block`)
+  pin the connect/disconnect transcript-block-creation half of the
+  contract via the no-network paths (`--show` and unknown-ns
+  resolver-failure). Audit schema additions: new `connect` /
+  `disconnect` verb names join the existing taxonomy
+  (`connect.reauth`, `keychain.remove`, `ssh.add-key`, …) — both
+  declare `revert.kind=unsupported` because their inverses are
+  themselves `inspect` invocations the local `revert` runner
+  cannot dispatch on a remote target.
+
 - **Streaming verbs now surface remote stderr on a non-zero command
   exit (P8-D / F19 release-smoke).** Surfaced during the F19
   release-smoke prep on 2026-05-07 against arte: an

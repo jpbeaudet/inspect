@@ -9654,6 +9654,117 @@ fn smoke_add_non_interactive_missing_host_emits_flag_hint() {
         );
 }
 
+// ---------------------------------------------------------------------------
+// P8-C — F18 transcript ↔ audit-id correlation gap on `connect`/`disconnect`
+// ---------------------------------------------------------------------------
+// Surfaced during the v0.1.3 release smoke: an agent ran `inspect audit ls
+// --limit 1 --json --select '.data.entries[0].id'` to grab the most recent
+// audit id and then `inspect history show --audit-id <id>`, which returned
+// "0 blocks match" for any connect-class id. Diagnosis: pre-fix, neither
+// `inspect connect <ns>` nor `inspect disconnect <ns>` called
+// `transcript::set_namespace`, so they produced no per-namespace transcript
+// block at all — leaving an undocumented hole in the F18 contract that
+// only surfaced when an agent tried to round-trip `audit_id → transcript
+// block`. Pre-fix, the F13 `connect.reauth` audit (the one connect-class
+// audit that DID exist) also clobbered the verb's primary `audit_id` in
+// the transcript footer because `set_audit_id` is first-write-wins.
+//
+// Fix: connect/disconnect now call `transcript::set_namespace` early and
+// emit their own audit entries so the F18 footer carries an
+// `audit_id=<id>` link. The F13 reauth audit now uses
+// `AuditStore::append_without_transcript_link` so it does NOT clobber the
+// verb's primary audit_id (still on disk, still findable by `audit show`).
+//
+// These tests pin the transcript-block-creation half of the contract via
+// the `inspect connect <ns> --show` path (no SSH needed). The
+// audit-id-footer half is unit-tested in `safety::audit::tests::
+// p8c_append_without_transcript_link_persists_but_does_not_link`. The
+// end-to-end happy path is exercised in P8 of `docs/SMOKE_v0.1.3.md` via
+// recipe (4) against a real arte session.
+
+#[test]
+fn p8c_connect_show_writes_transcript_block_under_namespace() {
+    let sb = Sandbox::new(json!([]));
+    write_servers_toml(sb.home(), &["arte"]);
+
+    sb.cmd()
+        .args(["connect", "arte", "--show"])
+        .assert()
+        .success();
+
+    // Find the per-ns transcript file under <home>/history/. Skip
+    // the `.rotated` marker file that lazy-rotation drops next to
+    // the live transcripts.
+    let history = sb.home().join("history");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&history)
+        .expect("history dir created on connect --show")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .map(|s| s.to_string_lossy().into_owned() == "log")
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    assert_eq!(
+        files.len(),
+        1,
+        "expected exactly one .log transcript file, got {files:?}"
+    );
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with("arte-") && name.ends_with(".log"),
+        "transcript filename must be <ns>-<YYYY-MM-DD>.log; got {name}"
+    );
+
+    // The block must contain a fence header, the argv line, and an exit
+    // footer. We don't assert audit_id presence here — `--show` is a
+    // read-only env-overlay query that doesn't write an audit entry by
+    // design, so the footer correctly omits `audit_id=`. The
+    // audit-id-on-master-spawn contract is tested separately (the unit
+    // test for `append_without_transcript_link` proves the linking
+    // mechanism works; the end-to-end is in the P8 smoke recipe).
+    let body = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        body.contains("── exit="),
+        "transcript block must include exit footer; got:\n{body}"
+    );
+    assert!(
+        body.contains("$ ") && body.contains("connect arte --show"),
+        "transcript block must include the argv line; got:\n{body}"
+    );
+}
+
+#[test]
+fn p8c_disconnect_against_unknown_ns_still_writes_transcript_block() {
+    // Disconnect for a not-configured namespace fails at resolver::resolve.
+    // Per the P8-C fix, `transcript::set_namespace` is called BEFORE the
+    // resolver runs so the failed attempt still produces a forensic
+    // transcript block ("the operator tried; here's why it failed") — the
+    // F18 contract is "every namespace-scoped invocation gets a block",
+    // not "every successful one". Pre-fix, the verb produced no block
+    // at all on this path either, so a post-mortem operator had no
+    // record of the attempt.
+    let sb = Sandbox::new(json!([]));
+    // Empty servers.toml — no namespaces configured.
+    write_servers_toml(sb.home(), &[]);
+
+    sb.cmd().args(["disconnect", "ghost"]).assert().failure();
+
+    let history = sb.home().join("history");
+    let exists = history.exists()
+        && std::fs::read_dir(&history)
+            .map(|rd| rd.count())
+            .unwrap_or(0)
+            > 0;
+    assert!(
+        exists,
+        "P8-C: disconnect of unknown namespace must still produce a transcript block \
+         under <home>/history/ (the namespace was syntactically valid, so set_namespace \
+         is called before the resolver fails)"
+    );
+}
+
 #[test]
 fn smoke_add_help_documents_no_env_var_form() {
     let sb = Sandbox::new(json!([]));
