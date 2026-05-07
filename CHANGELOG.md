@@ -155,6 +155,63 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **`inspect help select` now documents the `--select` streaming
+  null-safety idiom (P8-B / F19 release-smoke).** Surfaced during
+  the F19 release-smoke prep against arte: an agent followed the
+  pitfall #6 ("null-safe paths") suggestion and ran
+  `inspect run arte --stream --json --select '.line' --select-raw
+  -- "docker logs -f does-not-exist"`, which trips the
+  per-frame error envelope (no `.line` key on the error frame).
+  `--select '.line'` yields `null`; `--select-raw` rejects null
+  as non-string with `error: filter --raw: filter yielded
+  non-string`. An agent tailing real-time logs sees a filter
+  error every time the verb encounters an error frame, even
+  though "show me lines" is a perfectly well-defined intent.
+
+  **Fix.** New "common pitfall #7" entry in
+  `src/help/content/select.md` explicitly documents the
+  jq-language alternative-operator `// empty` as the
+  agent-recommended idiom for any per-line projection against a
+  streaming NDJSON verb (`inspect logs`, `inspect grep`,
+  `inspect find`, `inspect cat`, `inspect search`,
+  `inspect run --stream --json`, `inspect history show`) where
+  heterogeneous frames are possible. Pre-fix recipe
+  `--select '.line' --select-raw` becomes
+  `--select '.line // empty' --select-raw`: data frames stream
+  through; `null` yields are dropped before the
+  `--select-raw`-non-string-yield gate fires; the verb's exit
+  code is its own (non-zero on error), not the filter's. The
+  pitfall walks the failing form, the working form, the
+  sub-field shape (`.frame.fields.msg // empty`), and the
+  shape-plus-content cross-pattern (`select(.line |
+  startswith("ERROR"))`) so one read covers every variant an
+  agent needs.
+
+  **Recipe.** SMOKE P8 grows recipe (6), split into (6a)
+  success-path data frame and (6b) guaranteed-bad-target
+  error-frame. The P8 gate table grows a "stream null-safety"
+  row: `--select '.line // empty' --select-raw` against a
+  streaming verb passes data frames through and silently drops
+  error/summary frames; no `filter --raw: filter yielded
+  non-string` error on a remote-command-fail frame.
+
+  **Why doc, not code.** Today's per-frame behavior — emit one
+  envelope per frame, filter rejects on per-frame schema mismatch
+  — is correct and orthogonal to filtering. The operator's
+  filter expresses intent; `// empty` is the standard jq idiom
+  for "drop nulls." Bending the F19 chokepoint to second-guess
+  the filter would couple two surfaces that are independent
+  today (the verb's frame schema and the operator's projection),
+  and would silently change behavior on every `--select` recipe
+  in the wild. The doc pin is the right shape: agents reading
+  help land on the working form first, and the failing form
+  remains diagnosable via the verbatim error-message-quote in
+  pitfall #7.
+
+  **Tracker:** `docs/SMOKE_v0.1.3.md` § *P8 follow-ups* P8-B
+  entry flips ✅ Done. Both acceptance criteria (help-text
+  pitfall + smoke recipe) close with this commit.
+
 - **`inspect connect` / `inspect disconnect` now produce F18
   transcript blocks with `audit_id=` footers, and F13
   `connect.reauth` no longer clobbers the verb's primary

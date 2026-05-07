@@ -511,6 +511,38 @@ timeout --signal=INT 5 inspect run arte --stream --json \
 inspect run arte -- "ps -ef | grep 'docker logs -f ${SMOKE_CTR}' \
   | grep -v grep | wc -l"   # expect 0
 # Pass: zero orphaned `docker logs -f` processes on arte.
+
+# (6) `--select` null-safety on streaming error frames. The jq
+# alternative-operator `// empty` is the documented idiom for
+# per-line projections against streaming NDJSON verbs whose
+# envelope schema can vary frame-to-frame (data frames carry
+# `.line`; remote-command-fail frames and trailing summary frames
+# do not). Pre-fix recipe `--select '.line' --select-raw` would
+# trip `error: filter --raw: filter yielded non-string` on every
+# non-data frame; the corrected form `--select '.line // empty'
+# --select-raw` drops `null` yields entirely so data frames pass
+# through cleanly and error/summary frames are silently absorbed.
+# Closes the P8-B agent-hostile-on-streaming-error-frames trap.
+#
+# We exercise both branches deliberately:
+#  (6a) success path: a no-op `echo` succeeds and the data line
+#       streams through.
+#  (6b) error-frame path: a guaranteed-bad target (a container
+#       name that cannot exist) trips the per-frame error envelope
+#       that pre-fix would have failed on.
+inspect run arte --stream --json \
+  --select '.line // empty' --select-raw \
+  -- "echo p8b-data-frame-marker"
+# Pass (6a): one line "p8b-data-frame-marker" on stdout; exit 0.
+
+inspect run arte --stream --json \
+  --select '.line // empty' --select-raw \
+  -- "docker logs -f does-not-exist-${SMOKE_CTR:-x}-$$" || true
+# Pass (6b): NO `error: filter --raw: filter yielded non-string`
+# in stderr. Exit code is the verb's (non-zero), NOT a filter
+# parse error (2). Demonstrates that a streaming verb whose
+# remote command fails to start no longer poisons the agent's
+# pipeline with a filter-rejection frame.
 ```
 
 | Gate | Pass criteria |
@@ -520,6 +552,7 @@ inspect run arte -- "ps -ef | grep 'docker logs -f ${SMOKE_CTR}' \
 | F19 compose ls projection | `.data.compose_projects[].name` with `--select-raw` returns ≥ 1 unquoted project name. |
 | F19 history correlation | `inspect history show --audit-id $(... --select-raw)` surfaces the matching transcript block. |
 | F19 stream × signal | Adding `--select '.line' --select-raw` to `run --stream --json` does not regress F16's SIGINT forward — zero orphaned remote processes. |
+| F19 stream null-safety | `--select '.line // empty' --select-raw` against a streaming verb passes data frames through and silently drops error/summary frames; no `filter --raw: filter yielded non-string` error on a remote-command-fail frame. |
 
 ---
 
@@ -581,7 +614,7 @@ fired earlier in the session.
 `verb == "run"`. P3/P4 always produce at least one successful
 `run` audit entry, so the filter resolves deterministically.
 
-### P8-B — `--select` against streaming error frames (☐ open)
+### P8-B — `--select` against streaming error frames (✅ Done — pitfall #7 documented + recipe (6) added)
 
 **Repro:**
 ```sh
@@ -615,6 +648,34 @@ operator is the workaround.
    `inspect run arte --stream --json --select '.line // empty' --select-raw -- "echo hi"`)
    and validates that both data frames and trailing summary frames
    flow correctly.
+
+**Resolution (2026-05-07).** Both criteria closed in this commit.
+
+- Criterion #1: `src/help/content/select.md` grows pitfall #7
+  ("STREAMING ERROR FRAMES (NDJSON verbs)") with the failing
+  pre-fix recipe shown verbatim, the `// empty` corrected form,
+  the agent-recommended idiom for sub-fields
+  (`.frame.fields.msg // empty`), and the cross-pattern with
+  `select(.line | startswith("ERROR"))` for shape + content
+  filtering in one pass.
+- Criterion #2: P8 recipe (6) splits into (6a) success-path data
+  frame and (6b) guaranteed-bad-target error-frame, so the
+  smoke proves both branches behave correctly. The gate row in
+  the P8 table is "stream null-safety": `--select '.line //
+  empty' --select-raw` against a streaming verb passes data
+  frames through and silently drops error/summary frames; no
+  `filter --raw: filter yielded non-string` error on a
+  remote-command-fail frame.
+
+The behavior question raised in the open entry — should the F19
+chokepoint emit error frames as today, skip silently per-filter,
+or pass through raw — is left unchanged. Today's per-frame
+behavior is correct and orthogonal to filtering: the operator's
+filter expresses what they want, and `// empty` is the standard
+jq idiom for "drop nulls." Bending the chokepoint to second-guess
+the filter would couple two surfaces that are independent today.
+The pitfall doc and the recipe pin the idiom; agents reading
+help land on the working form first.
 
 ### P8-C — F18 transcript correlation gap on `connect` entries (✅ Done — fix landed; awaiting re-smoke validation)
 

@@ -114,6 +114,35 @@ COMMON PITFALLS
      Either guard with `select(. != null)` or use `?` for explicit
      filtering (`.data.thing?.missing? // empty`).
 
+  7. STREAMING ERROR FRAMES (NDJSON verbs). `inspect logs`,
+     `inspect grep`, `inspect find`, `inspect cat`, `inspect search`,
+     `inspect run --stream --json`, and `inspect history show`
+     emit one envelope per line. When the remote command fails to
+     start (image missing, container missing, permission denied),
+     or when the verb hits an end-of-stream summary frame, the
+     emitted envelope does NOT carry the per-line key the operator
+     selected. Today's behavior:
+
+         $ inspect run arte --stream --json --select '.line' --select-raw \
+             -- "docker logs -f does-not-exist"
+         error: filter --raw: filter yielded non-string
+
+     `--select '.line'` yields `null` on the error frame, and
+     `--select-raw`'s non-string-yield rejection trips on it. The
+     fix is the jq alternative-operator `// empty`, which drops
+     `null` and `false` results from the filter output entirely:
+
+         $ inspect run arte --stream --json --select '.line // empty' --select-raw \
+             -- "docker logs -f does-not-exist"
+         (data lines stream through; error frames are silently dropped; exit code is the verb's exit code, not 1)
+
+     This is the agent-recommended idiom for any per-line projection
+     against a streaming verb where a heterogeneous-frame envelope
+     is possible. The same shape works for sub-fields:
+     `--select '.frame.fields.msg // empty'`. Pair with
+     `select(.line | startswith("ERROR"))` to filter both shapes
+     and content in one pass.
+
 EXTERNAL `jq` STILL WORKS
   `--select` is sugar; the underlying envelope is unchanged. If you
   prefer `jq` for ad-hoc exploration, every `--json` / `--jsonl`
