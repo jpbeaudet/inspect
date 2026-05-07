@@ -45,6 +45,43 @@ fn transport_err(exit_code: i32, stderr: &str) -> Option<anyhow::Error> {
     None
 }
 
+/// P8-D fix (v0.1.3): decide whether the captured stderr from a
+/// streaming remote command should be surfaced to the operator on a
+/// non-zero exit. Returns `Some(trimmed)` when there's a useful
+/// command-failure diagnostic, or `None` when the failure has already
+/// been surfaced by a typed Err (transport / max-sessions) or there's
+/// no stderr to show.
+///
+/// Pre-fix, [`run_remote_streaming`] collected stderr only for
+/// transport classification and silently dropped command-failure
+/// stderr — leaving agents driving `inspect run` / `inspect logs` /
+/// streaming compose verbs with `arte: exit N` and no path to
+/// "what to fix". This helper keeps the decision in one place so the
+/// `run_remote_streaming` call site stays a tight conditional and
+/// the contract is unit-testable without an SSH child process.
+///
+/// The decision intentionally early-returns `None` for transport-
+/// class and max-sessions stderr because both shapes are already
+/// surfaced upstream as typed [`anyhow::Error`] values (with their
+/// own operator-friendly wording). Emitting again here would
+/// double-print.
+fn command_failure_stderr(exit_code: i32, stderr: &str) -> Option<&str> {
+    if exit_code == 0 {
+        return None;
+    }
+    let trimmed = stderr.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if super::concurrency::looks_like_max_sessions(trimmed) {
+        return None;
+    }
+    if super::transport::classify(trimmed).is_some() {
+        return None;
+    }
+    Some(trimmed)
+}
+
 /// Result of a remote command execution.
 #[derive(Debug, Clone)]
 pub struct RemoteOutput {
@@ -587,6 +624,18 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
         if let Some(e) = transport_err(exit_code, &stderr) {
             return Err(e);
         }
+        // P8-D fix (v0.1.3): for genuine command failures (not
+        // transport, not max-sessions), surface the captured stderr
+        // to the operator. Pre-fix, this stderr was collected only
+        // for the upstream classifications and then silently
+        // discarded — so an agent driving `inspect run` saw
+        // `arte: exit N` with no path to "what to fix" without a
+        // side channel. `tee_eprintln!` also feeds the F18
+        // transcript so the diagnostic survives in post-mortems.
+        // See `command_failure_stderr` doc-comment for the contract.
+        if let Some(diag) = command_failure_stderr(exit_code, &stderr) {
+            crate::tee_eprintln!("{diag}");
+        }
     }
 
     Ok(exit_code)
@@ -775,4 +824,82 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
         stderr,
         exit_code,
     })
+}
+
+#[cfg(test)]
+mod p8d_tests {
+    use super::command_failure_stderr;
+
+    #[test]
+    fn p8d_no_emit_on_zero_exit() {
+        // Stderr-on-success is just chatter (warnings, deprecation
+        // notices, progress). Don't surface it — the operator chose
+        // not to use --stream / --show-output.
+        assert_eq!(command_failure_stderr(0, "warning: chatty success\n"), None);
+    }
+
+    #[test]
+    fn p8d_no_emit_on_empty_stderr() {
+        // No diagnostic to surface; the verb's own
+        // `{label}: exit {code}` line is the only signal.
+        assert_eq!(command_failure_stderr(2, ""), None);
+        assert_eq!(command_failure_stderr(2, "   \n"), None);
+        assert_eq!(command_failure_stderr(127, "\n\n"), None);
+    }
+
+    #[test]
+    fn p8d_emit_on_real_command_failure() {
+        // The exact shape the user's smoke hit: docker exit 2 with
+        // a daemon error message that pre-fix was silently dropped.
+        let stderr = "docker: Error response from daemon: image not found.\n";
+        let out = command_failure_stderr(2, stderr);
+        assert_eq!(
+            out,
+            Some("docker: Error response from daemon: image not found.")
+        );
+    }
+
+    #[test]
+    fn p8d_emit_strips_trailing_whitespace() {
+        // `tee_eprintln!` appends a newline; emitting the trimmed
+        // form avoids a double-newline when stderr ends with `\n`.
+        assert_eq!(command_failure_stderr(1, "boom\n"), Some("boom"));
+        assert_eq!(command_failure_stderr(1, "boom\r\n\n"), Some("boom"));
+    }
+
+    #[test]
+    fn p8d_no_emit_on_max_sessions_stderr() {
+        // The MaxSessions branch in `run_remote_streaming` already
+        // surfaces a typed Err with operator-friendly wording. Don't
+        // double-print here.
+        let stderr =
+            "channel 0: open failed: administratively prohibited: open failed (MaxSessions)";
+        assert_eq!(command_failure_stderr(255, stderr), None);
+    }
+
+    #[test]
+    fn p8d_no_emit_on_transport_class_stderr() {
+        // Transport-classified stderr is wrapped into an anyhow Err
+        // by `transport_err` and surfaced via the verb's error path.
+        // Use the synthetic test marker the F13 mock runner already
+        // emits — keeps the test independent of OpenSSH wording.
+        assert_eq!(command_failure_stderr(255, "transport:stale"), None);
+        assert_eq!(command_failure_stderr(255, "transport:unreachable"), None);
+        assert_eq!(command_failure_stderr(255, "transport:auth_failed"), None);
+    }
+
+    #[test]
+    fn p8d_emit_on_command_failure_that_mentions_innocuous_keywords() {
+        // Defense-in-depth: a remote command's *legitimate* stderr
+        // might contain words that look transport-y but aren't (e.g.
+        // a user-authored command that prints "permission denied:
+        // /tmp/foo" from a chmod failure). The classifiers anchor on
+        // ssh-specific phrasings, so we should still emit.
+        let stderr = "chmod: cannot access '/etc/foo': Permission denied";
+        // Verify our classifiers don't false-positive on this:
+        assert!(!super::super::concurrency::looks_like_max_sessions(stderr));
+        assert!(super::super::transport::classify(stderr).is_none());
+        // And therefore we DO emit it as a command-failure diagnostic.
+        assert_eq!(command_failure_stderr(1, stderr), Some(stderr));
+    }
 }

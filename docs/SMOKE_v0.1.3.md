@@ -662,7 +662,7 @@ silent-data-loss class the v0.1.3 release ships to close.
 3. P8 grows a recipe that validates the chosen path against a
    real arte session.
 
-### P8-D — `inspect run --apply` exit 2 + stderr swallow (☐ open, highest concern)
+### P8-D — `inspect run --apply` exit 2 + stderr swallow (🟡 stderr-surface fix landed; awaiting re-smoke)
 
 **Repro:**
 ```sh
@@ -716,6 +716,33 @@ causes:
    `--stream`, etc.).
 4. P8 seed recipes are updated to the working form before the
    smoke is re-run.
+
+**Progress (2026-05-07):** Criterion #3 closed. The streaming SSH
+runner (`run_remote_streaming`) was capturing remote stderr only
+for transport-class probing and silently dropping it on a genuine
+command failure. A new `command_failure_stderr` helper now decides
+whether to surface the captured stderr via `tee_eprintln!` (which
+also feeds the F18 transcript): `None` for success, empty stderr,
+max-sessions, or transport-classified failures (the latter two are
+already surfaced via typed `anyhow::Error`); `Some(trimmed)` for
+genuine command failures. 7 new unit tests in
+`src/ssh/exec.rs::p8d_tests` pin the contract.
+
+Criteria #1, #2, and #4 still open — once the next P8 dry-run
+runs against arte WITH the fix, the surfaced remote stderr will
+either:
+- diagnose the docker exit 2 immediately (most likely:
+  remote-side issue with the container shape, e.g. registry rate
+  limit, daemon restart, or a name conflict with a stale
+  `inspect-smoke-*` container the cleanup missed); we then update
+  the seed recipe to the working form, OR
+- show that nothing was wrong with the remote command (less
+  likely), in which case we have a real `--apply` semantic bug
+  to chase.
+
+This entry flips to ✅ once the next P8 dry-run on arte produces a
+clean PASS with surfaced stderr (or the remote-side cause is
+documented as "expected").
 
 ### Re-running P8 after follow-ups close
 

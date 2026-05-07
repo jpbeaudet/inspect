@@ -155,6 +155,55 @@ remaining three are documented limitations called out under
 
 ### Fixed — release-smoke LLM-trap
 
+- **Streaming verbs now surface remote stderr on a non-zero command
+  exit (P8-D / F19 release-smoke).** Surfaced during the F19
+  release-smoke prep on 2026-05-07 against arte: an
+  `inspect run arte --apply -- "docker run …"` exited 2 with a
+  blank `DATA: (none)` and no remote stderr visible to the
+  operator. The remote `docker` daemon almost certainly emitted a
+  diagnostic (`Error response from daemon: …`) but inspect's
+  streaming SSH runner (`run_remote_streaming`) was capturing the
+  remote stderr stream only for transport-class probing
+  (`looks_like_max_sessions`, `transport::classify`) and
+  silently dropping the buffer on a genuine command failure. An
+  agent driving the streaming verbs (`inspect run`,
+  `inspect logs`, `inspect merged`, `inspect compose exec`,
+  `inspect compose logs`) saw `arte: exit N` with no path to
+  "what to fix" without an out-of-band `ssh` or `--stream` re-run
+  — exactly the agent-hostile pattern v0.1.3 ships to close.
+
+  **Fix.** New `command_failure_stderr(exit_code, stderr)` helper
+  in `src/ssh/exec.rs` decides whether to surface the captured
+  stderr to the operator: `None` for `exit_code == 0`, empty
+  stderr, max-sessions stderr (already surfaced via typed
+  `anyhow::Error`), and transport-classified stderr (already
+  wrapped by `transport_err` and fed through the dispatch
+  wrapper); `Some(trimmed)` for genuine command failures. The
+  helper's `Some` arm flows through `tee_eprintln!` so the
+  diagnostic also lands in the F18 per-namespace transcript for
+  post-mortem review. Behavior on `--stream` mode is unchanged:
+  TTY-merged streams already deliver remote stderr inline via
+  `on_line`, and the captured `stderr_buf` on those paths
+  contains only ssh-layer diagnostics (which remain typed-Err
+  promoted, not raw-emitted). Behavior on `run_remote_streaming_capturing`
+  (used by bundle / compose / steps verbs) is also unchanged —
+  those callers receive `RemoteOutput.stderr` directly and
+  already surface it through their own renderers.
+
+  **Tracker:** `docs/SMOKE_v0.1.3.md` § *P8 follow-ups* P8-D
+  entry. Criterion #3 (stderr-question answered) closes with this
+  commit; criteria #1, #2, #4 (root-cause of the underlying
+  exit-2, `--apply` semantics, seed-recipe correction) close with
+  the next P8 dry-run on arte once the surfaced stderr identifies
+  the remote-side cause.
+
+  **Tests.** 7 new unit tests in `src/ssh/exec.rs::p8d_tests`
+  pin the helper contract (no-emit on success / empty / max-
+  sessions / transport-class; do-emit on real command failure;
+  do-emit even when stderr mentions transport-y keywords like
+  "Permission denied: /tmp/foo" that don't match the
+  ssh-anchored classifier patterns).
+
 - **Key-auth retries now fail-fast locally (~10ms) instead of
   burning an SSH handshake (~1-3s) per wrong attempt.** Same
   release-smoke turn that fixed the 1-vs-3 retry asymmetry: the
