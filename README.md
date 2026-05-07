@@ -25,8 +25,10 @@ multi-step migrations with rollback.
   `--apply` is the only way to enact a change. Every apply is audited
   and reversible with `inspect revert <audit-id>`.
 - **Stable JSON envelope.** Every command can emit a versioned
-  `summary | data | next` envelope (`--json`) suitable for piping into
-  `jq`, scripts, or another tool.
+  `summary | data | next` envelope (`--json`); the in-binary
+  `--select '<jq>'` flag projects or reshapes it without an external
+  `jq` install (F19), and the envelope still pipes cleanly into `jq`,
+  scripts, or another tool.
 - **LogQL-style search.** A familiar Loki-like query language to
   grep, parse, and aggregate across logs, files, and host state.
 - **Bundle orchestration.** Declarative YAML migrations with

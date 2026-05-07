@@ -1850,11 +1850,11 @@ A few common patterns:
 
 ```sh
 # Top 10 services by error count over 1h
-inspect search 'topk(10, sum by (service) (count_over_time({source="logs"} |= "error" [1h])))' --json | jq
+inspect search 'topk(10, sum by (service) (count_over_time({source="logs"} |= "error" [1h])))' --json --select '.'
 
 # Restart everything that errored in the last 5 minutes
 inspect search '{source="logs"} |= "OOM"' --since 5m --json \
-  | jq -r '.service' | sort -u \
+  --select '.service' --select-raw | sort -u \
   | xargs -I{} inspect restart arte/{} --apply
 
 # Markdown status block for a GitHub issue
@@ -1862,6 +1862,60 @@ inspect fleet --ns 'prod-*' status --md
 ```
 
 For the full reference: `inspect help formats`.
+
+### 9.1 JSON projection with `--select` (F19, v0.1.3)
+
+Every JSON-emitting verb accepts three composable filter flags so
+agentic callers and shell scripts can extract or reshape output
+without an external `jq` install:
+
+```
+--select '<jq filter>'                            # = jq '<F>'
+--select '<F>' --select-raw                       # = jq -r '<F>' (string yields unquoted)
+--select '<F>' --select-slurp                     # = jq -s '<F>' (NDJSON → array first)
+--select '<F>' --select-raw --select-slurp        # = jq -rs '<F>'
+```
+
+`--select-raw` and `--select-slurp` are bool modifiers; both
+require `--select`. `--select` itself requires `--json` (or
+`--jsonl` / `--ndjson`).
+
+The filter language is jq's — every idiom from the jq manual works
+verbatim. The implementation is a pure-Rust port (`jaq`) compiled
+into the inspect binary.
+
+```sh
+# Newest audit entry id (raw string, no JSON quotes).
+inspect audit ls --json --select '.data.entries[0].id' --select-raw
+
+# Page size of the audit listing.
+inspect audit ls --json --select '.data.entries | length'
+
+# Per-line projection of a streaming verb (NDJSON one-per-frame).
+inspect logs arte/api --tail 200 --json --select '.line' --select-raw
+
+# Slurp NDJSON into an array first, then aggregate.
+inspect ports arte --json \
+  --select 'group_by(.proto) | map({proto: .[0].proto, count: length})' --select-slurp
+```
+
+Exit codes mirror `inspect query` and `grep -q`:
+
+| Exit | Meaning |
+|---:|---|
+| `0` | filter produced ≥ 1 result |
+| `1` | zero results, runtime error, or `--select-raw` non-string yield |
+| `2` | parse error, `--select` without `--json`/`--jsonl`, clap usage error |
+
+External `jq` still works on every `--json` / `--jsonl` output —
+pre-F19 recipes that pipe to `jq` are unchanged. `--select` is the
+agent-friendly path that doesn't require the operator to install
+anything alongside inspect. The `inspect setup --discover` probe
+still records `jq` presence but no longer flags absence as a
+problem.
+
+For the full filter-language summary, common pitfalls, and ten
+worked envelope-path filters, see `inspect help select`.
 
 ---
 

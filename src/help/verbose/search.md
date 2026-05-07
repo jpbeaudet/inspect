@@ -40,11 +40,12 @@ REGEX SAFETY
   ReDoS defence beyond that — keep patterns anchored where possible.
 
 PIPELINES
-  $ inspect search '…' --json | jq …          # canonical machine path
-  $ inspect search '…' --csv  | mlr …          # spreadsheet path
-  $ inspect search '…' --ndjson | grep …        # streaming filter
+  $ inspect search '…' --json --select '<filter>'   # canonical machine path
+  $ inspect search '…' --csv  | mlr …               # spreadsheet path
+  $ inspect search '…' --ndjson | grep …            # streaming filter
 
   --json buffers; --ndjson streams. Use --ndjson for tail/follow.
+  `--select` is jq syntax; see `inspect help select`.
 
 SEE ALSO
   inspect help search        the standard topic body

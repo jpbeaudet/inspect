@@ -129,6 +129,15 @@ inspect revert <audit-id> --force
 
 - **JSON envelope** (`schema_version`): semver-tracked. Field additions
   are non-breaking. Removals or renames bump the major.
+- **JSON projection** (F19, v0.1.3): every JSON-emitting verb accepts
+  `--select '<jq filter>'` (and the companion `--select-raw` /
+  `--select-slurp` flags) for in-binary projection. From v0.1.3
+  onward, every recipe in this runbook and the operator manual is
+  written in `--select` form. Pre-v0.1.3 transcripts that pipe to
+  external `jq` still work — the binary continues to emit the same
+  envelope, so a saved `inspect status arte --json | jq '.data.state'`
+  command from a v0.1.2 runbook produces the same byte stream as the
+  v0.1.3 form `inspect status arte --json --select '.data.state'`.
 - **Exit codes**: `0` success, `1` no-match (search-shaped verbs only),
   `2` error. Stable across patch releases.
 - **CLI flag surface**: stable across patches. Deprecations emit a
@@ -346,7 +355,7 @@ Default behaviour on `transport_stale`:
    returns (success, command_failed, transport_*) is final.
 5. The retry's audit entry stamps `retry_of=transport_stale@<label>`
    and `reauth_id=<id of the connect.reauth entry>` so a downstream
-   consumer can correlate the pair with a single `jq` filter.
+   consumer can correlate the pair with a single `--select` filter (or external `jq`).
 
 A failed reauth (e.g. agent unlocked, but the network dropped
 between the unlock and the retry) escalates to
@@ -389,9 +398,11 @@ The JSON contract gains a final envelope per verb invocation:
 `failure_class` is one of
 `ok | command_failed | transport_stale | transport_unreachable | transport_auth_failed | transport_mixed`.
 The streaming line envelopes earlier in the run remain unchanged so
-`inspect run … --json | jq -c '.line'` continues to work and a new
-consumer can opt into the summary by filtering on
-`select(.phase=="summary")`.
+the per-frame projection — `inspect run … --json --select '.line'`
+on v0.1.3+, or the equivalent `… --json | jq -c '.line'` on a pre-
+v0.1.3 binary — continues to work, and a new consumer can opt into
+the summary by filtering on `select(.phase=="summary")` (which is
+the jq builtin, not the inspect flag).
 
 ### 10.4 Disabling for `connect`-only diagnostics
 
@@ -455,7 +466,7 @@ Default behaviour on `transport_stale`:
    returns (success, command_failed, transport_*) is final.
 5. The retry's audit entry stamps `retry_of=transport_stale@<label>`
    and `reauth_id=<id of the connect.reauth entry>` so a downstream
-   consumer can correlate the pair with a single `jq` filter.
+   consumer can correlate the pair with a single `--select` filter (or external `jq`).
 
 A failed reauth (e.g. agent unlocked, but the network dropped
 between the unlock and the retry) escalates to
@@ -498,9 +509,11 @@ The JSON contract gains a final envelope per verb invocation:
 `failure_class` is one of
 `ok | command_failed | transport_stale | transport_unreachable | transport_auth_failed | transport_mixed`.
 The streaming line envelopes earlier in the run remain unchanged so
-`inspect run … --json | jq -c '.line'` continues to work and a new
-consumer can opt into the summary by filtering on
-`select(.phase=="summary")`.
+the per-frame projection — `inspect run … --json --select '.line'`
+on v0.1.3+, or the equivalent `… --json | jq -c '.line'` on a pre-
+v0.1.3 binary — continues to work, and a new consumer can opt into
+the summary by filtering on `select(.phase=="summary")` (which is
+the jq builtin, not the inspect flag).
 
 ### 10.4 Disabling for `connect`-only diagnostics
 

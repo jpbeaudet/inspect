@@ -98,6 +98,11 @@ pub const TOPICS: &[Topic] = &[
         summary: "First-class compose verbs (ls/ps/config/logs/restart) — F6 (v0.1.3)",
         body: Some(include_str!("content/compose.md")),
     },
+    Topic {
+        id: "select",
+        summary: "Filter / project JSON output with `--select` (jq language) — F19 (v0.1.3)",
+        body: Some(include_str!("content/select.md")),
+    },
 ];
 
 /// Look up a topic by its canonical id. Comparison is case-insensitive
@@ -357,8 +362,9 @@ mod tests {
 
     #[test]
     fn topic_count_matches_bible() {
-        // 14 HP-1 editorial topics + 1 F6 (v0.1.3) compose topic.
-        assert_eq!(TOPICS.len(), 15);
+        // 14 HP-1 editorial topics + 1 F6 (v0.1.3) compose topic
+        // + 1 F19 (v0.1.3) select topic.
+        assert_eq!(TOPICS.len(), 16);
     }
 
     #[test]

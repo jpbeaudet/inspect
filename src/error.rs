@@ -240,6 +240,35 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         summary: "more than one output format flag was set",
         help_topic: Some("formats"),
     },
+    // ---- select / jq filter (F19, v0.1.3) -----------------------------
+    // Three discrete fragments rather than a single broader "filter"
+    // match so an unrelated error message containing the word "filter"
+    // (e.g. compose-logs --match/--exclude prose) cannot accidentally
+    // collide with the select topic.
+    ErrorEntry {
+        code: "FilterParse",
+        fragment: "filter parse:",
+        summary: "--select filter failed to parse as a jq expression",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRuntime",
+        fragment: "filter runtime:",
+        summary: "--select filter raised a runtime error",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRawNonString",
+        fragment: "filter --raw:",
+        summary: "--select-raw was set but the filter yielded a non-string value",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRequiresJson",
+        fragment: "--select requires --json",
+        summary: "--select set without a JSON-class output format",
+        help_topic: Some("select"),
+    },
     // ---- write --------------------------------------------------------
     ErrorEntry {
         code: "CpRemoteRemote",

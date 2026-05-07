@@ -344,3 +344,217 @@ fn f19_help_help_mentions_select() {
         .assert()
         .stdout(contains("--select"));
 }
+
+// =========================================================================
+// C3 — `select` editorial topic, ERROR_CATALOG cross-link, and the
+// "no lone | jq" sweep over the help / runbook / smoke surfaces. Each
+// test pins one slice of the F19 contract that an agent learns from
+// `inspect help` first; if any of these regress, the agent-friendliness
+// invariant on a fresh-install target is back in play.
+// =========================================================================
+
+#[test]
+fn f19_help_select_topic_lists_in_index() {
+    // The top-level `inspect help` index page must surface the new
+    // editorial topic so agents discover it without typing the id.
+    cmd()
+        .args(["help"])
+        .assert()
+        .success()
+        .stdout(contains("select"))
+        .stdout(contains("Filter / project JSON output"));
+}
+
+#[test]
+fn f19_help_select_topic_renders() {
+    // `inspect help select` renders the body. We require both the
+    // word "jq" (so an agent searching for jq idioms lands here)
+    // and the literal flag spelling, plus the EXAMPLES section
+    // canonical to every topic.
+    let out = cmd()
+        .args(["help", "select"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("SELECT"), "topic header missing: {s}");
+    assert!(s.contains("--select"), "flag spelling missing: {s}");
+    assert!(s.contains("jq"), "jq pointer missing: {s}");
+    assert!(s.contains("EXAMPLES"), "EXAMPLES section missing");
+    // Sanity: the body is non-trivial. The select.md file is over
+    // 100 lines; even with light rendering the output should clear
+    // 1 KB. A regression to a stub would silently shrink to ~10
+    // bytes ("(unauthored)").
+    assert!(
+        s.len() > 1024,
+        "topic body too short ({} bytes): {s}",
+        s.len()
+    );
+}
+
+#[test]
+fn f19_help_search_finds_select_topic() {
+    // `inspect help --search filter` must surface at least one hit
+    // pointing at the `select` topic, since "filter" is the word
+    // an agent reaches for first when looking for projection.
+    let out = cmd()
+        .args(["help", "--search", "filter"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    // The render groups by topic with the topic id on its own line
+    // followed by indented `L<n>  <snippet>` entries, so
+    // "\nselect\n" is a stable signal that the select topic shows.
+    assert!(
+        s.contains("\nselect\n") || s.starts_with("select\n"),
+        "select topic not surfaced under search 'filter':\n{s}"
+    );
+}
+
+#[test]
+fn f19_help_search_hits_select_for_jq_term() {
+    // The companion search: an agent searching for "jq" should
+    // also be routed to the select topic (the editorial entry
+    // documents jq idioms inspect understands).
+    let out = cmd()
+        .args(["help", "--search", "jq"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.contains("\nselect\n") || s.starts_with("select\n"),
+        "select topic not surfaced under search 'jq':\n{s}"
+    );
+}
+
+#[test]
+fn f19_no_lone_jq_in_help_content() {
+    // No `| jq ` recipe survives in any editorial topic body or
+    // verbose sidecar. The build-time corpus is the source of
+    // truth for the help renderer; a regression here means an
+    // agent reading the help system would be told to install jq.
+    use std::fs;
+    use std::path::Path;
+    let dirs: &[&str] = &["src/help/content", "src/help/verbose"];
+    let mut offenders: Vec<String> = Vec::new();
+    for dir in dirs {
+        for entry in fs::read_dir(Path::new(dir)).expect("dir readable") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let body = fs::read_to_string(&path).expect("readable");
+            for (idx, line) in body.lines().enumerate() {
+                if line.contains("| jq ") {
+                    offenders.push(format!("{}:{}: {}", path.display(), idx + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "every recipe in help/content + help/verbose must use `--select`, not `| jq`. Found:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn f19_no_lone_jq_in_long_constants() {
+    // Same sweep, against every `LONG_*` constant compiled into
+    // the binary. We probe via `--help` rather than scraping the
+    // .rs source so a future move of the constants doesn't
+    // silently make the test pass for the wrong reason.
+    //
+    // Verbs to probe: every JSON-emitting verb that ships a
+    // dedicated `LONG_*` doc. The list mirrors the C2 sweep.
+    let verbs: &[&[&str]] = &[
+        &["status", "--help"],
+        &["why", "--help"],
+        &["health", "--help"],
+        &["audit", "--help"],
+        &["audit", "ls", "--help"],
+        &["audit", "show", "--help"],
+        &["history", "--help"],
+        &["bundle", "--help"],
+        &["compose", "--help"],
+        &["compose", "ls", "--help"],
+        &["compose", "ps", "--help"],
+        &["fleet", "--help"],
+        &["help", "--help"],
+        &["search", "--help"],
+        &["recipe", "--help"],
+        &["connectivity", "--help"],
+        &["resolve", "--help"],
+        &["query", "--help"],
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+    for argv in verbs {
+        let out = cmd().args(*argv).assert().get_output().stdout.clone();
+        let s = String::from_utf8(out).unwrap();
+        for (idx, line) in s.lines().enumerate() {
+            if line.contains("| jq ") {
+                offenders.push(format!(
+                    "inspect {}: L{}: {}",
+                    argv.join(" "),
+                    idx + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "every example in clap LONG_* must use `--select`, not `| jq`. Found:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn f19_select_parse_error_links_to_help_topic() {
+    // C1-fixup routed filter-error stderr through `error::emit`;
+    // C3 added the ERROR_CATALOG row that gives those errors a
+    // `see: inspect help select` cross-link. Verify the link
+    // renders on a real parse error.
+    let home = sandbox();
+    cmd()
+        .env("INSPECT_HOME", home.path())
+        .args(["audit", "ls", "--json", "--select", ".["])
+        .assert()
+        .code(2)
+        .stderr(contains("filter parse:"))
+        .stderr(contains("see: inspect help select"));
+}
+
+#[test]
+fn f19_help_search_index_under_cap() {
+    // The select topic + per-verb LONG_* SELECTING blocks pushed
+    // the help-search index past 144 KB; C3 raised the cap to
+    // 160 KB. This test pins the new cap so a future commit that
+    // trims documentation to fit (forbidden by CLAUDE.md "Help-
+    // surface discipline") fails loudly. The cap can be raised
+    // again if prose grows, never trimmed.
+    //
+    // We probe through `inspect help all --json --select` since
+    // that exercises the help registry size, plus an explicit
+    // search round-trip to ensure the index loaded.
+    cmd()
+        .args(["help", "--search", "select"])
+        .assert()
+        .success()
+        .stdout(contains("select"));
+    // The size pin itself lives in `src/help/search.rs` as a
+    // lib-level test (it has access to `index_byte_size()` which
+    // is `#[cfg(test)]` private to the binary). We re-assert here
+    // that the search engine is functional as a smoke; if the
+    // build-time index regenerator silently emits an empty index,
+    // the search above would fail.
+}

@@ -30,43 +30,55 @@ final cleanup phase removes all three classes idempotently.
 These caught a previous smoke run. Read them once before any phase.
 
 1. **`--json` envelope shape — two flavors.** Read-**aggregating**
-   verbs (`status`, `health`, `why`, sometimes `ls` / `ps`) wrap
-   their payload under a `.data` envelope with top-level keys
+   verbs (`status`, `health`, `why`, `audit ls`, `audit show`,
+   `audit grep`, `audit gc`, `audit verify`, `cache show`,
+   `compose ls`, `compose ps`, `recipe list`, `setup --json`)
+   emit **one envelope per invocation** with top-level keys
    `{schema_version, summary, data, next, meta}`. The F1 services
    array is at `.data.services`; F7.5 state at `.data.state`;
+   audit-ls entries at `.data.entries[]`; audit-show entry at
+   `.data.entry`; compose ls projects at `.data.compose_projects[]`;
    cache provenance at `.meta.source.{mode, stale, runtime_age_s,
-   inventory_age_s}`. Read-**listing** verbs (`ports`, `images`,
-   `volumes`, `audit ls`, `cache show`) emit **NDJSON** — one JSON
-   object per line, no envelope, no `.data`. Use `jq` directly on
-   each line, or `jq -s 'fn'` to slurp into an array. The verb's
-   `-h` includes the line `Emit line-delimited JSON (one record
-   per line)` for NDJSON verbs and `Emit a single JSON envelope`
-   for envelope verbs — check `-h` first if unsure.
+   inventory_age_s}`. Read-**listing** / **streaming** verbs
+   (`ports`, `images`, `volumes`, `network`, `ps`, `find`, `ls`,
+   `logs`, `grep`, `cat`, `search`, `run --stream`, `history show`)
+   emit **NDJSON** — one JSON object per line, no top-level
+   envelope. The verb's `-h` includes the line `Emit a single JSON
+   envelope` for envelope verbs and `Emit line-delimited JSON (one
+   record per line)` for NDJSON verbs — check `-h` first if unsure.
+   Both shapes accept `--select '<jq filter>'` (F19, v0.1.3); on an
+   envelope verb the filter sees the whole envelope, on a streaming
+   verb the filter runs per-line.
 2. **`--quiet` is mutex with `--json`.** This is the F7.4 contract:
    `--quiet` strips the human-renderer indent; `--json` produces
    structured output that does not need it. Combining them is a
-   clap usage error (exit 2). Use `--json` alone when piping to
-   `jq`; use `--quiet` alone when piping the human format to a
-   non-`jq` filter.
+   clap usage error (exit 2). Use `--json --select '<filter>'` for
+   the canonical machine path; use `--quiet` alone when piping the
+   human format to a non-JSON filter.
 3. **Audit-list output is newest-first.** `inspect audit ls --limit
-   N --json` returns the most recent N entries as a JSON array at
-   the **top level** (no `.data` wrapper) — this verb predates the
-   L7 envelope sweep. The flag is `--limit` (NOT `--tail`); the
-   most recent entry is `.[0]` / `head -1`, NOT `tail -1`. The
-   array is a projection (id, ts, verb, selector, exit,
-   diff_summary, is_revert, reason); the `revert` block is **not**
-   included — round-trip via `inspect audit show <id> --json` to
-   inspect `revert.kind` / `payload` / `preview`.
+   N --json` returns the most recent N entries under
+   `.data.entries[]` of the L7 envelope (commit `34ae25d` brought
+   every audit verb under the standard envelope). The flag is
+   `--limit` (NOT `--tail`); the most recent entry is
+   `.data.entries[0]` / `head -1`, NOT `tail -1`. The projection
+   is `(id, ts, verb, selector, exit, diff_summary, is_revert,
+   reason)`; the `revert` block is **not** included — round-trip
+   via `inspect audit show <id> --json --select '.data.entry'`
+   to inspect `revert.kind` / `payload` / `preview`. (Pre-v0.1.3
+   recipes that use `.[0]` / bare-array indexing date from the
+   pre-L7 era and yield `null` against the current envelope.)
 4. **Field selectors are `<ns>/<svc>`** (matches inventory) or
    `<ns>/<container_name>` (F5 dual-axis resolver — emits a
    one-line stderr breadcrumb pointing at the canonical form
    unless `INSPECT_NO_CANONICAL_HINT=1` is set; canonical form
    resolves silently).
-5. **Streaming verbs emit raw bytes, not JSON.** `logs`, `run`,
-   `cat`, `grep`, `find`, `search`, `exec` emit raw lines (with
-   L7 redaction applied) -- they are not jq-able. Their `--json`
-   flag, where present, wraps each line as a record. Don't pipe
-   their default output to `jq`.
+5. **Streaming verbs emit raw bytes, not JSON, by default.** `logs`,
+   `run`, `cat`, `grep`, `find`, `search`, `exec` emit raw lines
+   (with L7 redaction applied) on the human path -- they are not
+   structured. Add `--json` to get a per-line NDJSON envelope; the
+   `--select` flag (and external `jq`) operate on the envelope
+   form, not the raw text. Don't pipe the default human output
+   into a JSON filter.
 6. **Master socket reuse.** Once `inspect connect <ns>` has
    succeeded, every subsequent verb reuses
    `~/.inspect/sockets/<ns>.sock` and does **not** need the key
@@ -114,7 +126,7 @@ covered and skipped here unless the operator explicitly stages a
 ```sh
 inspect setup arte --force
 inspect status arte
-inspect status arte --json | jq '{state: .data.state, services_count: (.data.services | length), summary, source_mode: .meta.source.mode}'
+inspect status arte --json --select '{state: .data.state, services_count: (.data.services | length), summary, source_mode: .meta.source.mode}'
 inspect connections
 # connections --json: verify shape on contact (read verbs evolved at
 # different points; the auth/session_ttl/expires_in fields are the
@@ -143,7 +155,7 @@ Maps to: F4, F5, F7, F8, F10, L7, L9, L10.
 inspect why arte/<svc>
 inspect why arte/<svc> --no-bundle
 inspect why arte/<svc> --log-tail 5
-inspect why arte/<svc> --json | jq '.services[0] | {recent_logs, effective_command, port_reality}'
+inspect why arte/<svc> --json --select '.data.services[0] | {recent_logs, effective_command, port_reality}'
 
 # F8 cache freshness. The provenance line `SOURCE: live` /
 # `SOURCE: cached <age>` is the F8 contract surface; the per-ns
@@ -167,9 +179,9 @@ inspect ports arte
 inspect ports arte --proto udp
 inspect ports arte --port 53
 # ports --json emits NDJSON (one record per line; documented in -h).
-# Slurp into a jq array with -s if you want array-style queries.
+# Slurp NDJSON into an array with --select-slurp for array-style queries.
 inspect ports arte --json | head -3                              # one JSON record per line
-inspect ports arte --json | jq -s 'group_by(.proto) | map({proto: .[0].proto, count: length})'
+inspect ports arte --json --select 'group_by(.proto) | map({proto: .[0].proto, count: length})' --select-slurp
 
 # L10 port-drift (capture two snapshots ~30s apart; if real services
 # don't change ports we instead drift the sandbox container after P3)
@@ -185,7 +197,7 @@ inspect logs arte/<svc> --tail 200 --show-secrets | grep -E '(Bearer|Authorizati
 
 # F10 polish bundle
 inspect cat arte/<svc>:/etc/passwd --lines 1-5
-inspect cat arte/<svc>:/etc/passwd --lines 1-5 --json | jq '.[] | {n, line}'
+inspect cat arte/<svc>:/etc/passwd --lines 1-5 --json --select '{n, line}'
 inspect grep --help | head -40           # MODEL/EXAMPLE/NOTE block present
 inspect status arte --quiet | head -5    # pipe-clean rendering
 inspect why arte/<container-not-service> # 3-line chained hint, exit 0
@@ -222,11 +234,11 @@ inspect run arte -- "docker ps --filter label=inspect-smoke=1"
 # compose service, so we exercise revert via run + revert audit linkage
 # rather than `inspect compose restart`.)
 inspect run arte --apply --revert-preview -- "docker stop ${SMOKE_CTR}"
-inspect run arte --json | jq '.audit_id' > /tmp/inspect-smoke-audit.json
+inspect run arte --json --select '.audit_id' > /tmp/inspect-smoke-audit.json
 inspect revert --last arte
 inspect run arte -- "docker ps --filter name=${SMOKE_CTR} --format '{{.Status}}'"
 # Pass: container is running again; audit log shows linked entries.
-inspect audit show $(jq -r . /tmp/inspect-smoke-audit.json) | head
+inspect audit show $(inspect query -r . < /tmp/inspect-smoke-audit.json) | head
 
 # F8 mutation-invalidation
 inspect status arte                       # SOURCE: cache
@@ -245,8 +257,8 @@ inspect run arte -- "stat -c '%a' /tmp/inspect-smoke-up.txt"      # 640
 # state_snapshot. Verify the revert kind on the audit entries.
 # revert.kind is NOT in the `audit ls --json` projection — round-trip
 # the most recent put audit ids through `audit show <id> --json`:
-for id in $(inspect audit ls --limit 5 --json | jq -r '.[] | select(.verb=="put") | .id'); do
-  inspect audit show "$id" --json | jq -r '"\(.id) verb=\(.verb) rk=\(.revert.kind)"'
+for id in $(inspect audit ls --limit 5 --json --select '.data.entries[] | select(.verb=="put") | .id' --select-raw); do
+  inspect audit show "$id" --json --select '.data.entry | "\(.id) verb=\(.verb) rk=\(.revert.kind)"' --select-raw
 done
 
 # L8 compose surface (read-only; no per-service down/up on the real
@@ -278,8 +290,8 @@ printf 'echo from-stdin-pipe\n' > /tmp/inspect-smoke-init.sh
 cat /tmp/inspect-smoke-init.sh | inspect run arte \
   -- "docker exec -i ${SMOKE_CTR} sh"
 # Pass: stdout contains 'from-stdin-pipe'.
-inspect audit ls --limit 1 --json | \
-  jq '.[0] | {verb, stdin_bytes, stdin_sha256: .stdin_sha256}'
+inspect audit ls --limit 1 --json \
+  --select '.data.entries[0] | {verb, stdin_bytes, stdin_sha256: .stdin_sha256}'
 # Pass: stdin_bytes matches file size.
 
 # F9 loud-failure contract
@@ -287,8 +299,8 @@ echo data | inspect run arte --no-stdin -- "cat"   # exit 2 + chained hint
 
 # F14 script mode (heredoc with embedded sh + python; no local quoting)
 inspect run arte --file ./tests/smoke/v013/migration.sh -- "${SMOKE_CTR}"
-inspect audit ls --limit 1 --json | \
-  jq '.[0] | {script_path, script_sha256, script_bytes, script_interp}'
+inspect audit ls --limit 1 --json \
+  --select '.data.entries[0] | {script_path, script_sha256, script_bytes, script_interp}'
 # Pass: script body deduped at ~/.inspect/scripts/<sha>.sh
 
 # F16 streaming + Ctrl-C signal forwarding.
@@ -298,12 +310,12 @@ timeout --signal=INT 5 inspect run arte --stream \
 inspect run arte -- "ps -ef | grep -c 'docker logs -f ${SMOKE_CTR}' \
   | grep -v grep || true"
 # Pass: zero orphaned 'docker logs -f' processes on arte.
-inspect audit ls --limit 1 --json | jq '.[0].streamed'   # true
+inspect audit ls --limit 1 --json --select '.data.entries[0].streamed'   # true
 
 # L11 --stream + --file composition (lifted clap mutex)
 inspect run arte --stream --file ./tests/smoke/v013/migration.sh \
   -- "${SMOKE_CTR}"
-inspect audit ls --limit 1 --json | jq '.[0].bidirectional'   # true
+inspect audit ls --limit 1 --json --select '.data.entries[0].bidirectional'   # true
 
 # F17 multi-step runner with injected step-3 failure + revert unwind.
 # Manifest at tests/smoke/v013/migration.json; step 3 deliberately
@@ -312,10 +324,10 @@ inspect run arte --steps ./tests/smoke/v013/migration.json \
   --revert-on-failure \
   --reason "v0.1.3 smoke F17 unwind probe"
 echo "exit=$?"   # non-zero (the failure exit), not 0
-inspect audit ls --limit 10 --json | \
-  jq '[.[] | select(.steps_run_id != null)] | length'
-inspect audit ls --limit 10 --json | \
-  jq '[.[] | select(.verb == "run.step.revert")] | length'
+inspect audit ls --limit 10 --json \
+  --select '[.data.entries[] | select(.steps_run_id != null)] | length'
+inspect audit ls --limit 10 --json \
+  --select '[.data.entries[] | select(.verb == "run.step.revert")] | length'
 # Pass: composite revert walks step 2 then step 1 inverses.
 ```
 
@@ -369,8 +381,8 @@ inspect run arte -- "echo after-reauth"   # must auto-reauth
 inspect disconnect arte
 inspect run arte --no-reauth -- "echo blocked"
 echo "exit=$?"   # expect 12 (transport_stale)
-inspect run arte --no-reauth --json -- "echo blocked" 2>/dev/null \
-  | jq '.failure_class'   # "transport_stale"
+inspect run arte --no-reauth --json --select '.failure_class' \
+  -- "echo blocked" 2>/dev/null   # "transport_stale"
 
 # L2 keychain. Codespace likely has no DBus session bus.
 inspect keychain test
@@ -406,13 +418,13 @@ grep -E '^── exit=[0-9]+ duration=[0-9]+ms audit_id=' "${TRANSCRIPT}" | head
 ! grep -E 'postgres://[^:]+:[^@]+@' "${TRANSCRIPT}"
 # F18 grep + cross-link to audit log.
 inspect history show arte --grep 'docker restart' | head
-SMOKE_AUDIT=$(jq -r . /tmp/inspect-smoke-audit.json)
+SMOKE_AUDIT=$(inspect query -r . < /tmp/inspect-smoke-audit.json)
 inspect history show arte --audit-id "${SMOKE_AUDIT}"
 inspect history list arte | head
 
 # L5 audit GC dry-run.
-inspect audit gc --keep 1d --dry-run --json | \
-  jq '{policy, entries_total, entries_kept, deleted_entries, freed_bytes}'
+inspect audit gc --keep 1d --dry-run --json \
+  --select '.data | {policy, entries_total, entries_kept, deleted_entries, freed_bytes}'
 # Pass: dry-run reports counts but deletes nothing.
 ```
 

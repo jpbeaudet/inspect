@@ -1140,8 +1140,8 @@ ORDERING + JSON PROJECTION (agent-recipe critical)
   recent entry from a pipeline, use `head -1` — `tail -1` returns the
   OLDEST entry in the page, not the newest.
 
-      $ inspect audit ls --json | jq -r '.[0].id'                # newest
-      $ inspect audit ls --json | jq -r '.[] | select(.verb==\"put\") | .id' | head -1
+      $ inspect audit ls --json --select '.data.entries[0].id' --select-raw                # newest
+      $ inspect audit ls --json --select '.data.entries[] | select(.verb==\"put\") | .id' --select-raw | head -1
 
   The `audit ls --json` envelope is a projection (id, ts, verb,
   selector, exit, diff_summary, is_revert, reason) — it does **not**
@@ -1160,9 +1160,9 @@ SELECTING (F19, v0.1.3)
 
 EXAMPLES
   $ inspect audit ls
-  $ inspect audit ls --json | jq -r '.[0].id'   # newest entry id
+  $ inspect audit ls --json --select '.data.entries[0].id' --select-raw   # newest entry id
   $ inspect audit show <id>
-  $ inspect audit show <id> --json | jq '.revert'   # revert block
+  $ inspect audit show <id> --json --select '.data.entry.revert'   # revert block
   $ inspect audit grep \"atlas\"
   $ inspect audit gc --keep 90d --dry-run
   $ inspect audit gc --keep 100 --json";
@@ -3647,7 +3647,7 @@ pub enum AuditCommand {
     /// `AuditEntry` (revert block included: kind, payload, preview,
     /// previous_hash) under `.data.entry` of the standard envelope
     /// — `audit ls --json` omits the revert block, so use this for
-    /// that. Recipe: `audit show <id> --json | jq '.data.entry'`.
+    /// that. Recipe: `audit show <id> --json --select '.data.entry'`.
     Show(AuditShowArgs),
     /// Filter audit entries by substring (id/verb/selector/args).
     /// **Newest-first**, same projection caveat as `audit ls --json`.

@@ -30,7 +30,7 @@ WORKFLOW EXAMPLES
 
   # Find errors and restart affected services
   $ inspect search '{source="logs"} |= "OOM"' --since 5m --json \
-      | jq -r '.service' | sort -u \
+      --select '.service' --select-raw | sort -u \
       | xargs -I{} inspect restart arte/{} --apply
 
   # Push a config fix across all prod atlas instances (preview, then apply)

@@ -15,7 +15,9 @@ DESCRIPTION
   listening ports (TCP via ss -tlnp / netstat -tlnp; UDP via
   ss -ulnp / netstat -ulnp — L9, v0.1.3), systemd units, health
   endpoints, log driver configuration, and remote tooling
-  (rg, jq, sed).
+  (rg, sed). `jq` is also probed but is **optional** from v0.1.3
+  onward — every recipe in this manual works via `--select` on
+  the inspect binary itself (see `inspect help select`).
 
 UDP LISTENERS (L9, v0.1.3)
   The host-listener probe scans both TCP and UDP. Pre-L9 only TCP
@@ -72,12 +74,14 @@ REFRESH
   (groups, aliases) are preserved across re-discovery.
 
 REMOTE TOOLING
-  Discovery probes for rg, jq, journalctl, and sed on the remote.
-  This determines filter pushdown strategy:
+  Discovery probes for rg, jq (optional, F19), journalctl, and sed
+  on the remote. This determines filter pushdown strategy:
     rg available    fast remote regex filtering
     grep only       slower fallback (with hint to install rg)
     journalctl      used for containers with the journald log driver
     sed             used for remote in-place edits
+    jq              informational only — inspect's own `--select`
+                    flag (F19) covers every recipe in this manual
 
 SEE ALSO
   inspect help ssh           connection and credential management

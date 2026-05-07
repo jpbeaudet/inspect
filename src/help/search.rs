@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn index_size_under_144kb() {
+    fn index_size_under_160kb() {
         // Cap raise history (only ever raised, never trimmed):
         //   50 KB → 64 KB in v0.1.2 (bundle + watch topic prose)
         //   64 KB → 80 KB in v0.1.3 (L7 redaction model)
@@ -240,10 +240,17 @@ mod tests {
         //                              surfaced live; per CLAUDE.md
         //                              "Help-surface discipline" the
         //                              cap is raised, not trimmed)
+        //  144 KB → 160 KB in v0.1.3 F19 (new `select` editorial
+        //                              topic + per-verb LONG_*
+        //                              SELECTING blocks pushed the
+        //                              index past 151 KB; cap raised,
+        //                              prose preserved per the same
+        //                              "Help-surface discipline"
+        //                              precedent)
         // Still small enough that the index loads instantly even on
         // the smallest dev VMs.
         let n = index_byte_size();
-        assert!(n <= 144 * 1024, "index is {n} bytes, exceeds 144 KB cap");
+        assert!(n <= 160 * 1024, "index is {n} bytes, exceeds 160 KB cap");
     }
 
     #[test]

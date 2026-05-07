@@ -20,6 +20,10 @@
     "EmptyQuery",
     "EmptyTargets",
     "ExecMissingCommand",
+    "FilterParse",
+    "FilterRawNonString",
+    "FilterRequiresJson",
+    "FilterRuntime",
     "InvalidHost",
     "InvalidNamespaceName",
     "InvalidUser",
@@ -106,6 +110,7 @@
     "discovery",
     "ssh",
     "examples",
-    "compose"
+    "compose",
+    "select"
   ]
 }
