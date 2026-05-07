@@ -446,25 +446,40 @@ SIGINT round-trip. **Run before P7 cleanup** — the sandbox container
 and the audit entries P3/P4 produced are the inputs.
 
 ```sh
-# (1) Identity-filter round-trip on the status envelope.
+# (1) Identity-filter round-trip on a deterministic envelope verb.
 # `--select '.'` is a no-op; the output bytes must equal the
-# unfiltered envelope (modulo trailing newline). Proves the envelope
-# chokepoint preserves round-trip identity for every JSON-emitting
-# verb. If diff != 0, the chokepoint is mutating bytes it shouldn't.
-inspect status arte --json > /tmp/inspect-smoke-status-plain.json
-inspect status arte --json --select '.' > /tmp/inspect-smoke-status-id.json
-diff -q /tmp/inspect-smoke-status-plain.json /tmp/inspect-smoke-status-id.json
+# unfiltered envelope (modulo trailing newline). Proves the
+# envelope chokepoint preserves round-trip identity through the
+# serde→jaq→serde pipeline.
+#
+# IMPORTANT: use `audit ls`, NOT `status`. Two consecutive `status`
+# calls produce different `meta.source.{mode, runtime_age_s}` (the
+# second one hits the cache), which makes the diff non-deterministic
+# and tests cache-freshness rather than the F19 round-trip. `audit
+# ls` is read-only against an immutable on-disk projection — the
+# byte stream is identical across consecutive calls. (P8-A.1
+# follow-up; see "P8 follow-ups" section below.)
+inspect audit ls --limit 5 --json > /tmp/inspect-smoke-audit-plain.json
+inspect audit ls --limit 5 --json --select '.' > /tmp/inspect-smoke-audit-id.json
+diff -q /tmp/inspect-smoke-audit-plain.json /tmp/inspect-smoke-audit-id.json
 # Pass: files compare equal (or differ only by a single trailing newline).
 
-# (2) audit show projection — extract `.data.entry.revert.kind` from
-# a recorded write entry. The most recent successful write in the
-# audit log was created during P3 (run --apply / put / chmod) or P4
-# (run --steps); its revert.kind must be one of the four taxonomy
-# values. Closes CLAUDE.md `audit show` envelope-path note (the
-# revert block is at .data.entry.revert, not .[0].revert).
-WRITE_ID=$(inspect audit ls --limit 20 --json \
-  --select '[.data.entries[] | select(.is_revert == false) | select(.exit == 0) | .id][0]' \
+# (2) audit show projection — extract `.data.entry.revert.kind`
+# from a real recorded write entry. Closes CLAUDE.md `audit show`
+# envelope-path note (the revert block is at .data.entry.revert,
+# not .[0].revert).
+#
+# IMPORTANT: filter by `verb == "run"` (or whichever write verb P3
+# / P4 used last). Filtering only by `is_revert == false` and
+# `exit == 0` will pick up `connect` entries — connect succeeds,
+# is not a revert, and has no `revert` block in the F11 contract,
+# so `.data.entry.revert.kind` would yield null and trip
+# `--select-raw`'s non-string error. (P8-A.2 follow-up; see "P8
+# follow-ups" section below.)
+WRITE_ID=$(inspect audit ls --limit 50 --json \
+  --select '[.data.entries[] | select(.verb == "run") | select(.is_revert == false) | select(.exit == 0) | .id][0]' \
   --select-raw)
+echo "WRITE_ID=${WRITE_ID}"
 inspect audit show "$WRITE_ID" --json --select '.data.entry.revert.kind' --select-raw
 # Pass: prints exactly one of: command_pair | state_snapshot | composite | unsupported.
 
@@ -508,6 +523,209 @@ inspect run arte -- "ps -ef | grep 'docker logs -f ${SMOKE_CTR}' \
 
 ---
 
+## P8 follow-ups — open traps surfaced by the F19 release smoke (must close before v0.1.3 tag)
+
+The first F19 P8 dry-run against arte (2026-05-07) surfaced four
+classes of trap. **The release is not pristine until every entry
+below flips to ✅.** Each entry carries a repro recipe, the
+hypothesis being tested, the current state, and the acceptance
+criteria that flip it to ✅. The branch `v0.1.3-jaq` stays open
+until all four close; `v0.1.3` is not tagged from a state with any
+☐ entry below.
+
+This tracker lives in `SMOKE_v0.1.3.md` rather than the backlog
+because each item is reproducible through a P8-class recipe and
+benefits from sitting next to the recipes that surfaced it. As
+each item closes, this section gets updated in the same commit
+that closes it; pre-tag, this section gets a final pass to confirm
+all four are ✅.
+
+`inspect` is a tool driven primarily by LLM agents. Every trap
+below would silently mislead an agent reading help / running
+recipes / correlating audit and transcript output. They are not
+optional cleanups. They are the agent-friendliness floor.
+
+### P8-A — Recipe corrections for the SMOKE itself (✅ fixed in this commit)
+
+#### P8-A.1 — Recipe (1) was non-deterministic
+
+The original recipe diff'd two consecutive `inspect status arte
+--json` calls; the second hit the F8 cache, producing different
+`meta.source.{mode, runtime_age_s}` fields. The diff therefore
+*always* reported a difference even when the F19 round-trip was
+correct, masking the actual contract under cache-freshness drift.
+**The F19 round-trip itself is byte-equal** — keys land in
+alphabetical order on both paths (no `preserve_order` feature
+enabled on `serde_json`), numbers format identically, and the
+serde→jaq→serde pipeline passes through unchanged. The original
+recipe was just measuring the wrong thing.
+
+**Status:** ✅ Fixed in this commit. Recipe (1) now diffs two
+consecutive `inspect audit ls --limit 5 --json` calls. `audit ls`
+is read-only against an immutable on-disk projection; consecutive
+calls produce byte-identical output absent intermediate writes.
+
+#### P8-A.2 — Recipe (2) didn't filter to write verbs
+
+The original filter selected the most recent successful non-revert
+audit entry. That filter accepts `connect` / `disconnect` /
+`setup --discover` entries (all succeed, none are reverts), but
+those verbs do not write a `revert` block — so
+`.data.entry.revert.kind` yields `null` and `--select-raw`
+correctly errors with "filter yielded non-string". The F19
+behavior was right; the recipe was wrong. The first arte run hit
+this exactly: the most recent successful entry was the `connect`
+fired earlier in the session.
+
+**Status:** ✅ Fixed in this commit. Recipe (2) now filters by
+`verb == "run"`. P3/P4 always produce at least one successful
+`run` audit entry, so the filter resolves deterministically.
+
+### P8-B — `--select` against streaming error frames (☐ open)
+
+**Repro:**
+```sh
+# Pick a guaranteed-bad target so the verb hits an error frame.
+inspect run arte --stream --json --select '.line' --select-raw \
+  -- "docker logs -f does-not-exist"
+```
+
+**Surfaced:** When the streaming verb's remote command fails to
+start (image missing, container missing, permission denied), the
+chokepoint emits a fallback envelope that doesn't carry a `.line`
+key. `--select '.line'` yields `null`; `--select-raw` rejects null
+as non-string with `error: filter --raw: filter yielded non-string`.
+An agent tailing real-time logs sees a filter error every time the
+verb encounters an error frame, even though the operator's intent
+("show me lines") is well-defined.
+
+**Question:** When a streaming verb emits a frame whose schema
+doesn't match the operator's filter, should `--select` (a) error
+per-frame as today, (b) skip silently, or (c) pass-through the
+raw frame? Today's behavior is (a) — the most agent-hostile of
+the three for a streaming use case. The jq-language `// empty`
+operator is the workaround.
+
+**Acceptance criteria — flips to ✅ when both:**
+1. `inspect help select` documents the streaming-error-frame
+   pattern explicitly with the worked recipe `--select '.line // empty' --select-raw`,
+   landing under a new "common pitfall #7" entry.
+2. SMOKE P8 grows a recipe (6) that exercises the `// empty`
+   pattern against a real arte streaming verb (e.g.
+   `inspect run arte --stream --json --select '.line // empty' --select-raw -- "echo hi"`)
+   and validates that both data frames and trailing summary frames
+   flow correctly.
+
+### P8-C — F18 transcript correlation gap on `connect` entries (☐ open)
+
+**Repro:**
+```sh
+LAST_ID=$(inspect audit ls --limit 1 --json --select '.data.entries[0].id' --select-raw)
+inspect history show arte --audit-id "$LAST_ID"
+# When LAST_ID is a connect entry, returns:
+#   SUMMARY: history show: 0 blocks match --audit-id '<id>' against namespace 'arte'
+```
+
+**Surfaced:** `inspect audit ls` returns the connect entry
+correctly. `inspect history show --audit-id <connect-id>` cannot
+cross-reference it back to the F18 transcript and reports zero
+matching blocks.
+
+**Hypotheses (need investigation):**
+1. F18 deliberately excludes `connect`/`disconnect` from the
+   per-namespace transcript (intentional, but undocumented in
+   `inspect help safety` / `inspect history show --help`).
+2. The connect transcript fence doesn't include `audit_id=…` so
+   the `--audit-id` finder has nothing to match.
+3. A real F18 contract bug.
+
+**This is not F19's fault** — F19's recipe (4) just happened to
+pick a connect id when the seed step failed and no `run` audit
+followed. But agents using the audit-id ↔ transcript correlation
+pattern will silently lose connect/disconnect blocks if the
+exclusion is hypothesis (1) or (2), and that is exactly the
+silent-data-loss class the v0.1.3 release ships to close.
+
+**Acceptance criteria — flips to ✅ when:**
+1. The actual behavior is identified by reading
+   `src/transcript/`, `src/commands/connect.rs`, and
+   `src/commands/history.rs` capture sites.
+2. Either:
+   - (a) the `connect` verb is wired to write a fenced transcript
+     block with the correct `audit_id=<id>` footer (matching the
+     F18 contract every other namespaced verb already follows), or
+   - (b) `inspect help safety` and `inspect history show --help`
+     explicitly document the exclusion class so an agent reading
+     help knows not to expect a block (and the exit code / SUMMARY
+     line on a connect-id miss reflects the documented behavior,
+     not "0 blocks match" as if it were a generic miss).
+3. P8 grows a recipe that validates the chosen path against a
+   real arte session.
+
+### P8-D — `inspect run --apply` exit 2 + stderr swallow (☐ open, highest concern)
+
+**Repro:**
+```sh
+inspect run arte --apply -- "docker run -d --name foo --label inspect-smoke=1 nginx:alpine"
+# Observed:
+#   arte: exit 2
+#   SUMMARY: run: 0 ok, 1 failed
+#   DATA:    (none)
+#   NEXT:    (none)
+# The remote stderr is not surfaced anywhere on the operator's terminal.
+```
+
+**Surfaced:** During the F19 P8 smoke seed step, both the initial
+`docker run -d` and the cleanup `docker rm -f` exited 2 on the
+remote. SUMMARY correctly reports "0 ok, 1 failed", but the *why*
+of the failure is invisible — no remote stderr surfaced, DATA is
+empty. An agent driving `inspect run --apply` against a remote
+host has no path from "exit 2" to "what to fix" without a side
+channel (`inspect run … --stream` or shell-side ssh).
+
+**This is not F19's fault.** The same recipe shape works in
+SMOKE_v0.1.3.md P3 when run earlier in the v0.1.3 cycle. Possible
+causes:
+1. Remote-side `docker run` is genuinely failing (image pull rate
+   limit, name conflict with a stale `inspect-smoke-*` container,
+   daemon issue) and inspect's exit-code passthrough is correct —
+   but the stderr-swallowing is a real F9/F10 gap that agentic
+   callers cannot work around without `--stream`.
+2. `inspect run --apply` semantics changed between F11
+   (load-bearing safety primitive) and F19 — specifically, whether
+   `--apply` is required / optional / forbidden for arbitrary
+   commands without a `--revert-preview` companion. The F19 audit
+   handoff added `--apply` where P3 uses bare `inspect run`; this
+   inconsistency may be the source.
+3. A real regression in the run dispatch path landed somewhere in
+   the F19 sequence (C1–C4) that smoke testing the chokepoints
+   only didn't catch.
+
+**Acceptance criteria — flips to ✅ when:**
+1. The repro is reduced to a minimal command (one container, no
+   smoke labels, on a fresh sandbox or local docker if convenient).
+2. Root cause identified, and:
+   - (a) the bug is fixed if it's an inspect regression, OR
+   - (b) `LONG_RUN` / `inspect help run` explicitly documents
+     when `--apply` is required vs forbidden vs optional, with
+     a worked recipe showing each form.
+3. The remote stderr question is answered: either `inspect run`
+   tees remote stderr to the operator's stderr by default and the
+   smoke output should have shown it (regression), or it doesn't
+   and the help docs say so + show the opt-in (`--show-output`,
+   `--stream`, etc.).
+4. P8 seed recipes are updated to the working form before the
+   smoke is re-run.
+
+### Re-running P8 after follow-ups close
+
+Once all four entries above flip to ✅, run P8 end-to-end one more
+time against arte. A clean PASS is the gate to ff-merge
+`v0.1.3-jaq` into `v0.1.3`. Until then, the branch stays open and
+unmerged.
+
+---
+
 ## P7 — cleanup + final hygiene
 
 ```sh
@@ -538,9 +756,11 @@ cargo test 2>&1 | grep -E "^test result|^running" | tail -40
 
 ## Pass / fail decision
 
-**PASS** = every gate above green AND every smoke listed in the
+**PASS** = every gate above green AND every entry in the
+"P8 follow-ups" section above is ✅ AND every smoke listed in the
 "Release readiness gate" bullets at the bottom of
-`INSPECT_v0.1.3_BACKLOG.md` is covered.
+`INSPECT_v0.1.3_BACKLOG.md` is covered. **Any ☐ in the P8
+follow-ups blocks the tag.**
 
 **FAIL** = any single gate red. Two flavours:
 - Bug in inspect → fix it, add a regression test in
