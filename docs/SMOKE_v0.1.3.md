@@ -436,6 +436,78 @@ inspect audit gc --keep 1d --dry-run --json \
 
 ---
 
+## P8 — F19 `--select` field-validation gate (must run before P7 cleanup)
+
+Maps to: F19. Closes the v0.1.3 release scope. Each recipe exercises
+one chokepoint in a way the synthetic-fixture acceptance tests in
+`tests/jaq_select_v013.rs` cannot: (1) on a real audit log built
+during P3/P4, (2) on a real compose host, (3) end-to-end with a real
+SIGINT round-trip. **Run before P7 cleanup** — the sandbox container
+and the audit entries P3/P4 produced are the inputs.
+
+```sh
+# (1) Identity-filter round-trip on the status envelope.
+# `--select '.'` is a no-op; the output bytes must equal the
+# unfiltered envelope (modulo trailing newline). Proves the envelope
+# chokepoint preserves round-trip identity for every JSON-emitting
+# verb. If diff != 0, the chokepoint is mutating bytes it shouldn't.
+inspect status arte --json > /tmp/inspect-smoke-status-plain.json
+inspect status arte --json --select '.' > /tmp/inspect-smoke-status-id.json
+diff -q /tmp/inspect-smoke-status-plain.json /tmp/inspect-smoke-status-id.json
+# Pass: files compare equal (or differ only by a single trailing newline).
+
+# (2) audit show projection — extract `.data.entry.revert.kind` from
+# a recorded write entry. The most recent successful write in the
+# audit log was created during P3 (run --apply / put / chmod) or P4
+# (run --steps); its revert.kind must be one of the four taxonomy
+# values. Closes CLAUDE.md `audit show` envelope-path note (the
+# revert block is at .data.entry.revert, not .[0].revert).
+WRITE_ID=$(inspect audit ls --limit 20 --json \
+  --select '[.data.entries[] | select(.is_revert == false) | select(.exit == 0) | .id][0]' \
+  --select-raw)
+inspect audit show "$WRITE_ID" --json --select '.data.entry.revert.kind' --select-raw
+# Pass: prints exactly one of: command_pair | state_snapshot | composite | unsupported.
+
+# (3) compose ls projection — project-name list via the documented
+# envelope path. Closes the CLAUDE.md "compose ls --json envelope
+# path" footgun: pre-F19 the recipe was `jq -r '.compose_projects[].name'`
+# (wrong — the path is under .data); the F19 contract pins
+# .data.compose_projects[].name and --select-raw strips quotes.
+inspect compose ls arte --json \
+  --select '.data.compose_projects[].name' --select-raw
+# Pass: at least one unquoted project name on stdout; exit 0.
+
+# (4) history ↔ audit cross-link via --select-raw, replacing the
+# pre-F19 `jq -r .` shape. Pulls the newest audit id and feeds it
+# to `inspect history show --audit-id` to surface the matching
+# transcript block.
+LAST_ID=$(inspect audit ls --limit 1 --json \
+  --select '.data.entries[0].id' --select-raw)
+inspect history show arte --audit-id "$LAST_ID" | head
+# Pass: at least one transcript line printed; ${LAST_ID} is non-empty.
+
+# (5) Streaming chokepoint × F16 signal-forwarding × F19 per-line
+# projection. Adding `--select '.line' --select-raw` to a
+# `run --stream --json` invocation must NOT break F16's SIGINT
+# forward — the remote `docker logs -f` must still die on Ctrl-C.
+timeout --signal=INT 5 inspect run arte --stream --json \
+  --select '.line' --select-raw \
+  -- "docker logs -f ${SMOKE_CTR}" || true
+inspect run arte -- "ps -ef | grep 'docker logs -f ${SMOKE_CTR}' \
+  | grep -v grep | wc -l"   # expect 0
+# Pass: zero orphaned `docker logs -f` processes on arte.
+```
+
+| Gate | Pass criteria |
+|---|---|
+| F19 round-trip identity | `--select '.'` output equals the unfiltered envelope (no byte mutation). |
+| F19 audit show projection | `.data.entry.revert.kind` extracts as one of `command_pair` / `state_snapshot` / `composite` / `unsupported` for a real recorded write. |
+| F19 compose ls projection | `.data.compose_projects[].name` with `--select-raw` returns ≥ 1 unquoted project name. |
+| F19 history correlation | `inspect history show --audit-id $(... --select-raw)` surfaces the matching transcript block. |
+| F19 stream × signal | Adding `--select '.line' --select-raw` to `run --stream --json` does not regress F16's SIGINT forward — zero orphaned remote processes. |
+
+---
+
 ## P7 — cleanup + final hygiene
 
 ```sh
@@ -466,8 +538,9 @@ cargo test 2>&1 | grep -E "^test result|^running" | tail -40
 
 ## Pass / fail decision
 
-**PASS** = every gate above green AND every smoke listed in
-`INSPECT_v0.1.3_BACKLOG.md` lines 1064–1071 covered.
+**PASS** = every gate above green AND every smoke listed in the
+"Release readiness gate" bullets at the bottom of
+`INSPECT_v0.1.3_BACKLOG.md` is covered.
 
 **FAIL** = any single gate red. Two flavours:
 - Bug in inspect → fix it, add a regression test in

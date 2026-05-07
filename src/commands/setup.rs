@@ -185,6 +185,15 @@ fn print_human(p: &Profile, status: &str) {
         b(p.remote_tooling.docker),
         b(p.remote_tooling.journalctl),
     );
+    if !p.remote_tooling.jq {
+        // F19 (v0.1.3): `jq` is informational only from this release
+        // onward. Every recipe in the manual / runbook / help system
+        // uses the in-binary `--select` flag (jaq engine). A missing
+        // `jq` is not a problem and never blocks any inspect verb.
+        println!(
+            "  note:           jq is optional (F19, v0.1.3) — recipes use `--select`; see `inspect help select`"
+        );
+    }
     println!("  volumes:        {}", p.volumes.len());
     println!("  networks:       {}", p.networks.len());
     println!("  images:         {}", p.images.len());

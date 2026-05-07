@@ -633,6 +633,135 @@ remaining three are documented limitations called out under
 
 ### Added
 
+- **F19 — `--select` / `--select-raw` / `--select-slurp` on every
+  JSON-emitting verb, plus the standalone `inspect query <FILTER>`
+  verb (smoke-promotion from v0.1.5 candidate).** Surfaced as a
+  release-blocker during v0.1.3 release-smoke preparation: every
+  recipe in `MANUAL.md`, `RUNBOOK.md`, `SMOKE_v0.1.3.md`, and the
+  in-binary help system piped `--json` output to external `jq`,
+  but agentic callers driving inspect from a fresh codespace do not
+  always have `jq` on PATH — so the help system was instructing
+  agents to install a second tool before the recipes worked. F19
+  closes the gap by shipping a pure-Rust jq filter engine
+  (`jaq-core` / `jaq-std` / `jaq-json`) inside the inspect binary
+  and rewriting every in-tree recipe to drive it via three new
+  composable flags. Agents land on a fresh machine, type the recipe
+  as documented, and it works.
+  - **Three flag shape.** `--select '<FILTER>'` on every
+    JSON-emitting verb (envelope verbs, NDJSON streaming verbs,
+    bespoke emitters like `help all` / `fleet` / `setup --discover`
+    / `recipe list`). Two bool modifiers, both `requires =
+    "select"` at clap level: `--select-raw` is the `jq -r`
+    equivalent — strips JSON quotes from string yields; on a
+    non-string yield (number, bool, array, object) the verb
+    exits 1 with `error: filter --raw: filter yielded non-string`.
+    `--select-slurp` is the `jq -s` equivalent — collects an NDJSON
+    stream into a single array before applying the filter; on a
+    single-envelope verb the slurp produces a one-element array
+    (so `.[0].topics | length` is the canonical "I wrote a slurp
+    recipe and got an envelope" reshape). The flag triple composes:
+    `--select-raw --select-slurp` is `jq -rs`.
+  - **Filter language is jq's, verbatim.** `jaq` tracks libjq's
+    behavior closely; every idiom from the jq manual (path
+    expressions, `select(...)`, `group_by`, `map`, generators,
+    `as $name`, `// empty`, etc.) works without translation. The
+    decision rationale (stable spec since 2012, active maintenance,
+    zero learning curve for the agentic audience, > 500 LOC to
+    reimplement faithfully) is recorded in `CLAUDE.md` § "jaq
+    rationale (2026-05-05)".
+  - **Two single-source-of-truth chokepoints.** Every JSON-emitting
+    verb routes through one of two helpers — `OutputDoc::print_json`
+    (envelope verbs) or `JsonOut::write` (NDJSON streams) — both of
+    which now accept a `FilterSpec` and apply the filter exactly
+    once before bytes hit stdout. Bespoke emitters (`help all`,
+    `fleet`, `setup --discover`, `recipe list`) call the same
+    `print_json_value` helper. The Renderer dispatch path bypasses
+    `transcript::emit_stdout` for filter output so a piped recipe
+    is never tee'd into the F18 transcript with the post-filter
+    bytes — transcripts capture the full envelope as the operator
+    saw it. New `src/query/` module wraps the jaq engine behind a
+    single `eval(filter, value) -> FilterOutcome` so a future
+    swap (back to native, or to a different engine) is mechanical.
+  - **`inspect query <FILTER>` standalone verb.** Reads JSON or
+    NDJSON from stdin and applies the same engine, with the
+    shorter clap names `-r` / `-s` for raw / slurp. Useful for
+    filtering saved envelopes, audit log files, or output captured
+    into a tempfile. Recipe replacement: `jq -r .` ⇒ `inspect
+    query -r .` — same shape, no external dependency.
+  - **Exit codes — no reuse, all map onto pre-existing
+    semantics.** `0` for ≥ 1 result (same as every JSON-emitting
+    verb's success path); `1` for zero results, runtime errors, or
+    `--select-raw` non-string yields (same as `grep -q` / no-match
+    contract; agents loop on a 1 only if the underlying verb's 1
+    is loopable); `2` for filter parse errors, `--select` without
+    a JSON-class output format, and any clap usage error (same as
+    every other clap usage error). No new exit code allocated.
+  - **Error → help-topic linkage.** Four new `ERROR_CATALOG` rows
+    (`FilterParse` / `FilterRuntime` / `FilterRawNonString` /
+    `FilterRequiresJson`) route every filter-error stderr line
+    through `error::emit` with a `see: inspect help select`
+    cross-link, matching the chained-recovery contract every
+    other inspect error already follows.
+  - **`inspect help select` editorial topic.** New 140-line topic
+    under `src/help/content/select.md`: EXAMPLES, three-flag
+    composition, an ENVELOPE PATHS cheatsheet (ten filters
+    covering the most common `.data.*` shapes — `.data.state`,
+    `.data.services[]`, `.data.entries[0].id`,
+    `.data.compose_projects[].name`, `.meta.source.mode`, …),
+    EXIT CODES table, six COMMON PITFALLS (shell quoting, the
+    `select` flag vs `select(...)` jq builtin, `--select-raw` on
+    non-strings, `--select-slurp` on single-envelope verbs, the
+    pre-L7 audit-array recipes, null-safe paths), and a
+    standalone-verb pointer. Indexed in the help-search corpus;
+    surfaces under `inspect help --search jq` and `--search filter`.
+  - **No envelope-shape change.** F19 is purely a new
+    output-stage; the underlying `{schema_version, summary, data,
+    next, meta}` envelope and every NDJSON per-line schema are
+    byte-identical to v0.1.2. Pre-F19 transcripts that pipe to
+    external `jq` keep working because the binary you're driving
+    still emits the same envelope — `RUNBOOK.md` carries an
+    explicit "from v0.1.3 onward, recipes use `--select`; pre-v0.1.3
+    transcripts that pipe to `jq` still work" operator note.
+  - **Recipe sweep.** Every `| jq` recipe in `src/cli.rs` `LONG_*`
+    constants, `src/help/content/`, `src/help/verbose/`,
+    `docs/MANUAL.md`, `docs/RUNBOOK.md`, `docs/SMOKE_v0.1.3.md`,
+    and `README.md` rewritten to `--select` form. The two
+    legitimate exceptions (RUNBOOK § operator-side reassurance
+    that pre-v0.1.3 `jq` recipes still work) are explicitly
+    sidebar-prefixed.
+  - **Discovery probe reword.** `src/discovery/probes.rs` keeps
+    probing for `jq` (the `RemoteTooling.jq` field is unchanged)
+    but the `inspect setup --discover` human renderer now appends
+    a one-line `note: jq is optional (F19, v0.1.3) — recipes use
+    --select` when `jq=false` so an operator scanning the summary
+    isn't left wondering. The `inspect help discovery` topic body
+    flags `jq` as informational only.
+  - **Test coverage.** 36 acceptance tests across
+    `tests/jaq_select_v013.rs` and `tests/jaq_query_v013.rs`
+    covering: every chokepoint (envelope, bespoke emitter, NDJSON
+    stream); every error class (parse / runtime / raw-non-string /
+    requires-json); every clap mutex (`--select-raw` requires
+    `--select`; `--select-slurp` requires `--select`; `--quiet` ↔
+    `--json`; `--select` ↔ `--csv` / `--md` / `--table`); every
+    help-discoverability surface (per-verb `--help`, `inspect help
+    select`, `--search filter` / `--search jq`); the
+    parse-error → help-topic cross-link via `ERROR_CATALOG`; and
+    the help-search index size pin (raised 144 → 160 KB to absorb
+    the new topic + per-verb SELECTING blocks). Field-validation
+    is exercised end-to-end against arte under SMOKE_v0.1.3.md
+    P8 (5 recipes: identity round-trip on the status envelope,
+    audit-show revert.kind extraction, compose ls project-name
+    list, history × audit-id correlation, run --stream --json
+    --select '.line' under SIGINT).
+  - **New dependency.** `jaq-core 2`, `jaq-std 2`, `jaq-json 1`.
+    Pure-Rust, MIT, actively maintained since 2021, tracking
+    libjq's behavior closely. Approved under `CLAUDE.md` §
+    "Dependency Policy" criteria (stable language reference,
+    years of production use, infeasible to reimplement faithfully
+    in < 500 LOC). Binary size impact: ~500 KB–1 MB on the
+    optimized release binary; acceptable given the
+    fresh-install agent UX gain.
+
 - **L3 — Parameterized aliases.** Aliases were static strings; a
   recipe that wanted "logs for *any* service on arte" had to either
   define one alias per service or fall back to writing the full

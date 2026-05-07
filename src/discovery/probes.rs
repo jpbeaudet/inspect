@@ -212,6 +212,13 @@ pub struct HostListener {
 /// Probe which remote tools are present. Cheap; runs a single shell line.
 pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
     // `command -v X >/dev/null 2>&1 && echo X=1 || echo X=0`
+    // F19 (v0.1.3): `jq` is probed informationally only — every recipe
+    // in the manual / runbook / help system uses the in-binary
+    // `--select` flag (jaq engine). A missing `jq` does not fire any
+    // warning; the human renderer in `commands::setup::print_human`
+    // attaches an "optional from v0.1.3 onward" pointer when
+    // `t.jq == false` so an operator scanning the summary isn't left
+    // wondering. See `inspect help select`.
     let tools = [
         "rg",
         "jq",
