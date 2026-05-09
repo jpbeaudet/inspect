@@ -1,9 +1,11 @@
 //! `inspect help` command dispatcher.
 //!
 //! Bible §2: three entry points (index / topic / search), one renderer.
-//! HP-0 implements index + topic + "did you mean" suggester. The
-//! `--search` and `--json` arms are scaffolded as `Unimplemented`
-//! placeholders so the CLI surface is stable; HP-3 and HP-4 fill them.
+//! All four arms ship: `index` (HP-0), `topic` (HP-0) + `--did-you-mean`
+//! suggester (HP-0), `--search <KEYWORD>` (HP-3), and `--json` (HP-4).
+//! The HP-* phases are complete; `crate::help::index`, `crate::help::topic`,
+//! `crate::help::search`, and `crate::help::all_topics` are the dispatch
+//! targets used by `run`.
 
 use anyhow::Result;
 

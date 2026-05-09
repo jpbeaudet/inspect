@@ -660,7 +660,6 @@ pub fn probe_docker_inventory(ns: &str, target: &SshTarget) -> ProbeResult {
                 r.images.push(Image {
                     repo_tag: cols[0].to_string(),
                     id: cols.get(1).map(|s| s.to_string()).filter(|s| !s.is_empty()),
-                    size_bytes: None, // human size; deferred for now
                 });
             }
         }
