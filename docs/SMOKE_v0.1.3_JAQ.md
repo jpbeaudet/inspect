@@ -314,23 +314,32 @@ timeout 3 inspect logs arte/${SMOKE_CTR} --json \
 # No "filter --raw: filter yielded non-string" in stderr.
 
 # (C2) logs with a ranking projection inside --select. Slurps the
-# full set, sorts by length, takes the longest 3.
-timeout 3 inspect logs arte/${SMOKE_CTR} --since 5m --json \
-  --select '[.line // empty] | sort_by(length) | .[-3:]' --select-slurp \
+# full set, sorts by length, takes the longest 3. IMPORTANT: with
+# `--select-slurp` the filter input is `[envelope1, …]` (an array
+# of envelopes); use `.[]` to un-iterate before reaching `.line`.
+# Use `--tail 100` rather than `--since 5m` so a quiet container
+# still produces enough rows to exercise the sort_by — `--since`
+# windows can be empty and reduce the test to "[]" with no
+# observable sort_by behavior.
+timeout 5 inspect logs arte/${SMOKE_CTR} --tail 100 --json \
+  --select '[.[] | .line // empty] | sort_by(length) | .[-3:]' --select-slurp \
   || true
 # Pass: a JSON array of up to 3 strings, exit 0.
 
-# (C3) grep --json — content match across files. Use a path that
-# exists in every container shape.
-inspect grep --json arte/${SMOKE_CTR} '/etc/hostname' --pattern '.' \
+# (C3) grep — pattern is the FIRST positional, selector second.
+# Path goes via `:suffix` on the selector, NOT via `--path`. There
+# is also no `--pattern` flag; the pattern is the bare positional.
+inspect grep '.' arte/${SMOKE_CTR}:/etc/hostname --json \
   --select '.line // empty' --select-raw 2>&1 | head -3 || true
-# Pass: at most a few lines (hostname files are small), exit 0.
-# Adjust path if /etc/hostname is missing.
+# Pass: hostname text on stdout (matches `.` against the file).
+# Live arte 2026-05-09 returned `/etc/hostname:88ab053de65e`.
 
-# (C4) find --json — shape pinning for discovery.
-inspect find arte/${SMOKE_CTR} '/' --name '*.conf' --json \
+# (C4) find — target is FIRST positional with `:path` suffix,
+# pattern is SECOND positional. There is NO `--name` flag (this
+# is not real find(1)); per-row envelope is {server, service, path}.
+inspect find arte/${SMOKE_CTR}:/etc '*.conf' --json \
   --select '.path // empty' --select-raw 2>&1 | head -5 || true
-# Pass: up to 5 .conf paths on stdout (varies by container), exit 0.
+# Pass: up to 5 .conf paths on stdout, exit 0.
 
 # (C5) run --stream --json --select '.line // empty' --select-raw —
 # the F19 × F16 × P8-B intersection. Adds back the P8.5 SIGINT
@@ -380,19 +389,30 @@ test -n "$NEWEST_NS" && \
 
 # (D3) compose ls → compose ps → status correlation. Project from
 # compose ls, drill into services via compose ps, cross-check that
-# `status` reports the same service set.
+# `status` reports the same service set. IMPORTANT: per-service
+# field is `.service` on BOTH `compose ps` and `status` envelopes
+# (NOT `.name` — that's the project name on `compose ls`). And
+# `compose ps` takes `<ns>/<project>` selector, not `--project`.
 PROJECT=$(inspect compose ls arte --json \
   --select '.data.compose_projects[0].name' --select-raw)
-test -n "$PROJECT" || { echo "D3 SKIP: no compose projects"; exit 0; }
-COMPOSE_SVCS=$(inspect compose ps arte --project "$PROJECT" --json \
-  --select '.data.services[].name' --select-raw | sort | tr '\n' ' ')
+[ -n "$PROJECT" ] || { echo "D3 SKIP: no compose projects"; exit 0; }
+COMPOSE_SVCS=$(inspect compose ps "arte/$PROJECT" --json \
+  --select '.data.services[].service' --select-raw 2>/dev/null | sort)
 STATUS_SVCS=$(inspect status arte --json \
-  --select '.data.services[].name' --select-raw | sort | tr '\n' ' ')
-echo "D3 compose svcs: $COMPOSE_SVCS"
-echo "D3 status  svcs: $STATUS_SVCS"
+  --select '.data.services[].service' --select-raw 2>/dev/null | sort)
+echo "compose svc count: $(echo "$COMPOSE_SVCS" | wc -l)"
+echo "status  svc count: $(echo "$STATUS_SVCS" | wc -l)"
+MISSING=$(comm -23 <(echo "$COMPOSE_SVCS") <(echo "$STATUS_SVCS"))
+if [ -z "$MISSING" ]; then
+  echo "D3 PASS: compose ⊆ status"
+else
+  echo "D3 FAIL: missing from status: $MISSING"
+fi
 # Pass: every service in COMPOSE_SVCS appears in STATUS_SVCS
-# (status may include extra non-compose-managed containers; that's
-# fine — the inclusion direction is what matters).
+# (status may include extra non-compose-managed containers — host
+# systemd units, ad-hoc containers — so inclusion direction
+# matters, not equality). Live arte 2026-05-09: PROJECT=
+# luminary-atlas, 12 compose svcs ⊆ 55 status svcs.
 ```
 
 Section D pass criterion: D1 round-trip equality holds; D2 surfaces
