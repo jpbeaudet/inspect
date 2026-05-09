@@ -451,7 +451,23 @@ fn write_block(ctx: &TranscriptContext, exit_code: i32) -> std::io::Result<()> {
         token = ctx.verb_token,
     );
     block.extend_from_slice(header.as_bytes());
-    block.extend_from_slice(ctx.argv_line.as_bytes());
+    // SMOKE 2026-05-09 fix: route the argv line through the same L7
+    // four-masker the body lines use. Pre-fix, `redact_argv_line`
+    // only masked `--password=`/`--token=` prefixes, so any embedded
+    // credential in a shell-quoted arg leaked verbatim to the
+    // transcript file. Surfaced live during P6.F18.2: four `Bearer`
+    // leaks in the form `$ inspect run arte -- 'echo
+    // "Authorization: Bearer abc..."'` (the L7 synthetic test typed
+    // a literal Bearer in argv to verify body redaction; body lines
+    // were correctly redacted but the argv line itself was not).
+    // The F18 design says "every line tee'd to the transcript runs
+    // through the L7 four-masker pipeline before being appended" —
+    // argv-line treatment was the gap.
+    let masked_argv = match mask_for_transcript(&ctx.argv_line, ctx.redact_mode) {
+        Some(s) => s,
+        None => ctx.argv_line.clone(),
+    };
+    block.extend_from_slice(masked_argv.as_bytes());
     block.push(b'\n');
     block.extend_from_slice(&ctx.buf);
     if !ctx.buf.is_empty() && !ctx.buf.ends_with(b"\n") {
@@ -544,6 +560,43 @@ mod tests {
         let line = redact_argv_line(&argv);
         assert!(line.contains("--password=<redacted:7>"));
         assert!(!line.contains("hunter2"));
+    }
+
+    /// SMOKE 2026-05-09 regression: the argv line in the transcript
+    /// file must run through the L7 four-masker, not just the
+    /// `--password=`/`--token=` prefix masker. Pre-fix, an operator
+    /// who typed a credential as part of a shell-quoted arg (e.g.
+    /// `inspect run arte -- 'echo "Authorization: Bearer abc..."'`)
+    /// would see the bearer leak verbatim into
+    /// `~/.inspect/history/<ns>-<date>.log`. Surfaced live during
+    /// P6.F18.2 (4 Bearer leaks). Verified at the
+    /// `mask_for_transcript` chokepoint.
+    #[test]
+    fn p6_argv_line_runs_through_l7_four_masker() {
+        // Bearer in a shell-quoted arg.
+        let argv = vec![
+            "inspect".to_string(),
+            "run".to_string(),
+            "arte".to_string(),
+            "--".to_string(),
+            "echo \"Authorization: Bearer abcdef0123456789xyz\"".to_string(),
+        ];
+        let raw = redact_argv_line(&argv);
+        // The pre-fix shape — argv masker only handles --password=/--token=.
+        assert!(
+            raw.contains("Bearer abcdef0123456789xyz"),
+            "redact_argv_line alone shouldn't strip non-flag credentials: {raw}"
+        );
+        // After the four-masker pass at write time:
+        let masked = mask_for_transcript(&raw, RedactMode::Normal).unwrap();
+        assert!(
+            !masked.contains("Bearer abcdef"),
+            "L7 four-masker must redact bearer tokens in the argv line: {masked}"
+        );
+        assert!(
+            masked.contains("Authorization: <redacted>"),
+            "L7 four-masker should rewrite to <redacted>: {masked}"
+        );
     }
 
     #[test]
