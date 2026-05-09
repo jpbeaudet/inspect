@@ -2,13 +2,15 @@
 
 use std::time::{Duration, SystemTime};
 
+use serde_json::{json, Value};
+
 use crate::cli::ConnectionsArgs;
-use crate::commands::list::json_string;
 use crate::config::resolver;
 use crate::error::ExitKind;
 use crate::ssh::master::{check_socket, list_sockets, MasterStatus};
 use crate::ssh::ttl::{parse_ttl, resolve_with_ns};
 use crate::ssh::SshTarget;
+use crate::verbs::output::{NextStep, OutputDoc};
 
 pub fn run(args: ConnectionsArgs) -> anyhow::Result<ExitKind> {
     let sockets = list_sockets()?;
@@ -68,8 +70,7 @@ pub fn run(args: ConnectionsArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        emit_json(&rows);
-        return Ok(ExitKind::Success);
+        return emit_json(&rows, &args.format);
     }
 
     if rows.is_empty() {
@@ -153,30 +154,51 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-fn emit_json(rows: &[Row]) {
-    let mut s = String::from("{\"schema_version\":1,\"connections\":[");
-    for (i, r) in rows.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        let exp = match &r.expires_in {
-            Some(v) => json_string(v),
-            None => "null".to_string(),
-        };
-        s.push_str(&format!(
-            "{{\"namespace\":{ns},\"host\":{host},\"socket\":{sock},\
-             \"status\":{st},\"auth\":{auth},\"session_ttl\":{ttl},\"expires_in\":{exp}}}",
-            ns = json_string(&r.namespace),
-            host = json_string(&r.host),
-            sock = json_string(&r.socket),
-            st = json_string(&r.status),
-            auth = json_string(&r.auth),
-            ttl = json_string(&r.session_ttl),
-            exp = exp,
+fn emit_json(rows: &[Row], format: &crate::format::FormatArgs) -> anyhow::Result<ExitKind> {
+    // P0.6 sweep (v0.1.3): L7 envelope. Pre-fix this verb emitted a
+    // bare `{schema_version, connections}` shape — the surface that
+    // surfaced as a non-L7 outlier during the SMOKE P1.5 live run on
+    // 2026-05-09. The L4 fields (auth / session_ttl / expires_in)
+    // ride on each row in `data.connections[]`.
+    let connections: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let expires: Value = r
+                .expires_in
+                .as_ref()
+                .map(|v| Value::String(v.clone()))
+                .unwrap_or(Value::Null);
+            json!({
+                "namespace": r.namespace,
+                "host": r.host,
+                "socket": r.socket,
+                "status": r.status,
+                "auth": r.auth,
+                "session_ttl": r.session_ttl,
+                "expires_in": expires,
+            })
+        })
+        .collect();
+    let summary = if rows.is_empty() {
+        "no inspect-managed connections".to_string()
+    } else {
+        format!("{} connection(s)", rows.len())
+    };
+    let data = json!({ "connections": connections });
+    let mut doc = OutputDoc::new(summary, data).with_meta("count", rows.len());
+    if rows.is_empty() {
+        doc.push_next(NextStep::new("inspect connect <ns>", "open a master"));
+    } else {
+        doc.push_next(NextStep::new(
+            "inspect disconnect <ns>",
+            "close a single master",
+        ));
+        doc.push_next(NextStep::new(
+            "inspect disconnect-all",
+            "close every master at once",
         ));
     }
-    s.push_str("]}");
-    println!("{s}");
+    doc.print_json(format.select_spec())
 }
 
 #[cfg(test)]

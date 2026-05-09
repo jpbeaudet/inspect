@@ -7429,7 +7429,7 @@ fn l4_connections_table_columns_include_auth_ttl_expires_in() {
         .args(["connections", "--json"])
         .assert()
         .success()
-        .stdout(contains("\"connections\":[]"));
+        .stdout(contains("\"data\":{\"connections\":[]}"));
 }
 
 #[test]

@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 
+use serde_json::{json, Value};
+
 use crate::cli::ConnectArgs;
-use crate::commands::list::json_string;
 use crate::config::file as config_file;
 use crate::config::namespace::{is_valid_env_key, validate_namespace_name};
 use crate::config::resolver;
@@ -13,6 +14,7 @@ use crate::error::ExitKind;
 use crate::safety::audit::{AuditEntry, AuditStore, Revert};
 use crate::ssh::master::AuthSelection;
 use crate::ssh::{self, SshTarget};
+use crate::verbs::output::{NextStep, OutputDoc};
 
 pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
@@ -40,7 +42,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     let mutates_overlay =
         args.set_path.is_some() || !args.set_env.is_empty() || !args.unset_env.is_empty();
     if args.show {
-        return run_show_overlay(&args.namespace, args.format.is_json());
+        return run_show_overlay(&args);
     }
     if mutates_overlay {
         return run_mutate_overlay(&args);
@@ -140,26 +142,40 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        let socket = outcome
+        // P0.6 sweep (v0.1.3): emit the L7 standard envelope so the
+        // connect-cluster matches every other JSON-emitting verb's
+        // shape (`{schema_version, summary, data, next, meta}`).
+        // Pre-fix this site (along with `connections`, `disconnect`,
+        // `disconnect-all`) emitted a flat
+        // `{schema_version, namespace, auth, socket, ttl, ttl_source}`
+        // shape — an L7-discipline gap surfaced during the SMOKE
+        // P1.5 live run on 2026-05-09.
+        let socket_value: Value = outcome
             .socket
             .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let socket_json = if outcome.socket.is_some() {
-            json_string(&socket)
-        } else {
-            "null".to_string()
-        };
-        println!(
-            "{{\"schema_version\":1,\"namespace\":{ns},\"auth\":{auth},\
-             \"socket\":{sock},\"ttl\":{ttl},\"ttl_source\":{src}}}",
-            ns = json_string(&resolved.name),
-            auth = json_string(outcome.auth_mode.label()),
-            sock = socket_json,
-            ttl = json_string(&outcome.ttl),
-            src = json_string(ttl_source.label()),
+            .map(|p| Value::String(p.display().to_string()))
+            .unwrap_or(Value::Null);
+        let summary = format!(
+            "'{}' connected via {} (ttl {}, {})",
+            resolved.name,
+            outcome.auth_mode.label(),
+            outcome.ttl,
+            ttl_source.label()
         );
-        return Ok(ExitKind::Success);
+        let data = json!({
+            "namespace": resolved.name,
+            "auth": outcome.auth_mode.label(),
+            "socket": socket_value,
+            "ttl": outcome.ttl,
+            "ttl_source": ttl_source.label(),
+        });
+        let mut doc = OutputDoc::new(summary, data);
+        doc.push_next(NextStep::new("inspect connections", "list active masters"));
+        doc.push_next(NextStep::new(
+            format!("inspect disconnect {}", resolved.name),
+            "close this master",
+        ));
+        return doc.print_json(args.format.select_spec());
     }
 
     println!(
@@ -190,22 +206,38 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
 /// config-file state). Empty overlay renders as the explicit literal
 /// `(none configured)` so an absent map is distinguishable from an
 /// empty one.
-fn run_show_overlay(namespace: &str, json: bool) -> anyhow::Result<ExitKind> {
+fn run_show_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
+    let namespace = &args.namespace;
     let servers = config_file::load().context("loading servers.toml")?;
     let cfg = servers.namespaces.get(namespace);
     let overlay: BTreeMap<String, String> = cfg.and_then(|c| c.env.clone()).unwrap_or_default();
-    if json {
-        let mut entries: Vec<String> = overlay
-            .iter()
-            .map(|(k, v)| format!("{}: {}", json_string(k), json_string(v)))
-            .collect();
-        entries.sort();
-        println!(
-            "{{\"schema_version\":1,\"namespace\":{ns},\"env_overlay\":{{{}}}}}",
-            entries.join(","),
-            ns = json_string(namespace)
+    if args.format.is_json() {
+        // P0.6 sweep (v0.1.3): L7 envelope. Pre-fix this site emitted
+        // a flat `{schema_version, namespace, env_overlay}` shape.
+        let summary = format!(
+            "env overlay for '{}' ({} entr{})",
+            namespace,
+            overlay.len(),
+            if overlay.len() == 1 { "y" } else { "ies" }
         );
-        return Ok(ExitKind::Success);
+        let env_overlay: serde_json::Map<String, Value> = overlay
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let data = json!({
+            "namespace": namespace,
+            "env_overlay": Value::Object(env_overlay),
+        });
+        let mut doc = OutputDoc::new(summary, data);
+        doc.push_next(NextStep::new(
+            format!("inspect connect {namespace} --set-env KEY=VALUE"),
+            "add or update an entry",
+        ));
+        doc.push_next(NextStep::new(
+            format!("inspect connect {namespace} --unset-env KEY"),
+            "remove an entry",
+        ));
+        return doc.print_json(args.format.select_spec());
     }
     println!(
         "SUMMARY: env overlay for '{}' ({} entr{})",
@@ -292,25 +324,40 @@ fn run_mutate_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        println!(
-            "{{\"schema_version\":1,\"namespace\":{ns},\"changed\":{ch},\"applied\":[{ap}],\"unset\":[{un}]}}",
-            ns = json_string(&args.namespace),
-            ch = changed,
-            ap = to_set
-                .iter()
-                .map(|(k, _)| json_string(k))
-                .collect::<Vec<_>>()
-                .join(","),
-            un = args
-                .unset_env
-                .iter()
-                .map(|k| json_string(k))
-                .collect::<Vec<_>>()
-                .join(","),
+        // P0.6 sweep (v0.1.3): L7 envelope.
+        let summary_bits = {
+            let mut bits: Vec<String> = Vec::new();
+            if !to_set.is_empty() {
+                bits.push(format!("set {}", to_set.len()));
+            }
+            if !args.unset_env.is_empty() {
+                bits.push(format!("unset {}", args.unset_env.len()));
+            }
+            if bits.is_empty() {
+                "no-op".to_string()
+            } else {
+                bits.join(", ")
+            }
+        };
+        let summary = format!(
+            "env overlay for '{}' updated ({}){}",
+            args.namespace,
+            summary_bits,
+            if changed { "" } else { " — already applied" }
         );
-        return Ok(ExitKind::Success);
+        let data = json!({
+            "namespace": args.namespace,
+            "changed": changed,
+            "applied": to_set.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            "unset": args.unset_env.clone(),
+        });
+        let mut doc = OutputDoc::new(summary, data);
+        doc.push_next(NextStep::new(
+            format!("inspect connect {} --show", args.namespace),
+            "review the resulting overlay",
+        ));
+        return doc.print_json(args.format.select_spec());
     }
-
     let mut summary_bits: Vec<String> = Vec::new();
     if !to_set.is_empty() {
         summary_bits.push(format!("set {}", to_set.len()));

@@ -2,21 +2,28 @@
 
 use std::io::{self, BufRead, Write};
 
+use serde_json::{json, Value};
+
 use crate::cli::DisconnectAllArgs;
-use crate::commands::list::json_string;
 use crate::config::resolver;
 use crate::error::ExitKind;
 use crate::ssh::master::{exit_master, list_sockets, socket_path};
 use crate::ssh::SshTarget;
+use crate::verbs::output::OutputDoc;
 
 pub fn run(args: DisconnectAllArgs) -> anyhow::Result<ExitKind> {
     let sockets = list_sockets()?;
     if sockets.is_empty() {
         if args.format.is_json() {
-            println!("{{\"schema_version\":1,\"closed\":[]}}");
-        } else {
-            println!("SUMMARY: no inspect-managed connections to close");
+            // P0.6 sweep (v0.1.3): L7 envelope.
+            let doc = OutputDoc::new(
+                "no inspect-managed connections to close",
+                json!({ "closed": [], "failed": [] }),
+            )
+            .with_meta("count", 0);
+            return doc.print_json(args.format.select_spec());
         }
+        println!("SUMMARY: no inspect-managed connections to close");
         return Ok(ExitKind::Success);
     }
 
@@ -48,7 +55,7 @@ pub fn run(args: DisconnectAllArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        emit_json(&closed, &failed);
+        emit_json(&closed, &failed, &args.format)?;
     } else {
         println!(
             "SUMMARY: closed {} connection(s){}",
@@ -87,25 +94,32 @@ fn confirm(n: usize) -> anyhow::Result<bool> {
     ))
 }
 
-fn emit_json(closed: &[String], failed: &[(String, String)]) {
-    let mut s = String::from("{\"schema_version\":1,\"closed\":[");
-    for (i, ns) in closed.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
+fn emit_json(
+    closed: &[String],
+    failed: &[(String, String)],
+    format: &crate::format::FormatArgs,
+) -> anyhow::Result<()> {
+    // P0.6 sweep (v0.1.3): L7 envelope.
+    let summary = format!(
+        "closed {} connection(s){}",
+        closed.len(),
+        if failed.is_empty() {
+            String::new()
+        } else {
+            format!(", {} failed", failed.len())
         }
-        s.push_str(&json_string(ns));
-    }
-    s.push_str("],\"failed\":[");
-    for (i, (ns, err)) in failed.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!(
-            "{{\"namespace\":{ns},\"error\":{err}}}",
-            ns = json_string(ns),
-            err = json_string(err)
-        ));
-    }
-    s.push_str("]}");
-    println!("{s}");
+    );
+    let failed_arr: Vec<Value> = failed
+        .iter()
+        .map(|(ns, err)| json!({ "namespace": ns, "error": err }))
+        .collect();
+    let data = json!({
+        "closed": closed,
+        "failed": failed_arr,
+    });
+    let doc = OutputDoc::new(summary, data)
+        .with_meta("closed_count", closed.len())
+        .with_meta("failed_count", failed.len());
+    let _ = doc.print_json(format.select_spec())?;
+    Ok(())
 }

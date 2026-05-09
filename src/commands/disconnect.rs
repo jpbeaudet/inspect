@@ -1,13 +1,15 @@
 //! `inspect disconnect <ns>` — close the persistent SSH master.
 
+use serde_json::json;
+
 use crate::cli::DisconnectArgs;
-use crate::commands::list::json_string;
 use crate::config::namespace::validate_namespace_name;
 use crate::config::resolver;
 use crate::error::ExitKind;
 use crate::safety::audit::{AuditEntry, AuditStore, Revert};
 use crate::ssh::master::{check_socket, exit_master, socket_path, MasterStatus};
 use crate::ssh::SshTarget;
+use crate::verbs::output::{NextStep, OutputDoc};
 
 pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
@@ -52,13 +54,24 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        println!(
-            "{{\"schema_version\":1,\"namespace\":{ns},\"prior\":{prior},\"closed\":{closed}}}",
-            ns = json_string(&resolved.name),
-            prior = json_string(prior.label()),
-            closed = if closed { "true" } else { "false" }
-        );
-        return Ok(ExitKind::Success);
+        // P0.6 sweep (v0.1.3): L7 envelope.
+        let summary = if closed {
+            format!("'{}' disconnected (was {})", resolved.name, prior.label())
+        } else {
+            format!("'{}' had no inspect-managed master", resolved.name)
+        };
+        let data = json!({
+            "namespace": resolved.name,
+            "prior": prior.label(),
+            "closed": closed,
+            "socket": socket.display().to_string(),
+        });
+        let mut doc = OutputDoc::new(summary, data);
+        doc.push_next(NextStep::new(
+            format!("inspect connect {}", resolved.name),
+            "reopen the master",
+        ));
+        return doc.print_json(args.format.select_spec());
     }
 
     if closed {
