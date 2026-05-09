@@ -158,16 +158,22 @@ case "$S" in ok|no_services_matched|empty_inventory) echo "B1 ok: $S";;
   *) echo "B1 FAIL: unexpected state $S"; exit 1;; esac
 
 # (B2) why — diagnostic walk. The why payload's checks block is
-# a top-level object on .data; iterate it.
-inspect why arte/${SMOKE_CTR} --json \
-  --select '.data | keys' --select-slurp
-# Pass: a JSON array of the why fields, exit 0.
+# a top-level object on .data; iterate it. NOTE: drop
+# `--select-slurp` (envelope verb, slurp-on-envelope is pitfall #4).
+inspect why arte/${SMOKE_CTR} --json --select '.data | keys'
+# Pass: a JSON array of the why fields. Live arte 2026-05-09 returned
+# ["services","totals"].
 
-# (B3) ps — service inventory.
+# (B3) ps — container inventory. IMPORTANT: `inspect ps --json` is
+# NDJSON, one line per container, NOT a single envelope. Per-row
+# fields are {server, _medium, _source, service, image, status, raw,
+# schema_version}. There is NO `.healthy` boolean — `.status` is
+# Docker's status string (`Up 2 hours`, `Restarting`, `Exited`, …).
+# Filter on the per-row shape directly:
 inspect ps arte --json \
-  --select '.data.services[] | select(.healthy) | .name' --select-raw \
-  | head -3
-# Pass: up to 3 healthy service names on stdout, exit 0.
+  --select 'select(.status | startswith("Up")) | .service' --select-raw \
+  | head -5
+# Pass: up to 5 running container names on stdout, exit 0.
 ```
 
 ### B-INFRA — ports / volumes / images / network
@@ -180,31 +186,35 @@ inspect ports arte --json \
   --select-slurp
 # Pass: a JSON array of {proto, count} objects, exit 0.
 
-# (B5) volumes — list with size projection.
+# (B5) volumes — IMPORTANT: NDJSON like `ps`, one line per volume.
+# Per-row fields include {server, _medium, _source, name, driver,
+# raw, schema_version}. NO `.data.volumes` envelope wrapper.
 inspect volumes arte --json \
-  --select '.data.volumes[] | {name, driver}' \
-  --select-slurp \
-  --select-raw 2>&1 | head -3 || true
-# Pass: --select-raw on a non-string (object) yield exits 1 with
-# "filter --raw: filter yielded non-string". Drop --select-raw:
-inspect volumes arte --json \
-  --select '.data.volumes[] | {name, driver}' --select-slurp \
-  | head -50
-# Pass: a JSON array of {name, driver} objects, exit 0.
+  --select 'select(.driver == "local") | .name' --select-raw \
+  | head -5
+# Pass: up to 5 local volume names on stdout, exit 0.
 
-# (B6) images — image inventory. .data.images[].repo_tags is itself
-# an array; flatten it.
-inspect images arte --json \
-  --select '[.data.images[].repo_tags[]] | unique | length'
-# Pass: a single integer = distinct repo:tag count across all images,
-# exit 0.
+# (B6) images — SKIP. `inspect images arte` has a hard-coded 20s
+# timeout in `RunOpts::with_timeout(20)` (src/verbs/images.rs).
+# arte's image inventory exceeds what `docker images --format
+# '{{json .}}'` finishes in 20s, so the verb errors out before
+# the F19 chokepoint runs. This is a verb-side issue (not a JAQ
+# regression) and is in scope for the v0.1.5+ stabilization
+# sweep — surface again then with either a configurable
+# `--timeout` flag, an `--all=false` default, or a streamed
+# response shape so partial results land. The smoke recipe is
+# preserved here in commented form for reference once the verb
+# supports a longer budget:
+#
+#     inspect images arte --json --timeout 60s \
+#       --select '.repo_tags[]?' --select-raw | sort -u | wc -l
+#
 
-# (B7) network — list networks.
-inspect network arte --json \
-  --select '.data.networks[].name' --select-raw \
-  | wc -l
-# Pass: an integer ≥ 1 (Docker always provisions bridge/host/none),
-# exit 0.
+# (B7) network — IMPORTANT: NDJSON like `ps`/`volumes`, one line
+# per network. Per-row has `.name` directly; NO `.data.networks`.
+inspect network arte --json --select '.name' --select-raw
+# Pass: one network name per line (Docker always provisions
+# bridge/host/none plus any compose-managed networks), exit 0.
 ```
 
 ### B-AUDIT — audit ls / show / grep / gc / verify
@@ -218,28 +228,43 @@ A=$(inspect audit ls --limit 25 --json --select '.data.entries[0].id' --select-r
 B=$(inspect audit ls --limit 1  --json --select '.data.entries[0].id' --select-raw)
 test "$A" = "$B" && echo "B8 ok: $A" || echo "B8 FAIL: $A != $B"
 
-# (B9) audit show — single-entry payload at .data.entry. Pick a
-# fresh-ish write entry so .data.entry.revert is present (F11
-# capture-before-apply guarantees this for write verbs).
+# (B9) audit show — single-entry payload at .data.entry. NOTE:
+# `inspect run` is the read-only verb; its audit entry has
+# `revert: null` (no F11 capture needed for non-mutating verbs).
+# `inspect exec` is the audited-mutation verb whose entries carry
+# a populated revert block. Project the whole revert object so
+# null and populated cases are both visible. Drop `--select-slurp`
+# (single-envelope verb).
 WRITE_ID=$(inspect audit ls --limit 50 --json \
   --select '[.data.entries[] | select(.verb == "run") | select(.is_revert == false) | .id][0]' \
   --select-raw)
 test -n "$WRITE_ID" && \
   inspect audit show "$WRITE_ID" --json \
-    --select '.data.entry | {id, verb, revert: .revert.kind}' \
-    --select-slurp \
+    --select '.data.entry | {id, verb, revert}' \
   || echo "B9 SKIP: no run-class audit entry yet"
+# Pass: a {id, verb, revert} object. Live arte 2026-05-09 returned
+# {"id":"...","revert":null,"verb":"run"}.
 
-# (B10) audit grep — regex over verb names. .data.entries shape.
-inspect audit grep '^run\b' --json \
-  --select '.data.entries | length'
-# Pass: an integer ≥ 0, exit 0.
+# (B10) audit grep — IMPORTANT: substring match (lowercased)
+# against `id verb selector args diff_summary`, NOT regex. So
+# `^run\b` is treated as the literal 4 characters `^run\b` and
+# never matches. The JSON envelope path is also `.data.matches`,
+# NOT `.data.entries` (the `audit ls` shape). Use a substring
+# guaranteed to be in every namespace-scoped audit line:
+inspect audit grep 'arte' --json --select '.data.matches | length'
+# Pass: integer ≥ 1 (every audit entry's selector starts with
+# "arte"). Live arte 2026-05-09 returned 16 (whole audit log).
 
-# (B11) audit gc --dry-run — gc projection.
-inspect audit gc --dry-run --json \
-  --select '.data | keys' --select-slurp
-# Pass: a JSON array containing at least "candidates" / "kept" / similar
-# keys (exact set verb-version dependent), exit 0.
+# (B11) audit gc --dry-run — IMPORTANT: requires `--keep <X>`
+# (a duration like `90d` or a count). Without it the verb exits
+# 2 at clap with "the following required arguments were not
+# provided: --keep". Drop `--select-slurp` (envelope verb).
+inspect audit gc --keep 90d --dry-run --json --select '.data | keys'
+# Pass: a JSON array containing at least "deleted_entries" /
+# "entries_kept" / "freed_bytes" / "policy" / "dry_run". Live arte
+# 2026-05-09 returned ["deleted_entries","deleted_ids",
+# "deleted_snapshot_hashes","deleted_snapshots","dry_run",
+# "entries_kept","entries_total","freed_bytes","policy"].
 
 # (B12) audit verify — chain integrity check.
 inspect audit verify --json \
@@ -252,14 +277,19 @@ inspect audit verify --json \
 
 ```sh
 # (B13) compose ls + compose ps cross-link. ls gives projects;
-# ps drills into one project's services.
+# ps drills into one project's services. IMPORTANT: `compose ps`
+# takes a `<ns>/<project>` selector positionally — there is NO
+# `--project` flag (that was removed earlier in v0.1.3). Pass
+# the project as part of the selector: `arte/luminary-atlas`.
 PROJECT=$(inspect compose ls arte --json \
   --select '.data.compose_projects[0].name' --select-raw)
+echo "PROJECT=$PROJECT"
 test -n "$PROJECT" && \
-  inspect compose ps arte --project "$PROJECT" --json \
+  inspect compose ps "arte/$PROJECT" --json \
     --select '.data.services | length' \
   || echo "B13 SKIP: no compose projects on arte"
-# Pass: an integer ≥ 1 (project has at least one service), exit 0.
+# Pass: an integer ≥ 1. Live arte 2026-05-09 returned 12 (the
+# luminary-atlas project's service count).
 ```
 
 Section B pass criterion: every recipe either prints its expected
