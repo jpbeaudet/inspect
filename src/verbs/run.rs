@@ -378,6 +378,27 @@ fn store_script_body(body: &[u8], sha: &str) -> Result<()> {
 }
 
 pub fn run(args: RunArgs) -> Result<ExitKind> {
+    // SMOKE 2026-05-09 fail-fast (v0.1.3): catch the
+    // `inspect run --apply` muscle-memory trap before any dispatch.
+    // `inspect run` is read-only; the audited mutation verb is
+    // `inspect exec --apply`. The `apply` field on `RunArgs` exists
+    // *only* to surface a clear chained hint here — without the
+    // explicit flag, `--apply` would slip into the trailing-var-arg
+    // cmd vec and the remote `bash -c` would die with
+    // `bash: --: invalid option`. Surfaced live during P3.1 of the
+    // 2026-05-09 smoke run; the runbook's pre-fix `inspect run --apply`
+    // recipes were also wrong (now `inspect exec --apply` /
+    // structured lifecycle verbs in `docs/SMOKE_v0.1.3.md`).
+    if args.apply {
+        crate::error::emit(
+            "`--apply` is not on `inspect run` (which is read-only and not audited). \
+             For audited mutations use `inspect exec --apply -- '<command>'` (free-form, requires \
+             `--no-revert` because the inverse cannot be synthesised) or the structured write \
+             verbs (`inspect stop` / `restart` / `start` / `put` / `chmod` / `chown` / `edit` / \
+             `rm` / `mkdir` / `touch`) which capture a real F11 inverse.",
+        );
+        return Ok(ExitKind::Error);
+    }
     // F17 (v0.1.3): multi-step runner mode short-circuits the
     // classic per-target dispatch loop. The steps module owns its
     // own selector resolution, env-overlay merge, per-step audit

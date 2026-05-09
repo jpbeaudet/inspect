@@ -3081,6 +3081,21 @@ pub struct RunArgs {
     /// so `--clean-output --tty` is a clap-level rejection.
     #[arg(long = "tty")]
     pub tty: bool,
+    /// SMOKE 2026-05-09 fail-fast (v0.1.3): catch the
+    /// `inspect run --apply` muscle-memory trap. `inspect run` is
+    /// READ-ONLY — the audited mutation verb is `inspect exec
+    /// --apply`. Pre-fix, `--apply` slipped past clap into the
+    /// trailing-var-arg `cmd` vec (because `RunArgs.cmd` uses
+    /// `trailing_var_arg = true, allow_hyphen_values = true`), the
+    /// remote `bash -c` saw `--apply` as a literal argument, and
+    /// the operator got `bash: --: invalid option` — a confusing
+    /// error with no path to the right answer. Adding the flag
+    /// here makes clap recognize `--apply` and lets the dispatcher
+    /// emit a chained "use `inspect exec --apply`" hint. The flag
+    /// is hidden from `--help` (so it doesn't suggest read-mode
+    /// applies are a thing) but caught at parse time.
+    #[arg(long, hide = true)]
+    pub apply: bool,
     /// F12 (v0.1.3): per-invocation env-overlay entry, repeatable.
     /// Merges on top of the namespace overlay (operator wins on
     /// collision). With `--env-clear`, replaces the namespace overlay

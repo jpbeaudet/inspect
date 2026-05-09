@@ -179,6 +179,24 @@ fn show(
     id_prefix: &str,
     format: &crate::format::FormatArgs,
 ) -> Result<ExitKind> {
+    // SMOKE 2026-05-09 fail-fast (v0.1.3): empty id_prefix used to
+    // silently match the first entry in iteration order (because
+    // `"".starts_with("")` is true for every audit id). Surfaced
+    // during P3.3: a `--select-raw` projection upstream yielded
+    // empty/null on a no-match, the shell substituted `STOP_ID=""`,
+    // and `inspect audit show ""` happily returned an unrelated
+    // ancient `connect.reauth` entry — confusing every downstream
+    // assertion. Reject explicitly: empty input is a programming
+    // error, not a query.
+    if id_prefix.is_empty() {
+        crate::error::emit(
+            "`inspect audit show` requires an audit id (got empty string).\n\
+             hint: a `--select-raw` projection that yielded null upstream often produces \
+             this — guard the source filter with `// empty` or check for empty before \
+             dispatching.",
+        );
+        return Ok(ExitKind::Error);
+    }
     let Some(e) = entries.iter().find(|e| e.id.starts_with(id_prefix)) else {
         crate::error::emit(format!("no audit entry matches id prefix '{id_prefix}'"));
         return Ok(ExitKind::Error);

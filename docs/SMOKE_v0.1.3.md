@@ -223,46 +223,76 @@ invalidation. Every command in this phase targets the sandbox
 container.
 
 ```sh
-# Stand up the sandbox.
+# Stand up the sandbox. NOTE: `inspect run` is the read-only verb;
+# the audited mutation verb is `inspect exec --apply`. Free-form
+# shell mutations (docker run, docker stop, docker rm) cannot
+# synthesise an inverse, so they require `--no-revert` to acknowledge
+# the F11 contract — for structured lifecycle ops use the matching
+# write verb (`inspect stop` / `restart` / `start`) which captures
+# a real inverse. Surfaced live during SMOKE 2026-05-09: the
+# pre-fix recipe used `inspect run --apply` (which is not a real
+# flag — `--apply` got swallowed into the trailing-var-arg and the
+# remote bash exploded with `bash: --: invalid option`).
 SMOKE_RAND=$(head -c 4 /dev/urandom | xxd -p)
 SMOKE_CTR="inspect-smoke-${SMOKE_RAND}"
-inspect run arte -- "docker run -d --name ${SMOKE_CTR} \
+inspect exec arte --apply --no-revert -- "docker run -d --name ${SMOKE_CTR} \
   --label inspect-smoke=1 nginx:alpine"
+# IMPORTANT: setup --force after standup so the inventory cache picks
+# up the new container — otherwise the next `inspect stop arte/${SMOKE_CTR}`
+# below resolves the selector against the stale cache and exits
+# `selector matched no targets` even though the container is alive.
+inspect setup arte --force | head -2
 inspect run arte -- "docker ps --filter label=inspect-smoke=1"
 
-# F11 universal pre-staged revert. (Sandbox is a bare container, not a
-# compose service, so we exercise revert via run + revert audit linkage
-# rather than `inspect compose restart`.)
-inspect run arte --apply --revert-preview -- "docker stop ${SMOKE_CTR}"
-inspect run arte --json --select '.audit_id' > /tmp/inspect-smoke-audit.json
-inspect revert --last arte
+# F11 universal pre-staged revert. The sandbox is a bare container
+# (not a compose service), so exercise revert via the structured
+# `inspect stop` lifecycle verb — it captures `revert.kind =
+# command_pair` with `docker start ${SMOKE_CTR}` as the inverse.
+# `inspect revert --last 1 --apply` (numeric count, NOT a namespace)
+# picks the most recent audit and fires the captured inverse.
+inspect stop arte/${SMOKE_CTR} --apply
+inspect run arte -- "docker ps -a --filter name=${SMOKE_CTR} --format '{{.Status}}'"
+inspect revert --last 1 --apply
 inspect run arte -- "docker ps --filter name=${SMOKE_CTR} --format '{{.Status}}'"
-# Pass: container is running again; audit log shows linked entries.
-inspect audit show $(inspect query -r . < /tmp/inspect-smoke-audit.json) | head
+# Pass: container goes Exited(0) after stop, then Up after revert.
+# Audit linkage:
+STOP_ID=$(inspect audit ls --limit 10 --json \
+  --select '[.data.entries[] | select(.verb=="stop") | select(.is_revert==false) | .id // empty][0]' \
+  --select-raw)
+inspect audit show "$STOP_ID" --json --select '.data.entry | {id, verb, exit, revert: .revert.kind, applied}'
 
-# F8 mutation-invalidation
-inspect status arte                       # SOURCE: cache
-inspect run arte --apply -- "docker restart ${SMOKE_CTR}"
-inspect status arte                       # SOURCE: live (no --refresh)
+# F8 mutation-invalidation. Use the structured `inspect restart`
+# (audited write, captures revert) — same rationale as `inspect stop`
+# above; free-form `inspect exec --apply -- "docker restart …"` would
+# need `--no-revert` and is a worse F11 trace.
+inspect status arte                       # SOURCE: cache (or live if just-mutated)
+inspect restart arte/${SMOKE_CTR} --apply
+inspect status arte                       # SOURCE: live (no --refresh needed)
 
-# F15 file transfer roundtrip on host fs
+# F15 file transfer roundtrip on host fs. NOTE: `inspect put` is a
+# write verb and requires `--apply`; without it the verb prints a
+# DRY-RUN summary and exits 0 without touching the remote.
 echo "smoke-payload-${SMOKE_RAND}" > /tmp/inspect-smoke-payload.txt
-inspect put ./tmp/inspect-smoke-payload.txt arte/_:/tmp/inspect-smoke-up.txt
+inspect put /tmp/inspect-smoke-payload.txt arte/_:/tmp/inspect-smoke-up.txt --apply
 inspect run arte -- "sha256sum /tmp/inspect-smoke-up.txt"
 inspect get arte/_:/tmp/inspect-smoke-up.txt /tmp/inspect-smoke-down.txt
 diff /tmp/inspect-smoke-payload.txt /tmp/inspect-smoke-down.txt   # exit 0
-inspect put ./tmp/inspect-smoke-payload.txt arte/_:/tmp/inspect-smoke-up.txt --mode 0640
+inspect put /tmp/inspect-smoke-payload.txt arte/_:/tmp/inspect-smoke-up.txt --mode 0640 --apply
 inspect run arte -- "stat -c '%a' /tmp/inspect-smoke-up.txt"      # 640
 # put creates -> revert removes (command_pair); put over existing ->
 # state_snapshot. Verify the revert kind on the audit entries.
 # revert.kind is NOT in the `audit ls --json` projection — round-trip
-# the most recent put audit ids through `audit show <id> --json`:
+# the most recent put audit ids through `audit show <id> --json`.
+# Use `// empty` on the inner project to drop null yields cleanly
+# (P8-B pitfall #7 — null yields trip --select-raw's non-string gate).
 for id in $(inspect audit ls --limit 5 --json --select '.data.entries[] | select(.verb=="put") | .id' --select-raw); do
-  inspect audit show "$id" --json --select '.data.entry | "\(.id) verb=\(.verb) rk=\(.revert.kind)"' --select-raw
+  inspect audit show "$id" --json --select '.data.entry | "\(.id) verb=\(.verb) rk=\(.revert.kind // "null")"' --select-raw
 done
 
 # L8 compose surface (read-only; no per-service down/up on the real
-# compose services). If the host has compose projects:
+# compose services). Use `<ns>/<project>` selector — `compose ps`
+# does NOT take a `--project` flag (that was removed earlier in
+# v0.1.3; project is positional via the selector).
 inspect compose ls arte
 inspect compose ps arte/<project>
 inspect compose logs arte/<project> --tail 20 --match 'error' --exclude 'health'
