@@ -66,6 +66,22 @@ pub fn dquote_expandable(s: &str) -> String {
 /// space) for `overlay`. Empty overlay → empty string. Iteration is
 /// in `BTreeMap` order so the rendered string is deterministic across
 /// runs (audit-log diff stability, test reproducibility).
+///
+/// SMOKE 2026-05-09 fix: GNU `env` (coreutils 8.30+) does NOT treat
+/// `--` as an option terminator — `env PATH=foo -- cmd` exits with
+/// `env: '--': No such file or directory` on every Linux distro
+/// shipping GNU env (Ubuntu 22.04+, Debian 12+, Fedora 38+,
+/// arteOS at smoke time). The `[-]` form in env's synopsis is
+/// the `--ignore-environment` short option, not a `--`-style
+/// terminator. The pre-fix recipe rendered `env KEY=VAL -- CMD`
+/// which surfaced as F12 P5.F12.5 fail on the live smoke. Drop
+/// the `--` and rely on the natural `env KEY=VAL CMD` shape that
+/// every env (GNU, BSD, busybox) supports. Safe because
+/// `is_valid_env_key` already rejects keys starting with `-` (POSIX
+/// shell variable name regex), and shell commands themselves never
+/// begin with `-` in our use sites (`docker …` / structured-write
+/// renderers / operator-supplied `inspect run -- "<cmd>"` payloads
+/// all start with a program name, not a flag).
 pub fn render_env_prefix(overlay: &BTreeMap<String, String>) -> String {
     if overlay.is_empty() {
         return String::new();
@@ -77,7 +93,7 @@ pub fn render_env_prefix(overlay: &BTreeMap<String, String>) -> String {
         out.push('=');
         out.push_str(&dquote_expandable(v));
     }
-    out.push_str(" -- ");
+    out.push(' ');
     out
 }
 
@@ -182,10 +198,14 @@ mod tests {
 
     #[test]
     fn render_prefix_is_alphabetical_and_quoted() {
+        // SMOKE 2026-05-09 fix: trailing separator is a single space,
+        // NOT `-- ` (GNU env doesn't treat `--` as an option
+        // terminator; pre-fix `env KEY=VAL -- CMD` died with
+        // `env: '--': No such file or directory`).
         let m = map(&[("PATH", "$HOME/.local/bin:$PATH"), ("LANG", "C.UTF-8")]);
         assert_eq!(
             render_env_prefix(&m),
-            "env LANG=\"C.UTF-8\" PATH=\"$HOME/.local/bin:$PATH\" -- "
+            "env LANG=\"C.UTF-8\" PATH=\"$HOME/.local/bin:$PATH\" "
         );
     }
 
@@ -198,9 +218,12 @@ mod tests {
 
     #[test]
     fn apply_to_cmd_with_overlay_prepends_env() {
+        // SMOKE 2026-05-09 fix: render `env KEY=VAL CMD` (single
+        // space separator), not `env KEY=VAL -- CMD` — GNU env
+        // does not treat `--` as an option terminator.
         let m = map(&[("FOO", "bar")]);
         let out = apply_to_cmd("echo hi", &m);
-        assert_eq!(out.as_ref(), "env FOO=\"bar\" -- echo hi");
+        assert_eq!(out.as_ref(), "env FOO=\"bar\" echo hi");
     }
 
     #[test]

@@ -2459,13 +2459,19 @@ fn read_audit_entries(home: &std::path::Path, verb: &str) -> Vec<serde_json::Val
 
 fn f12_run_mock() -> serde_json::Value {
     // Mock matches against the rendered cmd, which under F12 looks like
-    // `env PATH="/extra/bin:$PATH" -- echo hi`. We match on the env
-    // prefix substring so the test fails cleanly if F12 stops emitting
-    // the prefix; the no-overlay sentinel (`echo hi`) lives second so
-    // the env-prefixed match wins by file order.
+    // `env PATH="/extra/bin:$PATH" echo hi`. We match on the env prefix
+    // substring so the test fails cleanly if F12 stops emitting the
+    // prefix; the no-overlay sentinel (`echo hi`) lives second so the
+    // env-prefixed match wins by file order.
+    //
+    // SMOKE 2026-05-09 fix: pre-fix matchers used `env KEY=VAL --` but
+    // GNU env doesn't treat `--` as an option terminator
+    // (`env: '--': No such file or directory`). The shipped renderer
+    // now emits `env KEY=VAL CMD` with a single-space separator, and
+    // the matchers below track that.
     json!([
-        { "match": "env PATH=\"/extra/bin:$PATH\" --", "stdout": "WITH_OVERLAY\n", "exit": 0 },
-        { "match": "env LANG=\"C.UTF-8\" --", "stdout": "WITH_LANG_ONLY\n", "exit": 0 },
+        { "match": "env PATH=\"/extra/bin:$PATH\" ", "stdout": "WITH_OVERLAY\n", "exit": 0 },
+        { "match": "env LANG=\"C.UTF-8\" ", "stdout": "WITH_LANG_ONLY\n", "exit": 0 },
         { "match": "env MALICIOUS=", "stdout": "MALICIOUS_LITERAL\n", "exit": 0 },
         { "match": "echo hi", "stdout": "PLAIN_ECHO\n", "exit": 0 },
         // F12 audit: cat for exec dispatches with mock-aware echo so the
@@ -2523,7 +2529,7 @@ fn f12_env_overlay_applied_to_exec_with_audit_record() {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("rendered_cmd missing on exec entry: {e}"));
     assert!(
-        rendered.starts_with("env PATH=\"/extra/bin:$PATH\" -- "),
+        rendered.starts_with("env PATH=\"/extra/bin:$PATH\" "),
         "rendered_cmd should start with overlay prefix, got: {rendered}",
     );
 }
@@ -2563,7 +2569,7 @@ fn f12_env_flag_without_clear_merges_on_top_of_namespace_overlay() {
     let sb = Sandbox::new(json!([
         // Tighter match: BOTH the namespace and the user entry must
         // appear in the prefix for this matcher to fire.
-        { "match": "env LANG=\"C.UTF-8\" PATH=\"/extra/bin:$PATH\" --", "stdout": "BOTH\n", "exit": 0 }
+        { "match": "env LANG=\"C.UTF-8\" PATH=\"/extra/bin:$PATH\" ", "stdout": "BOTH\n", "exit": 0 }
     ]));
     write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/extra/bin:$PATH")]);
     sb.cmd()
@@ -2577,8 +2583,8 @@ fn f12_env_flag_without_clear_merges_on_top_of_namespace_overlay() {
 fn f12_env_user_wins_collision_with_namespace_overlay() {
     // `--env PATH=/user/bin` overrides the namespace's `PATH=/ns/bin`.
     let sb = Sandbox::new(json!([
-        { "match": "env PATH=\"/user/bin\" --", "stdout": "USER\n", "exit": 0 },
-        { "match": "env PATH=\"/ns/bin\" --", "stdout": "NAMESPACE\n", "exit": 0 }
+        { "match": "env PATH=\"/user/bin\" ", "stdout": "USER\n", "exit": 0 },
+        { "match": "env PATH=\"/ns/bin\" ", "stdout": "NAMESPACE\n", "exit": 0 }
     ]));
     write_servers_toml_with_env(sb.home(), "arte", &[("PATH", "/ns/bin")]);
     sb.cmd()
@@ -2615,7 +2621,7 @@ fn f12_run_debug_prints_rendered_command_to_stderr() {
         .assert()
         .success()
         .stderr(contains(
-            "rendered command for arte: env PATH=\"/extra/bin:$PATH\" -- echo hi",
+            "rendered command for arte: env PATH=\"/extra/bin:$PATH\" echo hi",
         ));
 }
 
