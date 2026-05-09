@@ -71,9 +71,15 @@ inspect audit ls --limit 5 --json --select '.data.entries | length'
 # Pass: an integer 1..5 on stdout, exit 0.
 
 # (A6) keys (and keys_unsorted). Surfaces the envelope shape.
-inspect audit ls --limit 5 --json --select '.data | keys' --select-slurp
+# IMPORTANT: do NOT add `--select-slurp` here. `audit ls --json` emits
+# a single envelope; slurping wraps it in `[envelope]`, after which
+# `.data` tries to index an array by string and trips
+# `error: filter runtime: cannot index […] with "data"`. This is
+# pitfall #4 in `inspect help select` ("--select-slurp on envelope
+# verbs"); the recipe deliberately exercises the slurp-free shape.
+inspect audit ls --limit 5 --json --select '.data | keys'
 # Pass: a JSON array containing "entries" (and any other top-level
-# data fields), exit 0.
+# data fields). Live arte projection on 2026-05-09 returned ["entries"].
 
 # (A7) select(...) predicate. Filter rows by a field value.
 inspect audit ls --limit 25 --json \
@@ -94,14 +100,21 @@ inspect audit ls --limit 25 --json \
 # Pass: a JSON array of {verb, count} objects, one per distinct
 # verb in the last 25 audit rows, exit 0.
 
-# (A10) sort_by + reverse + min_by/max_by. Numeric ordering.
+# (A10) sort_by — string ordering on a deterministic field.
+# IMPORTANT: sort by `.ts` (RFC3339 string), NOT `.duration_ms`. The
+# `audit ls` envelope ships a *compact projection* per entry that
+# omits `duration_ms` (see A11 — the projection is exactly 10 fields:
+# diff_summary, exit, id, is_revert, reason, revert, selector, server,
+# ts, verb). Sort_by on a missing field returns null for every row,
+# the sort is stable, and `.[-1]` would silently pick a tiebreak —
+# correct jaq behavior, but uninformative. The full duration_ms is
+# at `audit show <id>`. RFC3339 timestamps lex-sort correctly without
+# a fromdate coercion, so `.ts` is the right surrogate here.
 inspect audit ls --limit 25 --json \
-  --select '.data.entries | sort_by(.duration_ms) | .[-1] | {id, verb, duration_ms}'
-# Pass: a single {id, verb, duration_ms} object — the slowest of
-# the 25, exit 0. (Some entries may be missing duration_ms on
-# audits written before the F-series duration-capture work; the
-# sort treats nulls as smallest, so this still picks the largest
-# non-null. Acceptable.)
+  --select '.data.entries | sort_by(.ts) | .[0] | {id, verb, ts}'
+# Pass: a single {id, verb, ts} object — the OLDEST of the 25, exit
+# 0. Live arte projection on 2026-05-09 returned a 2026-05-05
+# connect.reauth entry as oldest in a 16-entry audit log.
 
 # (A11) to_entries / from_entries. Object ↔ array roundtrip.
 inspect audit ls --limit 1 --json \
