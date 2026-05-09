@@ -5311,6 +5311,105 @@ fn f17_cmd_file_composes_with_f14_script_dispatch() {
     );
 }
 
+/// SMOKE 2026-05-09 regression (P4.F17): operator-supplied trailing
+/// args after `--` must reach each step's body via `$1` / `$2`. The
+/// runner now prepends `set -- <quoted-args>;` to every step's cmd
+/// path. Pre-fix, `args.cmd` was silently dropped — manifests
+/// referencing `"$1"` exited with `invalid container name or ID:
+/// value is empty`. Mock matches the literal `set -- 'MARKER'`
+/// substring in the rendered cmd.
+#[test]
+fn p4_f17_steps_passes_positional_args_to_step_cmd() {
+    let mock = json!([
+        { "match": "set -- 'MARKER'; echo got=", "stdout": "got=MARKER\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {"name": "uses-positional", "cmd": "echo got=\"$1\""}
+            ]
+        }),
+    );
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--",
+            "MARKER",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("got=MARKER"));
+}
+
+/// SMOKE 2026-05-09 regression (P4.F17): the same positional-args
+/// thread-through must also reach `revert_cmd`. Manifests routinely
+/// reuse `$1` in revert_cmd to undo a `$1`-scoped mutation; without
+/// the fix the auto-revert path would fire but with empty
+/// positionals, repeating the original failure.
+#[test]
+fn p4_f17_steps_passes_positional_args_to_revert_cmd() {
+    let mock = json!([
+        // Step 1: succeeds.
+        { "match": "set -- 'MARKER'; touch ", "stdout": "", "exit": 0 },
+        // Step 2: deliberately fails to trigger the revert path.
+        { "match": "exit 7", "stdout": "", "exit": 7 },
+        // Revert of step 1 carries the same `set --` prefix.
+        { "match": "set -- 'MARKER'; rm ", "stdout": "", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_servers_toml(sb.home(), &["arte"]);
+    write_profile(sb.home(), "arte", &[("atlas", "img/atlas:1", "ok")]);
+    let manifest = f17_write_manifest(
+        sb.home(),
+        "m.json",
+        json!({
+            "steps": [
+                {
+                    "name": "create",
+                    "cmd": "touch /tmp/marker-\"$1\"",
+                    "revert_cmd": "rm -f /tmp/marker-\"$1\"",
+                },
+                {"name": "boom", "cmd": "exit 7"}
+            ]
+        }),
+    );
+    sb.cmd()
+        .args([
+            "run",
+            "arte",
+            "--steps",
+            manifest.to_str().unwrap(),
+            "--revert-on-failure",
+            "--",
+            "MARKER",
+        ])
+        .assert()
+        .failure();
+    // Verify a run.step.revert entry was written for step 'create'.
+    let body = audit_jsonl_body(sb.home());
+    let revert_entry = body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| {
+            e["verb"].as_str() == Some("run.step.revert")
+                && e["step_name"].as_str() == Some("create")
+        })
+        .expect("expected a run.step.revert entry for 'create'");
+    let args_field = revert_entry["args"].as_str().unwrap_or("");
+    assert!(
+        args_field.contains("set -- 'MARKER'") || args_field.contains("rm -f /tmp/marker-"),
+        "revert audit args should reflect the positional-arg-aware revert_cmd: {revert_entry}"
+    );
+}
+
 #[test]
 fn f17_steps_help_documents_flag_and_revert_on_failure() {
     // F17 help-text discoverability gate: --steps and
@@ -8551,6 +8650,48 @@ fn l11_help_run_documents_bidirectional_composition() {
         !stdout.contains("deferred to v0.1.5"),
         "run --help must not advertise a v0.1.5 deferral: {stdout}"
     );
+}
+
+/// SMOKE 2026-05-09 regression (P4.L11): operator-supplied
+/// trailing args after `--` reach the bidirectional script's
+/// `$1` / `$2`. Pre-fix the renderer emitted `bash <temp> --
+/// <args>` — without `-s`, bash treats `<temp>` as the script and
+/// `--` as a literal positional, so the script's `$1` came
+/// through as the literal `--`. Surfaced live during P4.L11:
+/// `migration.sh` echoed `starting against --` and the embedded
+/// `docker exec "$CTR"` died with `No such container: sh`. The
+/// fix moves the `--` before `<temp>` (`bash -- <temp> <args>`),
+/// which terminates bash's option parsing without consuming a
+/// positional slot. Mock matches the corrected substring.
+#[test]
+fn p4_l11_stream_file_passes_positional_args_to_script() {
+    let mock = json!([
+        // Phase 1 (cat > <temp>) and phase 3 (rm) match generically.
+        { "match": "cat", "stdout": "", "exit": 0, "echo_stdin": true },
+        { "match": "rm -f", "stdout": "", "exit": 0 },
+        // Phase 2 must dispatch with `bash -- <temp> 'MARKER'` shape
+        // (no literal `--` between temp and the args). The match
+        // anchors on `bash -- ` to assert the corrected ordering.
+        { "match": "bash -- ", "stdout": "phase-2-marker\n", "exit": 0 }
+    ]);
+    let sb = Sandbox::new(mock);
+    write_minimal_arte(&sb);
+    let body = "#!/bin/bash\necho got=\"$1\"\n";
+    let p = sb.home().join("s.sh");
+    std::fs::write(&p, body).unwrap();
+    sb.cmd()
+        .args([
+            "run",
+            "arte/atlas",
+            "--stream",
+            "--file",
+            p.to_str().unwrap(),
+            "--",
+            "MARKER",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("phase-2-marker"));
 }
 
 // -----------------------------------------------------------------------------

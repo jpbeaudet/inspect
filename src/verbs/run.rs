@@ -714,11 +714,25 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let inner = if let Some(temp_path) = bidir_temp_path.as_deref() {
             let interp = &script.as_ref().unwrap().interp;
             let positional: Vec<String> = args.cmd.iter().map(|a| shquote(a)).collect();
+            // SMOKE 2026-05-09 fix: pre-fix shape was
+            // `<interp> <temp> -- <args>` (e.g. `bash /tmp/script.sh
+            // -- inspect-smoke-X`). Without `-s`, bash treats
+            // `<temp>` as the script and `--` as a literal
+            // positional arg — so the script saw `$1=--` and
+            // `$2=inspect-smoke-X` instead of `$1=inspect-smoke-X`.
+            // Surfaced live during P4.L11: the migration.sh's first
+            // echo printed `starting against --` and `docker exec ""
+            // sh -c …` died with `No such container: sh`. Fix:
+            // `<interp> -- <temp> <args>` — the leading `--`
+            // terminates bash's option parsing, then `<temp>`
+            // becomes the script and `<args>` become its
+            // positionals (`$1=arg1`). Handles args starting with
+            // `-` correctly (still a positional, not a bash flag).
             let body = if positional.is_empty() {
-                format!("{interp} {temp}", temp = shquote(temp_path))
+                format!("{interp} -- {temp}", temp = shquote(temp_path))
             } else {
                 format!(
-                    "{interp} {temp} -- {}",
+                    "{interp} -- {temp} {}",
                     positional.join(" "),
                     temp = shquote(temp_path),
                 )

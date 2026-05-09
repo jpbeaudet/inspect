@@ -433,6 +433,21 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     // far into the manifest they are.
     let manifest_step_count = manifest.steps.len();
 
+    // SMOKE 2026-05-09 fix: pre-quote operator-supplied positional
+    // args once at run() scope so both the forward-pass step
+    // dispatch and the reverse-pass revert dispatch can splice
+    // them into the rendered cmd. Manifest entries reference these
+    // via `$1` / `$2` (the contract documented in
+    // `tests/smoke/v013/migration.json::_comment_arg_passing`).
+    // Pre-fix, `args.cmd` was silently dropped and step bodies
+    // ran with empty positionals.
+    let positional_args: String = args
+        .cmd
+        .iter()
+        .map(|a| crate::verbs::quote::shquote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     for (step_idx, spec) in manifest.steps.iter().enumerate() {
         // Pipeline already aborted by a stop-on-failure step: every
         // remaining step is marked skipped (per target) without
@@ -474,6 +489,22 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         let mut script_bytes: Option<u64> = None;
         let mut script_path: Option<String> = None;
         let mut script_body: Option<Vec<u8>> = None;
+        // SMOKE 2026-05-09 fix: thread operator-supplied trailing
+        // positional args (`inspect run arte --steps manifest.json
+        // -- arg1 arg2`) into every step's dispatched command so
+        // `$1` / `$2` references inside step `cmd` / `cmd_file`
+        // bodies resolve. Pre-fix, `args.cmd` was silently dropped
+        // by the steps runner — manifest entries that referenced
+        // `"$1"` (e.g. `docker exec "$1" sh -c '…'`) saw an empty
+        // `$1` and exited with `invalid container name or ID: value
+        // is empty`, including the auto-revert path. Surfaced live
+        // during P4.F17 (`migration.json` step 1 failed because
+        // `$1` was unbound). Both flavours are now handled:
+        //   - cmd path: prepend `set -- <quoted-args>;` so the
+        //     remote `sh -c <cmd>` evaluates `cmd` with the
+        //     positionals already set.
+        //   - cmd_file path: append `-- <quoted-args>` to
+        //     `bash -s` (matches F14's `render_script_invocation`).
         let dispatched_cmd: String = if let Some(file) = &spec.cmd_file {
             let body = match std::fs::read(file)
                 .with_context(|| format!("reading step '{}' cmd_file '{}'", spec.name, file))
@@ -494,9 +525,18 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             script_sha = Some(sha);
             script_path = Some(file.clone());
             script_body = Some(body);
-            "bash -s".to_string()
+            if positional_args.is_empty() {
+                "bash -s".to_string()
+            } else {
+                format!("bash -s -- {positional_args}")
+            }
         } else {
-            spec.cmd.clone().unwrap_or_default()
+            let raw = spec.cmd.clone().unwrap_or_default();
+            if positional_args.is_empty() || raw.is_empty() {
+                raw
+            } else {
+                format!("set -- {positional_args}; {raw}")
+            }
         };
 
         let timeout_secs = spec.timeout_s.unwrap_or(DEFAULT_STEP_TIMEOUT_SECS);
@@ -799,6 +839,19 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                     }
                     continue;
                 }
+            };
+            // SMOKE 2026-05-09 fix: thread the operator's positional
+            // args into the revert_cmd too — manifests routinely
+            // reference the same `$1` in revert_cmd as in cmd
+            // (e.g. `docker exec "$1" sh -c 'rm /tmp/marker'`), so
+            // a forward-path arg bug would surface again on the
+            // unwind path. Same shape as the forward path:
+            // prepend `set -- <quoted-args>;` so the remote sh
+            // evaluates revert_cmd with positionals already set.
+            let revert_cmd = if positional_args.is_empty() {
+                revert_cmd
+            } else {
+                format!("set -- {positional_args}; {revert_cmd}")
             };
             // Fan out the inverse across each target the step ran
             // against. We iterate per-target results so we have the
