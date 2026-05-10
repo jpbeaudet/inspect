@@ -60,7 +60,7 @@ deferrals. They are deferrals. Treat them the same way.
 Run before every commit (alongside the fmt / clippy / test gates):
 
 ```sh
-grep -rEi "defer|stub|todo|unimplemented|exit\(2\)|out of scope|out-of-scope|postponed|punted" src/ docs/ CHANGELOG.md INSPECT_v0.1.3_BACKLOG.md
+grep -rEi "defer|stub|todo|unimplemented|exit\(2\)|out of scope|out-of-scope|postponed|punted" src/ docs/ CHANGELOG.md archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md
 ```
 
 Inspect every hit. Legitimate matches (e.g. `std::process::exit(2)`
@@ -106,7 +106,7 @@ defer X" in the conversation; agents do not self-authorize.
   shell scrollback rather than a dashboard. Authorized on
   2026-05-03 in conversation; re-open if a real human-operator
   complaint about interactive triage ergonomics surfaces. The
-  L1 row in `INSPECT_v0.1.3_BACKLOG.md` is preserved for
+  L1 row in `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md` is preserved for
   traceability with status "🟦 Deferred (authorized)" rather
   than being deleted.
 
@@ -164,7 +164,7 @@ follow-up:
    relevant — match the surrounding entries (F14/F13/L7 are recent
    examples). Behavior changes / new audit fields / new exit codes
    get explicit flags in the bullet.
-3. **`INSPECT_v0.1.3_BACKLOG.md`.** Mark the item's row `✅ Done`
+3. **`archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md`.** Mark the item's row `✅ Done`
    and replace the placeholder Notes column with a short technical
    summary (modules touched, key flags, test counts, doc files
    updated). Match the F12/F13/F14/L7 style.
@@ -213,7 +213,7 @@ nicety:
 - **Body:** sub-section breakdown (modules, key API additions, audit
   shape changes, help-text changes, test counts). Match recent
   commits like `48a760d` (F14) or `99f4cb3` (L7).
-- **Footer:** `Closes <ID> in INSPECT_v0.1.3_BACKLOG.md.` plus the
+- **Footer:** `Closes <ID> in archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md.` plus the
   `Co-Authored-By:` trailer.
 - **Never commit without explicit user request.** Ask before staging
   if the user has not said "commit" in the current turn.
@@ -307,7 +307,7 @@ The actual `--select` flag implementation is a v0.1.5 backlog item; this entry r
   ship in different orders. Test names use the lowercase prefix
   (`f14_*`, `l7_*`).
 - v0.1.3 is **OPEN, FROZEN** — final scope is the 25 items in
-  `INSPECT_v0.1.3_BACKLOG.md`. Don't expand mid-implementation;
+  `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md`. Don't expand mid-implementation;
   surface scope creep as a question to the user.
 - v0.1.4 = Kubernetes only. v0.1.5 = stabilization sweep. v0.2.0 =
   contract freeze. Anything docker/compose/SSH that doesn't ship in
@@ -336,7 +336,7 @@ implementation, or partial work. **Verify before assuming**:
 - Tests: `tests/phase_f_v013.rs` for v0.1.3 work; `tests/phase_*`
   for older phases; in-tree unit tests next to the code.
 - Docs: `docs/MANUAL.md` (operator), `docs/RUNBOOK.md` (release
-  + maintenance), `INSPECT_v0.1.3_BACKLOG.md` (current scope).
+  + maintenance), `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md` (closed scope).
 - Audit log path: `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
 - Profile / config: `~/.inspect/servers.toml` (mode 0600).
 
@@ -603,7 +603,7 @@ in one breath, not to amortize it.
 
 ### Smoke-test scope discipline
 
-When driving the release smoke (`docs/SMOKE_v0.1.3.md` and
+When driving the release smoke (`archives/v0.1.3/SMOKE_v0.1.3.md` and
 successors), every command must come from the runbook. **No
 free-hand exploration until every phase has passed cleanly.**
 
