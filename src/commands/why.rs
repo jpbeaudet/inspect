@@ -25,13 +25,13 @@ use crate::verbs::dispatch::{iter_steps, plan, NsCtx, StepError};
 use crate::verbs::output::OutputDoc;
 use crate::verbs::runtime::{current_runner, resolve_target, RemoteRunner};
 
-/// F4 (v0.1.3): hard cap on the recent-logs tail. Anything larger is
+/// Hard cap on the recent-logs tail. Anything larger is
 /// clamped with a one-line stderr notice. Protects the operator from
 /// accidentally pulling tens of thousands of lines through redaction.
 pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
-    // F10.3 (v0.1.3): when the selector resolves to zero services BUT
+    // When the selector resolves to zero services BUT
     // the inventory contains a running container with that exact name,
     // surface a chained hint pointing at logs / docker inspect / setup
     // instead of the generic "no targets" selector error. Catches the
@@ -57,7 +57,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;
     print_source_line(&aggregated_source, &fmt);
 
-    // F4 (v0.1.3): clamp --log-tail at LOG_TAIL_CAP with a one-line
+    // Clamp --log-tail at LOG_TAIL_CAP with a one-line
     // stderr notice. Keeps redaction + transport bills bounded.
     let log_tail_clamped = if args.log_tail > LOG_TAIL_CAP {
         eprintln!(
@@ -144,7 +144,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             data_lines.push(format!("{indent}{name}: {}{mark}", st.as_str()));
         }
 
-        // F4 (v0.1.3): diagnostic bundle for failing target services.
+        // Diagnostic bundle for failing target services.
         // Only fires for the target service (not transitive deps), and
         // only when its status is unhealthy/down. ≤4 remote commands
         // per service per bundle invocation.
@@ -217,7 +217,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     .with_meta("selector", args.selector.clone())
     .with_meta("source", aggregated_source.to_json())
     .with_quiet(args.format.quiet);
-    // F4: smart NEXT hints derived from the bundle (entrypoint
+    // Smart NEXT hints derived from the bundle (entrypoint
     // inspection on bound-twice, host port reality on "address
     // already in use" log lines). These come *before* the generic
     // why_rules suggestions so the most actionable guidance lands
@@ -267,7 +267,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     })
 }
 
-/// F8 (v0.1.3): per-namespace runtime snapshot collection through the
+/// Per-namespace runtime snapshot collection through the
 /// cache orchestrator. Returns
 ///   (snapshots-by-ns, per-ns SourceInfo entries, refresh warnings)
 /// — the same shape `status` and `health` use. Cold cache + failed
@@ -346,7 +346,7 @@ impl NodeStatus {
     }
 }
 
-/// F8: prefer the runtime snapshot for both running-state and health.
+/// Prefer the runtime snapshot for both running-state and health.
 /// Falls back to the inventory tier's `health_status` only when the
 /// snapshot lacks a row for the container — the bug pattern from the
 /// 3rd field user (where post-restart `health_status` was stuck on
@@ -465,7 +465,7 @@ fn pick_root_cause(walk: &Walk, status: &HashMap<String, NodeStatus>) -> Option<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// F4 (v0.1.3): diagnostic bundle.
+// Diagnostic bundle.
 //
 // For unhealthy / down / restart-looping target services, attach three
 // artifacts inline so the operator (human or LLM) doesn't have to
@@ -579,7 +579,7 @@ fn collect_diagnostic_bundle(
         } else {
             &out.stderr
         };
-        // L7 (v0.1.3): redact the F4 log-tail bundle the same way the
+        // Redact the log-tail bundle the same way the
         // standalone `inspect logs` does. `inspect why` is read-only
         // and not audited, so there's no `--show-secrets` flag to
         // honor here yet — operators who genuinely need the verbatim
@@ -762,7 +762,7 @@ fn extract_port_from_addr(flag: &str) -> Option<u16> {
         .ok()
 }
 
-/// F10.3 (v0.1.3): when `inspect why <ns>/<token>` resolves to zero
+/// When `inspect why <ns>/<token>` resolves to zero
 /// services, look up `<token>` against the runtime inventory of each
 /// candidate namespace. If `<token>` matches a running container's
 /// `container_name`, return the chained hint string. Otherwise return

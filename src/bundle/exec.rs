@@ -56,7 +56,7 @@ use super::vars::{interpolate, InterpError};
 /// Default per-step timeout when the YAML doesn't override.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
 
-/// L6 (v0.1.3): per-branch execution outcome inside a `parallel:
+/// Per-branch execution outcome inside a `parallel:
 /// true` + `matrix:` step. Recorded once per matrix value at the
 /// time the branch finishes (whether ok, failed, or skipped under
 /// stop-on-first-error). Used by [`do_rollback`] to invert ONLY
@@ -271,7 +271,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
     // Track which steps completed successfully, in declaration order,
     // so rollback can walk them in reverse.
     let mut completed: Vec<usize> = Vec::new();
-    // L6 (v0.1.3): per-step matrix branch ledger. Indexed by step
+    // Per-step matrix branch ledger. Indexed by step
     // declaration index. Populated only for `parallel: true` +
     // `matrix:` steps (whether they completed cleanly or failed
     // partway). [`do_rollback`] consults this map to invert ONLY the
@@ -325,7 +325,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                     "[inspect] step {step_label} `{id}` FAILED: {e}",
                     id = step.id
                 );
-                // L6 (v0.1.3): if the failure came from a parallel
+                // If the failure came from a parallel
                 // matrix step, drain the per-branch ledger so
                 // do_rollback can target succeeded branches only.
                 if let Some(partial) = BranchFailureCarrier::drain() {
@@ -396,13 +396,13 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
         }
     }
 
-    // F8: invalidate the runtime cache for every namespace any
+    // Invalidate the runtime cache for every namespace any
     // completed step touched. Bundles can run arbitrary `exec` /
     // `run` bodies — we can't reliably classify them as mutating
     // vs read-only at parse time, so we conservatively invalidate.
     // Worst case: one extra `docker ps` on the next read verb.
     // Best case: no operator ever sees stale data after a bundle
-    // run (the F8 invariant must hold for `bundle apply` too, not
+    // run (the invariant must hold for `bundle apply` too, not
     // just for the `restart` lifecycle verb).
     let mut bundle_touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for &i in &completed {
@@ -551,7 +551,7 @@ fn render_step_body(
                 .ok_or_else(|| anyhow!("step `{}`: watch body missing", step.id))?;
             return Ok(format_watch_body(w));
         }
-        // L8 (v0.1.3): compose: bodies render their own command at
+        // Compose: bodies render their own command at
         // execution time via `run_compose_branch` so it can resolve
         // the project's working_dir from the cached profile and
         // capture compose_file_hash. Returning the YAML-shaped
@@ -601,7 +601,7 @@ fn format_watch_body(w: &super::schema::WatchStep) -> String {
 }
 
 /// Run a single step (with fan-out for `parallel: true` matrix steps).
-/// L6 (v0.1.3): outcome of one step. `Single` is a normal
+/// Outcome of one step. `Single` is a normal
 /// (non-matrix) step — the apply loop tracks it in `completed` but
 /// has no per-branch records to rollback against. `Matrix` carries
 /// the per-branch results so [`do_rollback`] can iterate ONLY the
@@ -622,7 +622,7 @@ fn run_step(
     let kind = step.body_kind().map_err(|e| anyhow!("{e}"))?;
 
     // `--apply` gate per step. Skipped if step opts out (`apply:
-    // false`) or if it's a read-only `run`/`watch` step. L8 (v0.1.3):
+    // false`) or if it's a read-only `run`/`watch` step. :
     // compose: bodies mutate state (up/down/pull/build/restart all do),
     // so they go through the same gate as `exec:`.
     let needs_apply = step.apply && matches!(kind, StepBodyKind::Exec | StepBodyKind::Compose);
@@ -655,7 +655,7 @@ fn run_step(
 /// Run one (possibly matrix-branch) step body. Returns the audit
 /// entry id minted for this branch when the body wrote one (every
 /// `exec` and `watch` step does; `run` is intentionally unaudited).
-/// L6 (v0.1.3): `matrix` is non-empty only for branches dispatched
+/// `Matrix` is non-empty only for branches dispatched
 /// from `run_parallel_matrix`; when non-empty, the audit entry is
 /// stamped with `bundle_branch` + `bundle_branch_status` so
 /// `inspect bundle status <id>` can render per-branch outcomes
@@ -750,7 +750,7 @@ fn run_single_branch(
                 e.reason = crate::safety::validate_reason(reason.as_deref())?;
                 e.bundle_id = Some(bundle_id.to_string());
                 e.bundle_step = Some(step.id.clone());
-                // L6 (v0.1.3): stamp matrix-branch metadata when this
+                // Stamp matrix-branch metadata when this
                 // single-branch run is the per-branch leg of a
                 // `parallel: true` + `matrix:` step.
                 if let Some((mkey, mval)) = matrix.iter().next() {
@@ -795,7 +795,7 @@ fn run_single_branch(
             e.reason = crate::safety::validate_reason(reason.as_deref())?;
             e.bundle_id = Some(bundle_id.to_string());
             e.bundle_step = Some(step.id.clone());
-            // L6 (v0.1.3): mirror the matrix-branch metadata for
+            // Mirror the matrix-branch metadata for
             // watch-step branches so `inspect bundle status` can
             // group them alongside the exec-step branches.
             if let Some((mkey, mval)) = matrix.iter().next() {
@@ -825,7 +825,7 @@ fn run_single_branch(
     }
 }
 
-/// L8 (v0.1.3): execute one branch of a `compose:` step. Renders
+/// Execute one branch of a `compose:` step. Renders
 /// the docker compose command, captures the live compose-file hash
 /// for the audit, runs the command, and stamps an audit entry that
 /// matches the standalone `inspect compose <action>` shape so
@@ -1043,7 +1043,7 @@ fn run_compose_branch(
     Ok(audit_id)
 }
 
-/// L8 (v0.1.3): turn the compose-step `flags:` map into the docker
+/// Turn the compose-step `flags:` map into the docker
 /// compose CLI flags. Per-flag rendering is action-aware so an `up`
 /// step's `force_recreate: true` becomes `--force-recreate`, and a
 /// `down` step's `volumes: true` becomes `--volumes`. Unknown flags
@@ -1093,7 +1093,7 @@ fn flag_is_true(map: &BTreeMap<String, serde_yaml::Value>, key: &str) -> bool {
     map.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-/// L8 (v0.1.3): revert taxonomy for compose actions. Mirrors the
+/// Revert taxonomy for compose actions. Mirrors the
 /// standalone verbs: up ↔ down, restart re-restart, pull is
 /// unsupported (you can't un-pull), build is roughly
 /// `down --rmi local`.
@@ -1110,7 +1110,7 @@ fn compose_revert_for_action(
         None => format!("{ns}/{project}"),
     };
     match action {
-        // F11 capture-site authoritative (v0.1.3 smoke fix): per-step
+        // Per-step
         // compose reverts previously stored an `inspect compose <inv>
         // {sel} --apply` CLI wrapper as the runnable payload. That
         // payload is dispatched by `revert_command_pair` via
@@ -1176,7 +1176,7 @@ fn run_parallel_matrix(
     let queue: Arc<Mutex<Vec<serde_yaml::Value>>> = Arc::new(Mutex::new(mvals.clone()));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stop_flag = Arc::new(AtomicBool::new(false));
-    // L6 (v0.1.3): per-branch outcome ledger. Workers append to it as
+    // Per-branch outcome ledger. Workers append to it as
     // they complete; the parent reads it back after the scope joins
     // and forwards it to the apply loop for rollback consumption.
     let branches: Arc<Mutex<Vec<BranchResult>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1257,7 +1257,7 @@ fn run_parallel_matrix(
         }
     });
 
-    // L6 (v0.1.3): branches that the stop_flag short-circuited never
+    // Branches that the stop_flag short-circuited never
     // actually started. Synthesize Skipped records so
     // `inspect bundle status` can render the full matrix table and
     // the rollback path can prove it didn't try to invert them.
@@ -1282,7 +1282,7 @@ fn run_parallel_matrix(
     branches_vec.sort_by(|a, b| a.branch_id.cmp(&b.branch_id));
 
     if let Some(msg) = first_err.lock().unwrap().clone() {
-        // L6: even on failure we return the per-branch ledger via Err
+        // Even on failure we return the per-branch ledger via Err
         // so the apply loop can stash it for rollback. Encode the
         // branches alongside the error message via a side channel —
         // simplest is to thread it through a thread-local-like
@@ -1293,7 +1293,7 @@ fn run_parallel_matrix(
     Ok(branches_vec)
 }
 
-/// L6 (v0.1.3): when a `parallel` matrix step fails partway, we need
+/// When a `parallel` matrix step fails partway, we need
 /// to thread the per-branch ledger back to the apply loop alongside
 /// the error message so [`do_rollback`] can invert only the
 /// succeeded branches. anyhow's [`anyhow::Error`] is a single-value
@@ -1375,7 +1375,7 @@ fn do_rollback(
     rollback_to: Option<&str>,
     no_prompt: bool,
 ) {
-    // L6 (v0.1.3): even when no top-level step `completed`, a
+    // Even when no top-level step `completed`, a
     // parallel-matrix step that failed mid-way may have produced
     // succeeded branches that DO need inverting. Walk both the
     // `completed` set and any partially-failed matrix steps.
@@ -1436,7 +1436,7 @@ fn do_rollback(
             continue;
         };
 
-        // L6 (v0.1.3): branch-aware rollback. For matrix steps we
+        // Branch-aware rollback. For matrix steps we
         // run the rollback block once per SUCCEEDED branch, with
         // `{{ matrix.<key> }}` resolving to that branch's value.
         // Failed/skipped branches log an audit note explaining why
@@ -1622,7 +1622,7 @@ fn run_rollback_action(
     e.is_revert = true;
     e.bundle_id = Some(bundle_id.to_string());
     e.bundle_step = Some(step_id.to_string());
-    // L6 (v0.1.3): when this rollback is for a specific matrix
+    // When this rollback is for a specific matrix
     // branch (per-branch invert), stamp the branch label so audit
     // queries can group by it.
     if let Some(b) = branch_label {

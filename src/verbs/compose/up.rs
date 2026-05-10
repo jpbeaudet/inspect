@@ -1,4 +1,4 @@
-//! F6 (v0.1.3) + L8 (v0.1.3): `inspect compose up <ns>/<project>[/<service>]`
+//! `Inspect compose up <ns>/<project>[/<service>]`
 //! — bring up a compose project, or one service inside it. Audited
 //! (`verb=compose.up`).
 //!
@@ -8,7 +8,7 @@
 //! stdout). `--force-recreate` is a passthrough for the standard
 //! compose flag.
 //!
-//! L8 (v0.1.3): when the selector includes a service portion, the
+//! When the selector includes a service portion, the
 //! invocation narrows to that one service (`docker compose -p <p>
 //! up -d <svc>`). Other services in the project are unaffected. The
 //! audit args carry an additional `[service=<svc>]` tag so a
@@ -68,7 +68,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     };
 
     // Build flag set: `-d` unless --no-detach; --force-recreate is
-    // passthrough. L8 (v0.1.3): per-service narrowing comes through
+    // passthrough. : per-service narrowing comes through
     // `parsed.service` and is appended to the command by
     // `build_compose_cmd`.
     let mut flags: Vec<&str> = Vec::new();
@@ -131,7 +131,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
     let out = runner.run(&parsed.namespace, &target, &cmd, RunOpts::with_timeout(300))?;
     let dur = started.elapsed().as_millis() as u64;
 
-    // L8: audit selector includes the service portion when narrowed
+    // Audit selector includes the service portion when narrowed
     // so post-mortem queries can distinguish per-service from
     // project-level invocations without re-parsing the args text.
     let audit_selector = match parsed.service.as_deref() {
@@ -229,7 +229,7 @@ pub fn run(args: ComposeUpArgs) -> Result<ExitKind> {
             "verify the per-service state",
         ));
     } else {
-        // L8: failure NextStep narrows to the service when one was
+        // Failure NextStep narrows to the service when one was
         // specified, so the operator's eye lands on the right log
         // tail without re-typing the selector.
         let logs_target = match parsed.service.as_deref() {

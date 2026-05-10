@@ -97,7 +97,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
     let mut ok = 0usize;
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
-    // F8 (v0.1.3): track every namespace that successfully had at
+    // Track every namespace that successfully had at
     // least one service mutated, so we can invalidate the runtime
     // cache exactly once per ns at the end. Without this, the next
     // `inspect status` would happily serve the pre-restart snapshot
@@ -113,7 +113,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
             .map(|d| d.kind)
             .unwrap_or(ServiceKind::Container);
         let cmd = build_cmd(act, svc, container, kind);
-        // F11 (v0.1.3): capture-before-apply. Build the inverse
+        // Capture-before-apply. Build the inverse
         // *before* dispatching so the audit entry records what
         // `inspect revert` would run, even on partial failure.
         let revert = build_revert(act, svc, container, kind);
@@ -158,7 +158,7 @@ fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
         }
     }
 
-    // F8: invalidate runtime cache for every namespace touched.
+    // Invalidate runtime cache for every namespace touched.
     // Best-effort: invalidation is a file unlink; if it fails (e.g.
     // permissions) the next read verb's TTL check still protects
     // freshness within `INSPECT_RUNTIME_TTL_SECS`. We intentionally
@@ -209,7 +209,7 @@ fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Stri
     }
 }
 
-/// F11 (v0.1.3): pre-stage the inverse of a lifecycle action so it
+/// Pre-stage the inverse of a lifecycle action so it
 /// can be reapplied via `inspect revert` even if the original step
 /// failed mid-flight. `restart` and `reload` have no clean inverse,
 /// so they record `kind: unsupported` with a human-readable preview.

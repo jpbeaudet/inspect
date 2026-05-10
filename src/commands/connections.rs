@@ -21,7 +21,7 @@ pub fn run(args: ConnectionsArgs) -> anyhow::Result<ExitKind> {
             Ok(r) => match SshTarget::from_resolved(&r) {
                 Ok(target) => {
                     let status = check_socket(&sock, &target);
-                    // L4 (v0.1.3): surface auth mode + configured ttl
+                    // Surface auth mode + configured ttl
                     // + an upper-bound on remaining session lifetime.
                     // The expires_in figure is approximate: it
                     // measures elapsed wall-clock since the socket
@@ -107,19 +107,19 @@ struct Row {
     host: String,
     socket: String,
     status: String,
-    /// L4 (v0.1.3): "key" or "password" (or "?" when the namespace
+    /// "Key" or "password" (or "?" when the namespace
     /// is orphaned / config-broken).
     auth: String,
-    /// L4 (v0.1.3): configured TTL string (e.g. "12h"). Reflects
+    /// Configured TTL string (e.g. "12h"). Reflects
     /// the same priority chain as `inspect connect`.
     session_ttl: String,
-    /// L4 (v0.1.3): upper-bound time until the master would expire
+    /// Upper-bound time until the master would expire
     /// if no further traffic. `None` when the socket has no
     /// readable timestamp (orphan / config error).
     expires_in: Option<String>,
 }
 
-/// L4 (v0.1.3): upper-bound on remaining lifetime of an active
+/// Upper-bound on remaining lifetime of an active
 /// master. ControlPersist resets on every traffic so the real
 /// lifetime is at least this long; never shorter. We use the
 /// socket file's mtime as a "session opened at" proxy, which is
@@ -155,10 +155,10 @@ fn format_duration(d: Duration) -> String {
 }
 
 fn emit_json(rows: &[Row], format: &crate::format::FormatArgs) -> anyhow::Result<ExitKind> {
-    // P0.6 sweep (v0.1.3): L7 envelope. Pre-fix this verb emitted a
+    // envelope. Pre-fix this verb emitted a
     // bare `{schema_version, connections}` shape — the surface that
-    // surfaced as a non-L7 outlier during the SMOKE P1.5 live run on
-    // 2026-05-09. The L4 fields (auth / session_ttl / expires_in)
+    // surfaced as a non-envelope outlier during the smoke live run on
+    // 2026-05-09. The fields (auth / session_ttl / expires_in)
     // ride on each row in `data.connections[]`.
     let connections: Vec<Value> = rows
         .iter()

@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): shared scaffolding for the audited compose write
+//! Shared scaffolding for the audited compose write
 //! verbs (`up` / `down` / `pull` / `build` / `restart`).
 //!
 //! The four verbs ending in `up` / `down` / `pull` / `build` follow
@@ -91,7 +91,7 @@ pub(crate) fn build_compose_cmd(
     parts.join(" ")
 }
 
-/// L8 (v0.1.3): per-service teardown command shape. `docker compose
+/// Per-service teardown command shape. `docker compose
 /// down <svc>` is not a documented form and behaves inconsistently
 /// across compose versions; the explicit two-step (`stop <svc> && rm
 /// -f <svc>`) is what every operator's runbook uses and what

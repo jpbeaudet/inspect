@@ -449,7 +449,7 @@ impl AuditEntry {
     }
 }
 
-/// Cap on the length of the `--reason` text (P12, v0.1.1). The audit
+/// Cap on the length of the `--reason` text. The audit
 /// log is a per-month JSONL file; runaway --reason payloads would
 /// bloat lines and make `audit ls` unreadable. 240 characters is a
 /// pragmatic upper bound (≈ a tweet) that fits both Jira keys and a

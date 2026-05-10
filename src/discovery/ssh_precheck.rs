@@ -308,7 +308,7 @@ mod tests {
     /// short-circuit when the inspect-managed master socket is alive.
     /// This is a compile-level guard on the API shape — the live
     /// short-circuit path is exercised by the v0.1.3 release smoke
-    /// (`docs/SMOKE_v0.1.3.md`, P1) where an encrypted-key namespace
+    /// (the smoke runbook covers this case) where an encrypted-key namespace
     /// with an already-open master must succeed `setup --force`
     /// without re-prompting for the passphrase.
     #[test]

@@ -1,10 +1,10 @@
-//! F6 (v0.1.3) + L8 (v0.1.3): `inspect compose logs
+//! `Inspect compose logs
 //! <ns>/<project>[/<service>]` — aggregated logs for a project, or
 //! one service inside it.
 //!
 //! Wraps `cd <wd> && docker compose -p <p> logs [--tail N] [--since
 //! X] [--follow] [--timestamps] [<svc>]` over the persistent ssh
-//! socket. L8 (v0.1.3) brings the verb up to feature-parity with the
+//! socket. brings the verb up to feature-parity with the
 //! generic `inspect logs` verb's triage surface:
 //!
 //! - `--match <REGEX>` / `--exclude <REGEX>` (repeatable; OR within
@@ -64,7 +64,7 @@ pub fn run(args: ComposeLogsArgs) -> Result<ExitKind> {
         }
     };
 
-    // L8 (v0.1.3): --merged asserts a multi-service stream. Reject
+    // --merged asserts a multi-service stream. Reject
     // per-service selectors so the contract is unambiguous.
     if args.merged && parsed.service.is_some() {
         crate::error::emit(format!(
@@ -77,7 +77,7 @@ pub fn run(args: ComposeLogsArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // L8 (v0.1.3): --cursor + --follow is allowed and useful (resume
+    // --cursor + --follow is allowed and useful (resume
     // from the last seen timestamp and continue tailing). The cursor
     // is updated only when the verb returns control (--follow exits
     // when ssh's read-loop ends).
@@ -125,14 +125,14 @@ pub fn run(args: ComposeLogsArgs) -> Result<ExitKind> {
         parts.push(shquote(svc));
     }
     let mut cmd = parts.join(" ");
-    // L8: line-filter pipeline pushed down to the remote so the SSH
+    // Line-filter pipeline pushed down to the remote so the SSH
     // transport never carries lines we're about to drop. The live
     // mode (--follow) uses `--line-buffered` so streaming round-trips
     // immediately.
     cmd.push_str(&build_suffix(&args.r#match, &args.exclude, args.follow));
 
     // Streaming with redaction. We pipe each line through the
-    // L7 maskers and emit in real time so `--follow` is responsive.
+    // maskers and emit in real time so `--follow` is responsive.
     let redactor = OutputRedactor::new(args.show_secrets, false);
     // Long timeout for `--follow`, normal otherwise — matches
     // `inspect logs --follow`'s 8h convention.
@@ -151,7 +151,7 @@ pub fn run(args: ComposeLogsArgs) -> Result<ExitKind> {
         force_timestamps,
     )?;
 
-    // L8 (v0.1.3): write the cursor when one was supplied AND we
+    // Write the cursor when one was supplied AND we
     // captured a timestamp. Skip when the stream produced no
     // lines (the cursor stays whatever it was; an empty stream
     // shouldn't reset the operator's resume point).
@@ -197,7 +197,7 @@ fn stream_with_redaction(
     Ok((exit, last_ts))
 }
 
-/// L8 (v0.1.3): pull the ISO-8601 timestamp prefix out of a docker
+/// Pull the ISO-8601 timestamp prefix out of a docker
 /// compose `--timestamps` line. The prefix shape is one of:
 ///
 ///   service_name  | 2024-01-15T12:34:56.789012345Z message

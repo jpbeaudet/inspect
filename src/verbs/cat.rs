@@ -9,7 +9,7 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
 
-/// F10.2 (v0.1.3): inclusive 1-based line slice. `None` means "no
+/// Inclusive 1-based line slice. `None` means "no
 /// slice — print the whole file" (today's behavior).
 #[derive(Clone, Copy, Debug)]
 struct LineSlice {
@@ -89,13 +89,13 @@ fn resolve_slice(args: &CatArgs) -> Result<Option<LineSlice>> {
 }
 
 pub fn run(args: CatArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
     let slice = resolve_slice(&args)?;
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted.
     let mut select = args.format.select_filter()?;
@@ -104,7 +104,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
     let mut errored_any = false;
 
     for step in iter_steps(&nses, &targets) {
-        // L7 (v0.1.3): per-target redactor. `inspect cat` is the
+        // Per-target redactor. `inspect cat` is the
         // single highest-risk verb for accidentally printing a PEM
         // private key (it will literally cat any file the operator
         // points at), which is why the default behavior collapses
@@ -119,7 +119,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             errored_any = true;
             continue;
         };
-        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // Docker exec must receive the
         // container_name (e.g. `luminary-api`), not the canonical
         // service name (`api`). See `Step::container()` doc.
         let cmd = build_cat(step.container(), path);
@@ -151,12 +151,12 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             continue;
         }
         printed_any = true;
-        // L7 (v0.1.3): always iterate lines (even on the
+        // Always iterate lines (even on the
         // previously-fast `print!("{}", out.stdout)` path) so the PEM
         // masker can collapse multi-line key blocks into a single
         // `[REDACTED PEM KEY]` marker. The trailing-newline behavior
         // is preserved: every emitted line gets `\n` (matching the
-        // pre-L7 "print verbatim, append newline if missing" rule).
+        // earlier "print verbatim, append newline if missing" rule).
         if args.format.is_json() {
             for (idx, line) in out.stdout.lines().enumerate() {
                 let n = idx + 1;

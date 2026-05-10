@@ -19,7 +19,7 @@ use crate::verbs::quote::shquote;
 pub fn run(args: HealthArgs) -> Result<ExitKind> {
     let (runner, nses, targets) = plan(&args.selector)?;
 
-    // F8 (v0.1.3): refresh / consult the runtime cache so that the
+    // Refresh / consult the runtime cache so that the
     // cached-health fallback (services without a probe URL) reports
     // the freshest known health_status — and so the SOURCE: line
     // tells operators whether they're seeing live or stale runtime
@@ -101,7 +101,7 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
                 }
             }
             None => {
-                // F8: prefer runtime snapshot's health_status over the
+                // Prefer runtime snapshot's health_status over the
                 // inventory tier's frozen-at-setup value.
                 let rt_health = svc_def.and_then(|d| {
                     runtime_by_ns

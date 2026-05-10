@@ -1,4 +1,4 @@
-//! Env-secret line masker (P4, v0.1.1).
+//! Env-secret line masker.
 //!
 //! Detects `KEY=VALUE` pairs whose KEY name suggests a secret (suffix
 //! match against the list below, or one of the explicit
@@ -8,7 +8,7 @@
 //! line is masked regardless of key name.
 //!
 //! Invariants preserved verbatim from the v0.1.1 implementation
-//! (originally `crate::redact::EnvSecretMasker`); the v0.1.3 L7
+//! (originally `crate::redact::EnvSecretMasker`); the v0.1.3
 //! refactor only relocates this logic into a submodule of
 //! [`crate::redact`] so the new header / PEM / URL maskers can sit
 //! beside it.

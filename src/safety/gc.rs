@@ -1,4 +1,4 @@
-//! L5 (v0.1.3): audit-log retention + snapshot orphan GC.
+//! Audit-log retention + snapshot orphan GC.
 //!
 //! Driven by `inspect audit gc` and (when `[audit] retention` is set in
 //! `~/.inspect/config.toml`) by a cheap-path lazy trigger that fires on
@@ -11,7 +11,7 @@
 //! tmp→rename), and finally sweeps `~/.inspect/audit/snapshots/` for
 //! `sha256-<hex>` files no longer referenced by any retained entry.
 //! Snapshots referenced by a retained entry are **never** deleted —
-//! that's the F11 revert contract.
+//! that's the revert contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -467,7 +467,7 @@ fn collect_snapshot_hashes(e: &AuditEntry, out: &mut BTreeSet<String>) {
 }
 
 /// Composite revert payloads are JSON arrays of
-/// `{kind, payload, ...}` records (F17). Recurse so nested
+/// `{kind, payload, ...}` records. Recurse so nested
 /// `state_snapshot` payloads (and theoretically nested `composite`
 /// payloads) keep their hashes pinned. Best-effort: malformed JSON is
 /// ignored — the GC must never delete a snapshot it can't prove is

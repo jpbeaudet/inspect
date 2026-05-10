@@ -56,7 +56,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
 
     for (s, path) in &planned {
-        // F11 (v0.1.3): probe whether the directory already exists.
+        // Probe whether the directory already exists.
         // If it did not, the inverse is `rmdir <path>` (only if the
         // operator's mkdir actually created it). If it did, mkdir is
         // a no-op and revert is unsupported.
@@ -89,7 +89,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
                 "{path} already existed before mkdir; revert is a no-op"
             ))
         } else {
-            // F11 capture-site authoritative: payload is the literal
+            // Payload is the literal
             // command for the runner, wrapped in `docker exec` when
             // the original verb dispatched through a container.
             let inner_revert = format!("rmdir -- {}", shquote(path));

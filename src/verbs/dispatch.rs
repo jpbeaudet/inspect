@@ -32,7 +32,7 @@ pub struct NsCtx {
     pub namespace: String,
     pub target: SshTarget,
     pub profile: Option<Profile>,
-    /// F12 (v0.1.3): per-namespace remote env overlay, sourced from
+    /// Per-namespace remote env overlay, sourced from
     /// `[namespaces.<ns>.env]` in `~/.inspect/servers.toml` (merged
     /// with any env-var overrides). Empty when no overlay is
     /// configured. Verbs that dispatch operator-supplied free-form
@@ -40,9 +40,9 @@ pub struct NsCtx {
     /// `env KEY="VAL" ... -- ` to the remote command line via
     /// [`crate::exec::env_overlay::apply_to_cmd`]. Read verbs
     /// (`logs`, `ps`, `status`, etc.) issue inspect-internal
-    /// commands and ignore this field — see F12 spec scope.
+    /// commands and ignore this field — see spec scope.
     pub env_overlay: BTreeMap<String, String>,
-    /// F13 (v0.1.3): per-namespace policy on stale-session
+    /// Per-namespace policy on stale-session
     /// auto-reauth. Sourced from `[servers.<ns>].auto_reauth` in
     /// `~/.inspect/servers.toml`; defaults to `true` when the field
     /// is absent. `--no-reauth` on `run` / `exec` overrides this
@@ -83,7 +83,7 @@ impl<'a> Step<'a> {
     /// the command still runs on hosts that haven't been discovered.
     /// Returns `None` for host-level steps (`arte/_`).
     ///
-    /// Field pitfall §6.1 (v0.1.1 P2): the user-facing service name
+    /// Field pitfall: the user-facing service name
     /// (`name`, possibly a compose label like `api`) is what the
     /// selector matches on, but the docker daemon only knows the real
     /// container name (`luminary-api`). Always pass `container()` to
@@ -123,7 +123,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
             },
         );
     }
-    // F7.5 (v0.1.3): a wildcard selector ("everything in this
+    // A wildcard selector ("everything in this
     // namespace") against an empty profile resolves to zero targets,
     // but the verb still wants to talk to the namespace's host (e.g.
     // status's empty-state path needs `docker ps` so it can phrase

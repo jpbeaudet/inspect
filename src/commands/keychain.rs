@@ -1,4 +1,4 @@
-//! L2 (v0.1.3): `inspect keychain ...` verb cluster.
+//! `Inspect keychain ...` verb cluster.
 //!
 //! Three sub-verbs over the OS keychain (per-namespace storage of
 //! SSH passphrases / passwords for cross-session reuse):

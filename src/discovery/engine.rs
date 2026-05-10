@@ -39,7 +39,7 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
     // 2) Docker container inventory (only if docker is present).
     if tooling.docker {
         let r = probe_docker_containers(namespace, target);
-        // F2 (v0.1.3): the docker probe escalates a probe-level fatal
+        // The docker probe escalates a probe-level fatal
         // (e.g. daemon down, every per-container fallback failed) to
         // an `Err` here so setup exits non-zero with a chained hint
         // instead of folding the line into the warnings list. The
@@ -57,7 +57,7 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
         profile.images.extend(inv.images);
         profile.warnings.extend(inv.warnings);
 
-        // F6 (v0.1.3): compose projects. Best-effort; silent when
+        // Compose projects. Best-effort; silent when
         // `docker compose` is not installed (the absence of compose
         // is normal on plain container hosts).
         let cp = probe_compose_projects(namespace, target);
@@ -77,7 +77,7 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
             // the profile carries something useful even on hosts that don't
             // run docker. Container listeners would be redundant here, so we
             // only keep ports that aren't already mapped through a known
-            // container port mapping. L9 (v0.1.3): match on (host_port,
+            // container port mapping. : match on (host_port,
             // proto) so a TCP service on :53 doesn't suppress a host UDP
             // listener on :53 — they're distinct sockets and operators
             // chasing DNS issues need both surfaced.

@@ -1,4 +1,4 @@
-//! L2 (v0.1.3): on-disk namespace index for the OS keychain.
+//! On-disk namespace index for the OS keychain.
 //!
 //! `~/.inspect/keychain-index` (mode 0600) — one namespace per line,
 //! sorted alphabetically. Holds **no** secret material; only names.

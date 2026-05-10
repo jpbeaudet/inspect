@@ -20,7 +20,7 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     if let Some(s) = &args.since {
@@ -29,7 +29,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
 
     let (runner, nses, targets) = plan(&args.selector)?;
 
-    // P10 (v0.1.1): --reset-cursor and --since-last mirror the logs verb.
+    // --reset-cursor and --since-last mirror the logs verb.
     if args.reset_cursor {
         let mut deleted = 0usize;
         for step in iter_steps(&nses, &targets) {
@@ -47,14 +47,14 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
     let case_insensitive = resolve_case(&args);
     let mut matches = 0usize;
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted.
     let mut select = args.format.select_filter()?;
 
     for step in iter_steps(&nses, &targets) {
         let svc_for_cursor = step.service().unwrap_or("_").to_string();
-        // L7 (v0.1.3): one redactor per step. Grep emits matched lines
+        // One redactor per step. Grep emits matched lines
         // verbatim from the remote pipeline — anything that would
         // otherwise be a bare token in the operator's terminal goes
         // through the four-masker chain first.
@@ -123,7 +123,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         }
 
         for line in out.stdout.lines() {
-            // L7 (v0.1.3): redact before counting — a line that is
+            // Redact before counting — a line that is
             // entirely consumed by the PEM masker (interior block
             // line) is not a real match for the operator either.
             let masked = match redactor.mask_line(line) {
@@ -215,7 +215,7 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
 
     if let Some(path) = step.path.as_deref() {
         let inner = format!("{tool_bin}{flags} -- {pat} {}{suf}", shquote(path));
-        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // Docker exec must receive the
         // container_name, not the canonical service name. See
         // `Step::container()` doc; same fix shipped for cat/ls/find.
         return match step.container() {
@@ -240,7 +240,7 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
             }
             s
         } else {
-            // F5 dual-axis (v0.1.3): `docker logs` takes the
+            // `Docker logs` takes the
             // container_name; only the systemd journalctl branch
             // above keeps the canonical name (which IS the unit name).
             let docker_name = step.container().unwrap_or(svc);

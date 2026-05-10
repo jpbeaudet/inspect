@@ -1,4 +1,4 @@
-//! `inspect cache` — F8 (v0.1.3) runtime cache management.
+//! `inspect cache` — runtime cache management.
 //!
 //! Provides two subcommands:
 //!
@@ -99,7 +99,7 @@ fn clear(args: CacheClearArgs) -> Result<ExitKind> {
         let ns = args
             .namespace
             .ok_or_else(|| anyhow!("specify a namespace, or use --all"))?;
-        // F18 (v0.1.3): cache clear is a namespace-scoped verb that
+        // Cache clear is a namespace-scoped verb that
         // does not go through `resolve_target`. Stamp the transcript
         // context here so this invocation's output lands in the
         // right per-ns transcript file.
@@ -108,7 +108,7 @@ fn clear(args: CacheClearArgs) -> Result<ExitKind> {
         vec![ns]
     };
 
-    // F8: record an audit entry per cleared namespace. `cache clear`
+    // Record an audit entry per cleared namespace. `cache clear`
     // is a deliberate operator action (unlike automatic invalidation
     // by lifecycle verbs, which is high-frequency and not auditable
     // by design), so it belongs in the same audit log as restarts.

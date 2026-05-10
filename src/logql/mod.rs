@@ -45,7 +45,7 @@ pub fn parse(input: &str) -> Result<Query, ParseError> {
     parse_with_aliases(input, default_alias_resolver)
 }
 
-/// L3-aware default resolver: looks each call site up in
+/// Looks each call site up in
 /// `~/.inspect/aliases.toml` and returns the fully chain-unwound
 /// substituted body. Errors from the alias layer (missing param,
 /// chain depth, circular reference) are wrapped as `ParseError` so

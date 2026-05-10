@@ -73,7 +73,7 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
 
     // 1) server/service split: first slash from the start.
     //
-    // F7.2 (v0.1.3): the host-path shorthand `arte:/var/log/syslog`
+    // The host-path shorthand `arte:/var/log/syslog`
     // (sugar for `arte/_:/var/log/syslog`) used to be rejected here
     // because the embedded `/` from the absolute path was treated as
     // the server/service separator, leaving the parser with a server

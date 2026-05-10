@@ -16,7 +16,7 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::OutputDoc;
 
 pub fn run(args: StatusArgs) -> Result<ExitKind> {
-    // F1 (v0.1.3): bare-namespace selectors (`inspect status arte`,
+    // Bare-namespace selectors (`inspect status arte`,
     // `inspect status prod-*`) historically resolved to a single
     // host-level step, which the loop below skips, yielding a
     // misleading "0 service(s)" report on a healthy host. The
@@ -42,7 +42,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     let mut services_json: Vec<Value> = Vec::new();
     let mut rows: Vec<StatusRow> = Vec::new();
 
-    // F8 (v0.1.3): pull a runtime snapshot per namespace through the
+    // Pull a runtime snapshot per namespace through the
     // cache orchestrator. The orchestrator decides live vs cached vs
     // stale based on TTL and the `--refresh` flag, returns a
     // [`SourceInfo`] describing the choice, and silently saves any
@@ -110,7 +110,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         let svc_def = step.service_def();
         let mut status_str = "unknown".to_string();
         if let Some(def) = svc_def {
-            // F8: prefer the live runtime snapshot for both
+            // Prefer the live runtime snapshot for both
             // running-state and health. The cached profile's
             // health_status was the post-`setup` value and is
             // exactly the field that went stale after the 3rd
@@ -138,7 +138,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             _ => unknown += 1,
         }
         let img = svc_def.and_then(|s| s.image.clone()).unwrap_or_default();
-        // F5: surface docker `container_name` as an alias when it is
+        // Surface docker `container_name` as an alias when it is
         // distinct from the canonical compose service name. Always
         // emit the field (empty array when no aliases) so the JSON
         // schema is stable for agent consumers.
@@ -164,7 +164,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         ));
     }
 
-    // F7.5 (v0.1.3): empty-state phrasing + `state` field.
+    // Empty-state phrasing + `state` field.
     //
     //   - "ok"                 — at least one service classified
     //   - "no_services_matched"— inventory non-empty but zero services
@@ -196,7 +196,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
             "{total} service(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown"
         ),
     };
-    // F6 (v0.1.3): surface the cached compose project list. We
+    // Surface the cached compose project list. We
     // always read from the inventory tier (not runtime) because
     // compose project membership rarely changes between deploys
     // and a fresh probe would cost a second remote round-trip per
@@ -235,12 +235,12 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         }),
     )
     .with_meta("selector", args.selector.clone())
-    // F8: stable JSON contract — every read-verb response carries
+    // Stable JSON contract — every read-verb response carries
     // `meta.source` so agents can tell live from cached without
     // parsing the SOURCE: prose line.
     .with_meta("source", aggregated_source.to_json())
     .with_quiet(args.format.quiet);
-    // F7.5: chained next-actions for the no-services-matched empty
+    // Chained next-actions for the no-services-matched empty
     // state. Lead with `inspect ps` (see what the host actually has)
     // then `inspect setup --force` (re-classify if a service was
     // expected). Suppressed for the populated-OK and empty-inventory
@@ -259,7 +259,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     for n in status_rules(&rows) {
         doc.push_next(n);
     }
-    // F8: stale-source chained hint — when the cache is degraded,
+    // Stale-source chained hint — when the cache is degraded,
     // surface the connectivity check as the next concrete action.
     if aggregated_source.stale {
         doc.push_next(crate::verbs::output::NextStep::new(
@@ -277,7 +277,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
         }
     }
 
-    // F6 (v0.1.3): append a `compose_projects: N` DATA line so
+    // Append a `compose_projects: N` DATA line so
     // human operators see at a glance whether the host runs any
     // compose projects (and how many) without dropping back to
     // `inspect compose ls`. The line is only emitted when the
@@ -289,7 +289,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
 
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
-/// F1 helper: rewrite a service-less selector (`arte`, `prod-*`,
+/// Rewrite a service-less selector (`arte`, `prod-*`,
 /// `arte~staging`) into its all-services equivalent (`arte/*` etc.)
 /// so the status loop fans out over containers + systemd units
 /// instead of collapsing to a single host step.

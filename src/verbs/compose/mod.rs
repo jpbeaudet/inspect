@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): first-class verbs over Docker Compose projects.
+//! First-class verbs over Docker Compose projects.
 //!
 //! Replaces the v0.1.2 pattern where the operator dropped back to
 //! `inspect run <ns> -- 'cd <project_dir> && sudo docker compose …'`
@@ -53,7 +53,7 @@ mod pull;
 mod resolve;
 mod restart;
 mod up;
-// L8 (v0.1.3): exposed pub(crate) so the bundle's compose: step
+// Exposed pub(crate) so the bundle's compose: step
 // can reuse the command builders + audit-arg formatter.
 pub(crate) mod write_common;
 

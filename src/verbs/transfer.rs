@@ -1,19 +1,19 @@
-//! F15 (v0.1.3) — `inspect put` / `inspect get` / `inspect cp` file
+//! — `inspect put` / `inspect get` / `inspect cp` file
 //! transfer over the persistent ControlPath master.
 //!
 //! Replaces the v0.1.2 base64-in-argv `cp` implementation. The 4 MiB
 //! cap is gone: uploads stream the local file body via the runner's
-//! F9 stdin channel into a remote `cat > /tmp && mv /tmp /path`
+//! stdin channel into a remote `cat > /tmp && mv /tmp /path`
 //! atomic-write helper; downloads pull via `base64 <path>` for
 //! binary safety. Both directions ride the same multiplexed SSH
-//! master used by every other namespace verb, so they inherit F11
-//! revert capture, F12 env overlay, F13 stale-session auto-reauth,
+//! master used by every other namespace verb, so they inherit
+//! revert capture, env overlay, stale-session auto-reauth,
 //! and the standard audit trail.
 //!
 //! Container vs host filesystem is decided by selector form: a
 //! selector that names a service (`<ns>/<svc>:/path`) dispatches the
 //! atomic-write helper inside `docker exec -i <ctr> sh -c ...`; the
-//! host form (`<ns>/_:/path` or the F7.2 shorthand `<ns>:/path`)
+//! host form (`<ns>/_:/path` or the shorthand `<ns>:/path`)
 //! runs the helper directly.
 //!
 //! `inspect cp` is now a thin bidirectional dispatcher: it inspects
@@ -148,7 +148,7 @@ struct PushArgs {
 }
 
 fn push(args: PushArgs) -> Result<ExitKind> {
-    // 1. Read the local file. F15 has no fixed size cap (the v0.1.2
+    // 1. Read the local file. There is no fixed size cap (the v0.1.2
     // 4 MiB limit was an artifact of base64-in-argv); we stream
     // through stdin so the only practical limits are the operator's
     // patience and the remote disk.
@@ -217,7 +217,7 @@ fn push(args: PushArgs) -> Result<ExitKind> {
             }
         }
         if args.revert_preview {
-            // F11 (v0.1.3): show the captured inverse before applying.
+            // Show the captured inverse before applying.
             for (s, path) in &planned {
                 let label = label_for(s, path);
                 let exists = read_remote(&*runner, s, path).is_some();
@@ -285,7 +285,7 @@ fn push(args: PushArgs) -> Result<ExitKind> {
             None => format!("sh -c {}", shquote(&inner)),
         };
 
-        // 4c. Dispatch with stdin = local body. The runner's F9 stdin
+        // 4c. Dispatch with stdin = local body. The runner's stdin
         // path streams bytes off-thread so the local file body never
         // hits the command argv.
         let started = Instant::now();
@@ -297,8 +297,8 @@ fn push(args: PushArgs) -> Result<ExitKind> {
         )?;
         let dur = started.elapsed().as_millis() as u64;
 
-        // 4d. Audit entry. F15 fields (transfer_*) record the
-        // direction + sha + bytes; F11 fields (revert) record the
+        // 4d. Audit entry. fields (transfer_*) record the
+        // direction + sha + bytes; fields (revert) record the
         // inverse to restore on `inspect revert <id>`.
         let mut entry = AuditEntry::new("put", &label);
         entry.args = local_path.clone();
@@ -432,8 +432,7 @@ fn pull(remote_sel: String, local: String) -> Result<ExitKind> {
         std::fs::write(&local, &bytes)?;
     }
 
-    // F15 (v0.1.3): get is read-only on the remote, so the F11
-    // contract surfaces it as `revert.kind = unsupported` (the
+    // Get is read-only on the remote, so the     // contract surfaces it as `revert.kind = unsupported` (the
     // operator can revert by deleting the local file but the audit
     // schema does not capture local-side state). We still record
     // bytes + sha256 so a later `put` of the same content is

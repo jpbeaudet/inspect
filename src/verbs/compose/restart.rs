@@ -1,7 +1,7 @@
-//! F6 (v0.1.3): `inspect compose restart <ns>/<project>/<service>`
+//! `Inspect compose restart <ns>/<project>/<service>`
 //! — audited single-service restart inside a compose project.
 //!
-//! Audit shape: `verb=compose.restart`, with three F6-specific tag
+//! Audit shape: `verb=compose.restart`, with three compose-specific tag
 //! groups stamped into the entry's `args` field for `audit grep`
 //! discoverability:
 //!
@@ -184,7 +184,7 @@ pub fn run(args: ComposeRestartArgs) -> Result<ExitKind> {
             ns = parsed.namespace,
             p = project.name
         )));
-        // F6 audit-tag stamps. Bracketed-tag style matches the
+        // audit-tag stamps. Bracketed-tag style matches the
         // CLAUDE.md audit schema convention so `inspect audit grep`
         // can filter on `[project=…]` / `[service=…]` /
         // `[compose_file_hash=…]` substring matches.
@@ -219,7 +219,7 @@ pub fn run(args: ComposeRestartArgs) -> Result<ExitKind> {
         }
     }
 
-    // F8 — invalidate the runtime cache for the namespace so the
+    // Invalidate the runtime cache for the namespace so the
     // next `inspect status arte` reflects the post-restart state.
     crate::verbs::cache::invalidate(&parsed.namespace);
 

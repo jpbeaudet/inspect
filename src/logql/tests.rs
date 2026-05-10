@@ -248,7 +248,7 @@ fn diagnostic_for_missing_open_brace_suggests_selector_form() {
 }
 
 // ---------------------------------------------------------------------------
-// Audit P2 — alias-error wrapping (§1.7), zero-duration rejection (§1.4),
+// Audit pitfalls — alias-error wrapping (§1.7), zero-duration rejection (§1.4),
 // and negative-test matrix (§1.1).
 // ---------------------------------------------------------------------------
 

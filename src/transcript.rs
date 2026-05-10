@@ -1,4 +1,4 @@
-//! F18 (v0.1.3): per-namespace, per-day human-readable transcript of
+//! Per-namespace, per-day human-readable transcript of
 //! every verb invocation and its output.
 //!
 //! The transcript is a **complement** to the structured audit log
@@ -36,7 +36,7 @@
 //! to the in-memory transcript buffer.
 //!
 //! Subprocess output (e.g. `ssh ...`) flows through the streaming
-//! line-emit code paths (F16) which themselves call `emit_stdout`,
+//! line-emit code paths which themselves call `emit_stdout`,
 //! so the transcript captures interleaved subprocess output the same
 //! way the operator's terminal saw it.
 //!
@@ -46,7 +46,7 @@
 //! one shot at finalize time. One `fdatasync(2)` per verb
 //! invocation. A 10-minute streaming verb that produces 100 MB of
 //! output produces exactly 1 fsync against the transcript file —
-//! satisfies the F18 ≤ 70-fsyncs-per-10-min performance gate by
+//! satisfies the ≤ 70-fsyncs-per-10-min performance gate by
 //! orders of magnitude.
 //!
 //! Buffer growth is capped at [`MAX_BUFFER_BYTES`] (16 MiB);
@@ -59,20 +59,20 @@
 //!
 //! ## Redaction
 //!
-//! Every line tee'd to the transcript runs through the L7 four-masker
+//! Every line tee'd to the transcript runs through the four-masker
 //! pipeline before being appended, using the per-namespace policy
 //! resolved at `set_namespace` time. Per-namespace `redact = "off"`
 //! disables redaction in the transcript only (not in stdout — stdout
 //! redaction is governed by `--show-secrets`). This is a deliberate
 //! split: an operator handling a forensic dump may want raw output
 //! in the transcript file (file mode 0600 already restricts
-//! exposure) while the L7 default still applies to everything else.
+//! exposure) while the default still applies to everything else.
 //!
 //! ## Per-namespace disable
 //!
 //! Per-ns `[namespaces.<ns>.history].disabled = true` skips the
-//! transcript write entirely. The audit log is still emitted — F18
-//! and F11 are independent contracts.
+//! transcript write entirely. The audit log is still emitted — the
+//! transcript and audit-log are independent contracts.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -88,10 +88,10 @@ pub const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 /// Mirrors the spec's `[namespaces.<ns>.history].redact` value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RedactMode {
-    /// L7 default: PEM / header / URL / env masking applied.
+    /// PEM / header / URL / env masking applied.
     #[default]
     Normal,
-    /// Stricter: in addition to L7, mask any `<KEY>=<VALUE>` whose
+    /// Stricter: in addition to the default masking, mask any `<KEY>=<VALUE>` whose
     /// key looks secret-shaped, even if it doesn't match the
     /// per-masker patterns. Reserved for future tightening — for
     /// v0.1.3 this is identical to `Normal`.
@@ -139,12 +139,12 @@ pub struct TranscriptContext {
     /// is a no-op (audit still writes; transcript stays silent).
     pub disabled: bool,
     /// First audit entry id appended during this invocation. For
-    /// multi-audit verbs (e.g. F17 `--steps`) this is the parent
+    /// multi-audit verbs (e.g. `--steps`) this is the parent
     /// `run.steps` id, not the per-step ids — the cross-link from
     /// transcript → audit is to the umbrella record.
     pub audit_id: Option<String>,
     /// Buffered output lines, ordered by emission. Each line is
-    /// already L7-redacted (unless `redact_mode == Off`) and
+    /// already redacted (unless `redact_mode == Off`) and
     /// terminated by the writer with a `\n` at finalize time.
     pub buf: Vec<u8>,
     /// `true` once the buffer hit [`MAX_BUFFER_BYTES`] and was
@@ -182,7 +182,7 @@ impl TranscriptContext {
         }
         let masked = match mask_for_transcript(line, self.redact_mode) {
             // None = the line was inside an active PEM block and the
-            // L7 marker has already been emitted on the BEGIN line.
+            // marker has already been emitted on the BEGIN line.
             // Skip emission to the transcript too — the marker is the
             // post-redaction record, the body bytes are not.
             None => return,
@@ -203,7 +203,7 @@ fn mask_for_transcript(line: &str, mode: RedactMode) -> Option<String> {
     if mode == RedactMode::Off {
         return Some(line.to_string());
     }
-    // Reuse the L7 four-masker pipeline — same redaction semantics
+    // Reuse the four-masker pipeline — same redaction semantics
     // as stdout. Each tee'd line gets a fresh redactor: the PEM
     // masker's multi-line state can't meaningfully span tee'd lines
     // (we receive lines after the upstream printer has already laid
@@ -212,7 +212,7 @@ fn mask_for_transcript(line: &str, mode: RedactMode) -> Option<String> {
     // BEGIN-line tee will fire the marker, and an interior tee that
     // happens to land here standalone (without its BEGIN) is treated
     // as an unrecognized line and passes through. In practice the
-    // L7 stdout pipeline produces the marker line and suppresses
+    // stdout pipeline produces the marker line and suppresses
     // interiors before they ever reach us.
     let r = crate::redact::OutputRedactor::new(false, false);
     r.mask_line(line).map(|cow| cow.into_owned())
@@ -242,7 +242,7 @@ pub fn init(argv: &[String]) {
 /// block. Argv is shell-quoted to round-trip exotic operator inputs.
 /// Secret-shaped tokens (`--password=...`) are masked here too so
 /// the transcript never carries credentials passed on the command
-/// line — defense-in-depth on top of the L7 stdout pipeline.
+/// line — defense-in-depth on top of the stdout pipeline.
 fn redact_argv_line(argv: &[String]) -> String {
     let mut out = String::with_capacity(64 + argv.iter().map(|a| a.len()).sum::<usize>());
     out.push_str("$ ");
@@ -301,7 +301,7 @@ pub fn set_namespace(ns: &str) {
 
 /// Cross-link from transcript → audit. Called once per audit append.
 /// First-write-wins so the transcript's footer points at the
-/// **parent** entry on multi-audit verbs (F17 `--steps`).
+/// **parent** entry on multi-audit verbs (`--steps`).
 pub fn set_audit_id(id: &str) {
     let mut g = slot().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(ctx) = g.as_mut() {
@@ -311,7 +311,7 @@ pub fn set_audit_id(id: &str) {
     }
 }
 
-/// P8-C test helper (v0.1.3): observe the linked audit_id without
+/// Observe the linked audit_id without
 /// going through `finalize`. Lets unit tests verify the contract that
 /// `AuditStore::append_without_transcript_link` does NOT clobber the
 /// transcript footer. Cfg-gated to keep production builds free of
@@ -322,7 +322,7 @@ pub fn audit_id_for_test() -> Option<String> {
     g.as_ref().and_then(|ctx| ctx.audit_id.clone())
 }
 
-/// P8-C test helper (v0.1.3): force-reset the transcript context so
+/// Force-reset the transcript context so
 /// tests can run in isolation against the global slot. Pairs with
 /// `audit_id_for_test`. Cfg-gated.
 #[cfg(test)]
@@ -406,7 +406,7 @@ pub fn finalize(exit_code: i32) {
     let Some(ctx) = g.take() else {
         return;
     };
-    // F18 spec: "Every verb invocation **against a namespace**" gets
+    // "Every verb invocation **against a namespace**" gets
     // a transcript. Verbs that never resolve a namespace (`inspect
     // help`, `inspect list`, `inspect audit ls`, `inspect history
     // ...` etc.) do not produce transcript files — they're
@@ -451,17 +451,17 @@ fn write_block(ctx: &TranscriptContext, exit_code: i32) -> std::io::Result<()> {
         token = ctx.verb_token,
     );
     block.extend_from_slice(header.as_bytes());
-    // SMOKE 2026-05-09 fix: route the argv line through the same L7
+    // Smoke-driven fix: route the argv line through the same
     // four-masker the body lines use. Pre-fix, `redact_argv_line`
     // only masked `--password=`/`--token=` prefixes, so any embedded
     // credential in a shell-quoted arg leaked verbatim to the
-    // transcript file. Surfaced live during P6.F18.2: four `Bearer`
+    // transcript file. Surfaced live during release smoke: four `Bearer`
     // leaks in the form `$ inspect run arte -- 'echo
-    // "Authorization: Bearer abc..."'` (the L7 synthetic test typed
+    // "Authorization: Bearer abc..."'` (the synthetic test typed
     // a literal Bearer in argv to verify body redaction; body lines
     // were correctly redacted but the argv line itself was not).
-    // The F18 design says "every line tee'd to the transcript runs
-    // through the L7 four-masker pipeline before being appended" —
+    // The transcript design says "every line tee'd to the transcript runs
+    // through the four-masker pipeline before being appended" —
     // argv-line treatment was the gap.
     let masked_argv = match mask_for_transcript(&ctx.argv_line, ctx.redact_mode) {
         Some(s) => s,
@@ -563,13 +563,13 @@ mod tests {
     }
 
     /// SMOKE 2026-05-09 regression: the argv line in the transcript
-    /// file must run through the L7 four-masker, not just the
+    /// file must run through the four-masker, not just the
     /// `--password=`/`--token=` prefix masker. Pre-fix, an operator
     /// who typed a credential as part of a shell-quoted arg (e.g.
     /// `inspect run arte -- 'echo "Authorization: Bearer abc..."'`)
     /// would see the bearer leak verbatim into
     /// `~/.inspect/history/<ns>-<date>.log`. Surfaced live during
-    /// P6.F18.2 (4 Bearer leaks). Verified at the
+    /// release smoke (4 Bearer leaks). Verified at the
     /// `mask_for_transcript` chokepoint.
     #[test]
     fn p6_argv_line_runs_through_l7_four_masker() {

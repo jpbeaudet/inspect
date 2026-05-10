@@ -60,7 +60,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
 
     for (s, path) in &steps_with_path {
-        // F11 (v0.1.3): snapshot the file content before deletion so
+        // Snapshot the file content before deletion so
         // `inspect revert` can restore it via the snapshot store.
         // base64 -w0 keeps the wire payload single-line.
         let cat_inner = format!("base64 -w0 -- {}", shquote(path));

@@ -1,4 +1,4 @@
-//! F6 (v0.1.3) + L8 (v0.1.3): `inspect compose down
+//! `Inspect compose down
 //! <ns>/<project>[/<service>]` — tear down a compose project, or
 //! stop + remove a single service. Audited (`verb=compose.down`).
 //!
@@ -7,7 +7,7 @@
 //! `[volumes=true]` tag so post-mortem readers see at a glance that
 //! data may have been wiped.
 //!
-//! L8 (v0.1.3): when the selector includes a service portion, the
+//! When the selector includes a service portion, the
 //! shape changes to a compound command:
 //! `docker compose -p <p> stop <svc> && docker compose -p <p> rm -f
 //! <svc>`. This stops and removes only that service's container,
@@ -72,7 +72,7 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         }
     };
 
-    // L8 (v0.1.3): per-service narrowing has different semantics than
+    // Per-service narrowing has different semantics than
     // project-level down — `--volumes` and `--rmi` are project-scoped
     // operations and silently honoring them against one service would
     // either no-op or wipe data the operator did not intend to touch.
@@ -113,7 +113,7 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
         flags.push("--rmi");
         flags.push("local");
     }
-    // L8: per-service form is `stop <svc> && rm -f <svc>` rather than
+    // Per-service form is `stop <svc> && rm -f <svc>` rather than
     // `down <svc>` — `docker compose down <svc>` is not a documented
     // shape and behaves inconsistently across compose versions. The
     // explicit two-step is what every operator's runbook says.
@@ -266,7 +266,7 @@ pub fn run(args: ComposeDownArgs) -> Result<ExitKind> {
     )
     .with_meta("selector", args.selector.clone())
     .with_quiet(args.format.quiet);
-    // L8: per-service teardown points the operator at `compose ps` so
+    // Per-service teardown points the operator at `compose ps` so
     // they can confirm the rest of the project is still healthy.
     // Project-level teardown points at `compose ls` because the
     // project itself should now be gone.

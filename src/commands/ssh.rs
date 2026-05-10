@@ -1,6 +1,6 @@
 //! `inspect ssh ...` — SSH-related management subcommands.
 //!
-//! L4 (v0.1.3) introduces the first sub-verb: `inspect ssh add-key
+//! introduces the first sub-verb: `inspect ssh add-key
 //! <ns>`, the audited migration path off password-only legacy
 //! servers. Future SSH management verbs (key rotation, agent
 //! priming, etc.) plug into the same dispatch.
@@ -123,7 +123,7 @@ mod add_key {
             gen = generated,
             rew = config_rewritten,
         );
-        // F11 capture-site authoritative (v0.1.3 smoke fix): there
+        // There
         // is no clean automatic inverse for `ssh.add-key` — revoking
         // a deployed public key is an operator decision (it may have
         // already been used to bootstrap further automation). Use
@@ -131,7 +131,7 @@ mod add_key {
         // `inspect revert <add-key-audit-id>` refuses loudly with
         // the manual remote command in the preview, instead of
         // silently dispatching the forward CLI wrapper. Matches the
-        // F11 contract: "never silently no-op".
+        // "Never silently no-op".
         entry.revert = Some(Revert::unsupported(format!(
             "manual revoke required: ssh {ns} -- 'sed -i \"\\\\|{line}|d\" ~/.ssh/authorized_keys'",
             ns = args.namespace,

@@ -10,12 +10,12 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(args: LsArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted.
     let mut select = args.format.select_filter()?;
@@ -30,7 +30,7 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
         if args.all {
             ls_args.push_str(" -A");
         }
-        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // Docker exec must receive the
         // container_name, not the canonical service name. See
         // `Step::container()` doc; same fix shipped for cat/find/grep.
         let cmd = match step.container() {

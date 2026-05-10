@@ -50,13 +50,13 @@ fn load(path: &std::path::Path) -> Result<Bundle> {
     Ok(bundle)
 }
 
-/// L6 (v0.1.3): `inspect bundle status <bundle_id>` — read every
+/// `Inspect bundle status <bundle_id>` — read every
 /// audit entry tagged with this `bundle_id`, group by step, and
 /// render the per-branch outcome table. The audit log is the
 /// source of truth — a bundle that ran a year ago is queryable as
-/// long as its entries haven't aged out per L5 retention.
+/// long as its entries haven't aged out per retention.
 fn status(args: BundleStatusArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     let store = AuditStore::open()?;

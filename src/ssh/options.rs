@@ -66,7 +66,7 @@ impl SshTarget {
             args.push(OsString::from("-o"));
             args.push(OsString::from("IdentitiesOnly=yes"));
         }
-        // S1 (post-v0.1.3 security audit): force-disable agent and X11
+        // Force-disable agent and X11
         // forwarding so a stray `ForwardAgent yes` in the operator's
         // ssh_config cannot expose the local ssh-agent to the remote.
         args.push(OsString::from("-o"));

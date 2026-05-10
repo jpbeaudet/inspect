@@ -19,21 +19,21 @@ use crate::verbs::output::{NextStep, OutputDoc};
 pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
 
-    // P8-C fix (v0.1.3): stamp the F18 transcript with the resolved
+    // Stamp the transcript with the resolved
     // namespace immediately so every `inspect connect <ns>`
     // invocation lands in the per-ns transcript file, the same way
     // every namespace-resolving verb that flows through
     // `runtime::resolve_target` already does. Pre-fix, the connect
     // command never called `transcript::set_namespace`, so its
     // output never produced a fenced block — leaving an undocumented
-    // hole in the F18 contract that surfaced during the release
-    // smoke as P8-C ("history show --audit-id <connect_id>: 0
+    // hole in the contract that surfaced during the release
+    // smoke as `history show --audit-id <connect_id>: 0
     // blocks match"). The set call must be early enough to cover
     // the `--show` / `--set-env` / `--unset-env` early-return paths
     // too — those are still namespace-scoped invocations.
     crate::transcript::set_namespace(&args.namespace);
 
-    // F12 (v0.1.3): env-overlay management subcommands. These are
+    // Env-overlay management subcommands. These are
     // mutually exclusive with the connect-master path: `--show`,
     // `--set-path`, `--set-env`, `--unset-env` operate on
     // `~/.inspect/servers.toml` and never spawn ssh. `--detect-path`
@@ -52,7 +52,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     resolved.config.validate(&resolved.name)?;
     let target = SshTarget::from_resolved(&resolved)?;
 
-    // L4 (v0.1.3): password-auth namespaces get a 12h ControlPersist
+    // Password-auth namespaces get a 12h ControlPersist
     // default and a 24h cap on operator-supplied --ttl. Per-namespace
     // session_ttl slots between the env override and the auth-mode
     // default.
@@ -69,7 +69,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     } else {
         resolved.config.key_passphrase_env.as_deref()
     };
-    // L4 (v0.1.3): in password mode, --interactive forces the prompt
+    // In password mode, --interactive forces the prompt
     // path the same way it forces the passphrase prompt for keys.
     let password_env = if args.interactive {
         None
@@ -92,8 +92,8 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     )
     .with_context(|| format!("connect '{}'", resolved.name))?;
 
-    // P8-C fix (v0.1.3): emit a structured audit entry for the
-    // connect itself so the F18 transcript footer carries an
+    // Emit a structured audit entry for the
+    // connect itself so the transcript footer carries an
     // `audit_id=<id>` cross-link (matching every other
     // namespace-resolving verb). The entry is also independently
     // useful: it lets `audit grep verb=connect` enumerate every
@@ -124,7 +124,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
         let _ = store.append(&e);
     }
 
-    // F12 (v0.1.3): `--detect-path` needs the master open before it
+    // `--detect-path` needs the master open before it
     // can ssh. Run it after start_master succeeds; on any failure
     // (probe error, operator declined) we still report the connect
     // as successful and the overlay as unchanged.
@@ -142,14 +142,14 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        // P0.6 sweep (v0.1.3): emit the L7 standard envelope so the
+        // Emit the standard envelope so the
         // connect-cluster matches every other JSON-emitting verb's
         // shape (`{schema_version, summary, data, next, meta}`).
         // Pre-fix this site (along with `connections`, `disconnect`,
         // `disconnect-all`) emitted a flat
         // `{schema_version, namespace, auth, socket, ttl, ttl_source}`
-        // shape — an L7-discipline gap surfaced during the SMOKE
-        // P1.5 live run on 2026-05-09.
+        // shape — an envelope-discipline gap surfaced during the
+        // smoke live run.
         let socket_value: Value = outcome
             .socket
             .as_ref()
@@ -199,7 +199,7 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     Ok(ExitKind::Success)
 }
 
-/// F12 (v0.1.3): print the current env overlay for `<ns>` and exit.
+/// Print the current env overlay for `<ns>` and exit.
 /// The configured map is read from `~/.inspect/servers.toml` (the
 /// authoritative on-disk source — we deliberately do NOT include
 /// env-var overrides, because the spec scopes overlay management to
@@ -212,7 +212,7 @@ fn run_show_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
     let cfg = servers.namespaces.get(namespace);
     let overlay: BTreeMap<String, String> = cfg.and_then(|c| c.env.clone()).unwrap_or_default();
     if args.format.is_json() {
-        // P0.6 sweep (v0.1.3): L7 envelope. Pre-fix this site emitted
+        // envelope. Pre-fix this site emitted
         // a flat `{schema_version, namespace, env_overlay}` shape.
         let summary = format!(
             "env overlay for '{}' ({} entr{})",
@@ -259,7 +259,7 @@ fn run_show_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
     Ok(ExitKind::Success)
 }
 
-/// F12 (v0.1.3): apply `--set-path` / `--set-env` / `--unset-env`
+/// Apply `--set-path` / `--set-env` / `--unset-env`
 /// against `~/.inspect/servers.toml` and persist atomically. The
 /// namespace must already exist (we never create it implicitly here —
 /// use `inspect add` for that, since it requires `host`/`user`).
@@ -324,7 +324,6 @@ fn run_mutate_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        // P0.6 sweep (v0.1.3): L7 envelope.
         let summary_bits = {
             let mut bits: Vec<String> = Vec::new();
             if !to_set.is_empty() {
@@ -379,7 +378,7 @@ fn run_mutate_overlay(args: &ConnectArgs) -> anyhow::Result<ExitKind> {
     Ok(ExitKind::Success)
 }
 
-/// F12 (v0.1.3): probe the remote login PATH vs. the non-login PATH
+/// Probe the remote login PATH vs. the non-login PATH
 /// and, when they differ, prompt the operator (tty only) to pin the
 /// merged value into `[namespaces.<ns>.env].PATH`. Non-tty invocation
 /// auto-declines: never write config without explicit confirmation.
@@ -478,7 +477,7 @@ fn is_local_stdin_tty() -> bool {
     }
 }
 
-/// F13 (v0.1.3): re-establish the persistent master socket for an
+/// Re-establish the persistent master socket for an
 /// already-resolved namespace. Called by the dispatch wrapper when a
 /// transport-stale failure is detected. Honors the same auth path as
 /// interactive `inspect connect <ns>` — passphrase from
@@ -512,14 +511,14 @@ pub fn reauth_namespace(namespace: &str) -> anyhow::Result<()> {
             skip_existing_mux_check: false,
             password_auth,
             password_env,
-            // F13 reauth never saves: the original `inspect connect`
+            // The original `inspect connect`
             // already chose whether to save (or not), and silently
             // re-saving on every reauth would be surprising.
             save_to_keychain: false,
         },
     )
     .map(|outcome| {
-        // F13 (v0.1.3, smoke-driven): operator notice on successful
+        // Operator notice on successful
         // reauth. Without this, the only feedback after the prompt
         // is the verb's normal output — easy to miss that the
         // session was actually re-established. The TTL echoes the

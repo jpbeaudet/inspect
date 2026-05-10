@@ -20,12 +20,12 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // F19 (v0.1.3): validate the format/--select combination up front
+    // Validate the format/--select combination up front
     // so a `--select` without `--json` lands the canonical exit-2
     // usage error before we touch the network or the LogQL parser.
     args.format.resolve()?;
 
-    // L3: the resolver delegates to `alias::expand_recursive` so a
+    // The resolver delegates to `alias::expand_recursive` so a
     // parameterized `@svc-logs(svc=pulse)` call site, including
     // multi-level chains, expands once before the LogQL parser sees
     // the result.
@@ -44,7 +44,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                 "next": [],
                 "meta": {}
             });
-            // F19 (v0.1.3): a search-parse error is itself an envelope
+            // A search-parse error is itself an envelope
             // emission; route through `print_json_value` so `--select`
             // applies even on the error path. Filter parse-errors here
             // bubble as exit 2 (handled by main); runtime errors and
@@ -112,7 +112,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     match result {
         ExecOutput::Log(r) => {
             if args.format.is_json() {
-                // F19 (v0.1.3): `--select` can swallow every record into
+                // `--select` can swallow every record into
                 // an empty result set; the helper returns `NoMatches`
                 // for that case, which is the right exit code regardless
                 // of whether the underlying record list was empty.
@@ -159,7 +159,7 @@ fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
         truncate(&args.query, 80)
     );
     println!("DATA:");
-    // L7 (v0.1.3): redact lines before printing. PEM tracking is
+    // Redact lines before printing. PEM tracking is
     // per-search-invocation; records are k-way merged across servers
     // by the upstream pipeline, so a multi-line PEM body that crosses
     // server boundaries is rare — but if a single server's records
@@ -208,7 +208,7 @@ fn default_record_limit() -> usize {
 }
 
 fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) -> Result<ExitKind> {
-    // L7 (v0.1.3): redact lines on the JSON path too, so consumers
+    // Redact lines on the JSON path too, so consumers
     // (LLM agents, jq pipelines, log shippers) never see verbatim
     // secrets. PEM-block lines are dropped from the record stream
     // entirely (the BEGIN-line marker stays).
@@ -218,7 +218,7 @@ fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) -> Result<ExitKind
         .filter_map(|r| {
             // `None` outer Option means "drop record" (PEM-interior
             // line — emitting an empty `line: ""` would silently
-            // discard the L7 contract). `Some(None)` means the
+            // discard the contract). `Some(None)` means the
             // record had no line to begin with — emit it as-is.
             let masked_line: Option<Option<String>> = match &r.line {
                 None => Some(None),

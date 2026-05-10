@@ -224,12 +224,12 @@ mod tests {
     fn index_size_under_160kb() {
         // Cap raise history (only ever raised, never trimmed):
         //   50 KB → 64 KB in v0.1.2 (bundle + watch topic prose)
-        //   64 KB → 80 KB in v0.1.3 (L7 redaction model)
-        //   80 KB → 96 KB in v0.1.3 (F18 transcript model)
-        //   96 KB → 112 KB in v0.1.3 (L4 ssh.md password-auth +
+        //   64 KB → 80 KB in v0.1.3 (redaction model)
+        //   80 KB → 96 KB in v0.1.3 (transcript model)
+        //   96 KB → 112 KB in v0.1.3 (ssh.md password-auth +
         //                              add-key walkthrough)
-        //  112 KB → 128 KB in v0.1.3 (L9 UDP probe coverage in
-        //                              discovery.md, L10 drift
+        //  112 KB → 128 KB in v0.1.3 (UDP probe coverage in
+        //                              discovery.md, drift
         //                              port_changes contract +
         //                              JSON envelope example)
         //  128 KB → 144 KB in v0.1.3 release-smoke (LONG_ADD prose
@@ -240,7 +240,7 @@ mod tests {
         //                              surfaced live; per CLAUDE.md
         //                              "Help-surface discipline" the
         //                              cap is raised, not trimmed)
-        //  144 KB → 160 KB in v0.1.3 F19 (new `select` editorial
+        //  144 KB → 160 KB in v0.1.3 (new `select` editorial
         //                              topic + per-verb LONG_*
         //                              SELECTING blocks pushed the
         //                              index past 151 KB; cap raised,

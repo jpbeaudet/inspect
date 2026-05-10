@@ -72,7 +72,7 @@ pub fn run(args: ChmodArgs) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
 
     for (s, path) in &planned {
-        // F11 (v0.1.3): capture prior mode so the inverse is exact.
+        // Capture prior mode so the inverse is exact.
         let stat_inner = format!("stat -c %a -- {}", shquote(path));
         let stat_cmd = match s.container() {
             Some(container) => format!(
@@ -105,7 +105,7 @@ pub fn run(args: ChmodArgs) -> Result<ExitKind> {
         );
         let revert = match prev_mode.as_deref() {
             Some(m) => {
-                // F11 capture-site authoritative: payload is the
+                // Payload is the
                 // literal command the runner will dispatch, wrapped
                 // in `docker exec` when the original verb dispatched
                 // through a container. Mirrors the apply-time wrap

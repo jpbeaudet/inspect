@@ -7,13 +7,13 @@
 //!   - **logql-style**: a `{server=...}` LogQL selector. Cannot be used in
 //!     verb commands; produces a friendly error pointing the user at
 //!     `inspect search`.
-//! - L3 (v0.1.3): aliases gain `$param` placeholders. Call sites are
+//! - : aliases gain `$param` placeholders. Call sites are
 //!   `@name(k=v,k=v)`; bare `@name` continues to work for parameterless
 //!   aliases. Aliases may chain other aliases (depth cap 5; cycles
 //!   rejected at `alias add` time via DFS over the alias graph).
 //!   `$$` in a body is a literal `$` escape.
 //!
-//! On-disk shape grew an optional `parameters: []` cache in L3. Pre-L3
+//! On-disk shape grew an optional `parameters: []` cache in v0.1.1. Earlier
 //! `aliases.toml` files (no `parameters` field) deserialize unchanged.
 
 use std::collections::BTreeMap;
@@ -47,10 +47,10 @@ pub struct AliasEntry {
     /// Optional human description shown by `alias list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// L3 (v0.1.3): cached list of `$param` placeholder names extracted
+    /// Cached list of `$param` placeholder names extracted
     /// from `selector` at `alias add` time, in first-occurrence order.
-    /// `None` means "pre-L3 entry, no parameters" (deserializes from
-    /// older files unchanged); `Some(empty)` means "L3-aware entry that
+    /// `None` means "earlier entry, no parameters" (deserializes from
+    /// older files unchanged); `Some(empty)` means "parameter-aware entry that
     /// happens to take no params". Both forms are operationally
     /// equivalent for parameterless aliases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +100,7 @@ pub enum AliasError {
         source: SelectorParseError,
     },
 
-    /// L3: a `@name(k=v,...)` call site is missing a required parameter.
+    /// A `@name(k=v,...)` call site is missing a required parameter.
     /// `all_required` is rendered into the error message so the operator
     /// can see every param the alias declares without a separate lookup.
     #[error(
@@ -114,7 +114,7 @@ pub enum AliasError {
         example: String,
     },
 
-    /// L3: a `@name(k=v,...)` call site supplied a param the alias body
+    /// A `@name(k=v,...)` call site supplied a param the alias body
     /// does not declare.
     #[error(
         "alias '@{name}' got unknown param '{extra}' \
@@ -127,13 +127,13 @@ pub enum AliasError {
         declared: String,
     },
 
-    /// L3: `add()` refuses to write an alias whose body would form a
+    /// `Add()` refuses to write an alias whose body would form a
     /// cycle in the alias graph. The chain is printed `a -> b -> a` so
     /// the operator sees exactly which existing alias closes the cycle.
     #[error("circular alias reference: {chain}; refusing to write")]
     CircularReference { chain: String },
 
-    /// L3: runtime guard for `MAX_CHAIN_DEPTH`. Definitional cycles are
+    /// Runtime guard for `MAX_CHAIN_DEPTH`. Definitional cycles are
     /// caught by `add()`; this fires when a hand-edited `aliases.toml`
     /// or a chain longer than the cap is invoked.
     #[error(
@@ -142,7 +142,7 @@ pub enum AliasError {
     )]
     ChainDepthExceeded { chain: String },
 
-    /// L3: a call-site `@name(...)` is malformed.
+    /// A call-site `@name(...)` is malformed.
     #[error("alias call site is malformed: {hint}")]
     BadCallSyntax { hint: String },
 }
@@ -233,7 +233,7 @@ pub fn save(file: &AliasFile) -> Result<(), AliasError> {
 
 /// Add or replace an alias.
 ///
-/// L3: the body may contain `$<ident>` placeholders (extracted into the
+/// The body may contain `$<ident>` placeholders (extracted into the
 /// cached `parameters` list) and `@other(...)` references to other
 /// aliases. Definitional cycles are caught here via DFS over the
 /// existing alias graph; the runtime depth-cap (`MAX_CHAIN_DEPTH`) is a
@@ -326,7 +326,7 @@ pub fn list() -> Result<Vec<(String, AliasEntry)>, AliasError> {
 }
 
 // ===========================================================================
-// L3: parameter extraction + substitution + call-site parsing.
+// Parameter extraction + substitution + call-site parsing.
 // ===========================================================================
 
 /// One placeholder occurrence parsed out of an alias body.
@@ -721,7 +721,7 @@ fn unescape_quoted(s: &str) -> String {
 }
 
 // ===========================================================================
-// L3: chain expansion.
+// Chain expansion.
 // ===========================================================================
 
 /// Recursively expand the alias `name` with the given `params`.
@@ -803,7 +803,7 @@ fn expand_inner_aliases(
 }
 
 // ===========================================================================
-// L3: cycle detection at `add()` time.
+// Cycle detection at `add()` time.
 // ===========================================================================
 
 /// Return `true` if `body` contains an `@<ident>[(...)]` reference
@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(e.selector, "arte/atlas");
     }
 
-    // L3 unit tests --------------------------------------------------------
+    // Parameterized-alias unit tests --------------------------------------
 
     #[test]
     fn l3_extract_parameters_basic() {

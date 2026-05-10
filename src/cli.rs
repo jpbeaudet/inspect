@@ -61,7 +61,7 @@ const SEE_ALSO_SSH: &str = "See also: inspect help ssh, inspect help discovery";
 const SEE_ALSO_ALIAS: &str =
     "See also: inspect help aliases, inspect help selectors, inspect help search";
 const SEE_ALSO_HELP: &str = "See also: inspect help quickstart, inspect help examples";
-// F6 (v0.1.3): the compose verb cluster cross-links into the safety
+// The compose verb cluster cross-links into the safety
 // + write topics for the audited write sub-verbs (`restart`, `up`,
 // `down`, `pull`, `build`), the formats topic for the per-sub
 // `--json` schemas, and the dedicated `compose` editorial topic for
@@ -1479,10 +1479,10 @@ pub enum Command {
     /// Close all persistent connections.
     #[command(long_about = LONG_DISCONNECT_ALL)]
     DisconnectAll(DisconnectAllArgs),
-    /// L4 (v0.1.3): SSH-related management subcommands (`add-key`).
+    /// SSH-related management subcommands (`add-key`).
     #[command(long_about = LONG_SSH)]
     Ssh(SshArgs),
-    /// L2 (v0.1.3): OS keychain management (opt-in, cross-session).
+    /// OS keychain management (opt-in, cross-session).
     #[command(long_about = LONG_KEYCHAIN)]
     Keychain(KeychainArgs),
 
@@ -1565,10 +1565,10 @@ pub enum Command {
     /// Copy files between local and remote.
     #[command(long_about = LONG_CP)]
     Cp(CpArgs),
-    /// Upload a local file to a namespace target (F15, v0.1.3).
+    /// Upload a local file to a namespace target.
     #[command(long_about = LONG_PUT)]
     Put(PutArgs),
-    /// Download a remote file from a namespace target (F15, v0.1.3).
+    /// Download a remote file from a namespace target.
     #[command(long_about = LONG_GET)]
     Get(GetArgs),
     /// Sed-style content edit.
@@ -1618,12 +1618,12 @@ pub enum Command {
     #[command(long_about = LONG_REVERT)]
     Revert(RevertArgs),
 
-    // ---- v0.1.3 F8 cache management ------------------------------------------
+    // ---- v0.1.3 cache management ------------------------------------------
     /// Inspect or invalidate the runtime cache.
     #[command(long_about = LONG_CACHE)]
     Cache(CacheArgs),
 
-    // ---- v0.1.3 F18 session transcript ---------------------------------------
+    // ---- session transcript --------------------------------------------------
     /// Browse and rotate the per-namespace per-day transcript files.
     #[command(long_about = LONG_HISTORY)]
     History(HistoryArgs),
@@ -1638,8 +1638,8 @@ pub enum Command {
     #[command(long_about = LONG_BUNDLE)]
     Bundle(BundleArgs),
 
-    // ---- v0.1.3 F6 compose ---------------------------------------------------
-    /// First-class verbs over Docker Compose projects (F6, v0.1.3).
+    // ---- v0.1.3 compose ---------------------------------------------------
+    /// First-class verbs over Docker Compose projects.
     #[command(long_about = LONG_COMPOSE)]
     Compose(ComposeArgs),
 
@@ -1685,7 +1685,7 @@ pub struct HelpArgs {
     #[arg(long)]
     pub verbose: bool,
 
-    /// F19 (v0.1.3): jq-language filter applied to the JSON help
+    /// Jq-language filter applied to the JSON help
     /// envelope before emission. Requires `--json`. Lets agents do
     /// `inspect help all --json --select '.topics[].id'` for topic
     /// discovery without parsing the full document. See
@@ -1693,12 +1693,12 @@ pub struct HelpArgs {
     #[arg(long, value_name = "FILTER", requires = "json")]
     pub select: Option<String>,
 
-    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape).
+    /// Emit string yields unquoted (the `jq -r` shape).
     /// Requires `--select`.
     #[arg(long, requires = "select")]
     pub select_raw: bool,
 
-    /// F19 (v0.1.3): collect every NDJSON value into a single array
+    /// Collect every NDJSON value into a single array
     /// before evaluating the filter (the `jq -s` shape). Requires
     /// `--select`. (Help renders as a single envelope; slurp is a no-op
     /// here but accepted for surface-uniformity with the streaming
@@ -1892,7 +1892,7 @@ pub struct FleetArgs {
     #[arg(long, value_name = "N")]
     pub canary: Option<usize>,
 
-    /// F19 (v0.1.3): jq-language filter applied to the aggregate
+    /// Jq-language filter applied to the aggregate
     /// JSON envelope before emission. Requires `--json`. Lets agents
     /// do `inspect fleet status --ns '@prod' --json --select
     /// '.namespaces[] | select(.unhealthy)'` to drill into the rollup
@@ -1901,12 +1901,12 @@ pub struct FleetArgs {
     #[arg(long, value_name = "FILTER", requires = "json")]
     pub select: Option<String>,
 
-    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape).
+    /// Emit string yields unquoted (the `jq -r` shape).
     /// Requires `--select`.
     #[arg(long, requires = "select")]
     pub select_raw: bool,
 
-    /// F19 (v0.1.3): collect every NDJSON value into a single array
+    /// Collect every NDJSON value into a single array
     /// before evaluating the filter (the `jq -s` shape). Requires
     /// `--select`. (Fleet renders as a single envelope; slurp is a
     /// no-op here but accepted for surface-uniformity.)
@@ -1934,19 +1934,19 @@ EXAMPLES\n  \
 pub struct WhyArgs {
     /// Selector resolving to one or more services to diagnose.
     pub selector: String,
-    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// Bypass the runtime cache and re-fetch live state
     /// before walking the dependency graph. Removes the post-restart
     /// "reads as still unhealthy" symptom. `--live` is an alias.
     #[arg(long, alias = "live")]
     pub refresh: bool,
-    /// F4 (v0.1.3): suppress the diagnostic bundle (recent logs +
+    /// Suppress the diagnostic bundle (recent logs +
     /// effective Cmd/Entrypoint + port reality) attached to
     /// unhealthy / down / restart-looping containers. Restores the
     /// v0.1.2 terse output for agents that already drive the deeper
     /// queries themselves.
     #[arg(long)]
     pub no_bundle: bool,
-    /// F4 (v0.1.3): tail size for the recent-logs section of the
+    /// Tail size for the recent-logs section of the
     /// diagnostic bundle. Default 20, hard-capped at 200 (anything
     /// above is clamped with a one-line stderr notice — protects
     /// the operator from accidentally pulling 50k lines through
@@ -2027,7 +2027,7 @@ pub struct SearchArgs {
     /// Stream new records as they arrive (log queries only).
     #[arg(long, short = 'f')]
     pub follow: bool,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// Print secret-shaped values verbatim. By default
     /// `inspect search` runs every emitted log line through the
     /// redaction pipeline (`pem` / `header` / `url` / `env` maskers).
     /// Use this only when the captured output is provably safe (test
@@ -2065,7 +2065,7 @@ pub struct ConnectArgs {
     /// Disable interactive prompts entirely (CI mode).
     #[arg(long)]
     pub non_interactive: bool,
-    /// F12 (v0.1.3): print the namespace's configured env overlay
+    /// Print the namespace's configured env overlay
     /// (the `[namespaces.<ns>.env]` block in `~/.inspect/servers.toml`)
     /// and exit without opening a session. Mutually exclusive with the
     /// other env-mutation flags.
@@ -2074,25 +2074,25 @@ pub struct ConnectArgs {
         conflicts_with_all = ["set_env", "unset_env", "set_path", "detect_path"],
     )]
     pub show: bool,
-    /// F12 (v0.1.3): set `PATH` for this namespace (shorthand for
+    /// Set `PATH` for this namespace (shorthand for
     /// `--set-env PATH=<value>`). Persists immediately.
     #[arg(long, value_name = "PATH")]
     pub set_path: Option<String>,
-    /// F12 (v0.1.3): set an env-overlay entry for this namespace
+    /// Set an env-overlay entry for this namespace
     /// (repeatable, `--set-env KEY=VALUE`). Persists immediately.
     #[arg(long, value_name = "KEY=VALUE")]
     pub set_env: Vec<String>,
-    /// F12 (v0.1.3): remove an env-overlay entry for this namespace
+    /// Remove an env-overlay entry for this namespace
     /// (repeatable, `--unset-env KEY`). Persists immediately.
     #[arg(long, value_name = "KEY")]
     pub unset_env: Vec<String>,
-    /// F12 (v0.1.3): probe the remote login PATH and, if it differs
+    /// Probe the remote login PATH and, if it differs
     /// from the non-login PATH, prompt to pin the diff into the env
     /// overlay. Non-tty invocation auto-declines (never writes config
     /// without confirmation).
     #[arg(long)]
     pub detect_path: bool,
-    /// L2 (v0.1.3): save the prompted credential to the OS keychain
+    /// Save the prompted credential to the OS keychain
     /// after a successful master start so subsequent connects in
     /// fresh shell sessions don't re-prompt. Idempotent re-saves
     /// are silent. The flag works for both auth modes — for
@@ -2155,7 +2155,7 @@ pub struct DisconnectAllArgs {
     pub format: crate::format::FormatArgs,
 }
 
-// L4 (v0.1.3): inspect ssh ... — SSH management subcommands.
+// Inspect ssh ... — SSH management subcommands.
 #[derive(Debug, Args)]
 #[command(after_help = SEE_ALSO_SSH)]
 pub struct SshArgs {
@@ -2259,7 +2259,7 @@ EXIT CODES
   1   no matching namespace / install verification failed
   2   argument/usage error (e.g. `--key` path does not exist)";
 
-// L2 (v0.1.3): inspect keychain ... — OS keychain management.
+// Inspect keychain ... — OS keychain management.
 #[derive(Debug, Args)]
 #[command(after_help = SEE_ALSO_SSH)]
 pub struct KeychainArgs {
@@ -2420,7 +2420,7 @@ pub struct SetupArgs {
     /// without re-discovering.
     #[arg(long, conflicts_with_all = ["force", "skip_systemd", "skip_host_listeners"])]
     pub check_drift: bool,
-    /// P13: re-probe only the services flagged `discovery_incomplete`
+    /// Re-probe only the services flagged `discovery_incomplete`
     /// in the cached profile (i.e. those whose `docker inspect` timed
     /// out on the previous run). Cheaper than `--force` when only one
     /// or two containers are wedged.
@@ -2476,7 +2476,7 @@ pub struct AliasAddArgs {
     pub name: String,
     /// Selector text to save (verb-style or LogQL `{...}` form). May
     /// contain `$<ident>` placeholders bound at call time via
-    /// `@name(key=val,key=val)` (L3, v0.1.3). May reference other
+    /// `@name(key=val,key=val)`. May reference other
     /// aliases (chain depth cap 5; cycles rejected here at definition
     /// time). Use `$$` for a literal `$`.
     pub selector: String,
@@ -2560,16 +2560,16 @@ EXAMPLES\n  \
 pub struct PortsArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
-    /// F7.3 (v0.1.3): server-side filter to a single port. The row's
+    /// Server-side filter to a single port. The row's
     /// `:<n>` token in the host- or container-port axis must equal
     /// `<n>` exactly. Mutually exclusive with `--port-range`.
     #[arg(long, conflicts_with = "port_range")]
     pub port: Option<u16>,
-    /// F7.3 (v0.1.3): server-side filter to an inclusive port range
+    /// Server-side filter to an inclusive port range
     /// `<lo>-<hi>`. Mutually exclusive with `--port`.
     #[arg(long, value_name = "LO-HI")]
     pub port_range: Option<String>,
-    /// L9 (v0.1.3): protocol filter. Default `all` runs both TCP
+    /// Protocol filter. Default `all` runs both TCP
     /// (`ss -tlnp` / `netstat -tlnp`) and UDP (`ss -ulnp` /
     /// `netstat -ulnp`) probes; `tcp` or `udp` narrows to one
     /// side. Each emitted row carries an explicit `proto` so JSON
@@ -2593,7 +2593,7 @@ EXAMPLES\n  \
 pub struct StatusArgs {
     /// Selector (server, server/service, etc.).
     pub selector: String,
-    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// Bypass the runtime cache and re-fetch live state
     /// before answering. Use after a mutation to confirm the change
     /// took effect. `--live` is an alias.
     #[arg(long, alias = "live")]
@@ -2614,7 +2614,7 @@ EXAMPLES\n  \
 )]
 pub struct HealthArgs {
     pub selector: String,
-    /// F8 (v0.1.3): bypass the runtime cache and re-fetch live state
+    /// Bypass the runtime cache and re-fetch live state
     /// before probing. Use after a mutation to confirm health
     /// recovered. `--live` is an alias.
     #[arg(long, alias = "live")]
@@ -2692,7 +2692,7 @@ pub struct LogsArgs {
     /// Repeat to OR multiple patterns. Applied after `--match`.
     #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
     pub exclude_re: Vec<String>,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// Print secret-shaped values verbatim. By default
     /// `inspect logs` runs every line through the redaction pipeline
     /// (`pem` / `header` / `url` / `env` maskers).
     #[arg(long)]
@@ -2777,7 +2777,7 @@ pub struct GrepArgs {
     #[arg(long = "exclude", short = 'G', value_name = "REGEX")]
     pub exclude_re: Vec<String>,
 
-    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// Print secret-shaped values verbatim. By default
     /// `inspect grep` runs every emitted line through the redaction
     /// pipeline (`pem` / `header` / `url` / `env` maskers).
     #[arg(long)]
@@ -2800,7 +2800,7 @@ EXAMPLES\n  \
 pub struct CatArgs {
     /// Selector with `:path` (e.g. `arte/atlas:/etc/atlas.conf`).
     pub target: String,
-    /// F10.2 (v0.1.3): inclusive 1-based line range to print, e.g.
+    /// Inclusive 1-based line range to print, e.g.
     /// `--lines 5-10`. Mutually exclusive with `--start`/`--end`.
     /// Alias `--range`.
     #[arg(
@@ -2810,16 +2810,16 @@ pub struct CatArgs {
         conflicts_with_all = ["start", "end"],
     )]
     pub lines: Option<String>,
-    /// F10.2 (v0.1.3): inclusive 1-based start line. Pair with
+    /// Inclusive 1-based start line. Pair with
     /// `--end` for a range, or omit `--end` to print from `--start`
     /// to EOF. Mutually exclusive with `--lines`.
     #[arg(long = "start", value_name = "N")]
     pub start: Option<usize>,
-    /// F10.2 (v0.1.3): inclusive 1-based end line. Pair with
+    /// Inclusive 1-based end line. Pair with
     /// `--start`. Mutually exclusive with `--lines`.
     #[arg(long = "end", value_name = "N")]
     pub end: Option<usize>,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. By default
+    /// Print secret-shaped values verbatim. By default
     /// `inspect cat` runs the file content through the redaction
     /// pipeline (`pem` / `header` / `url` / `env` maskers) — most
     /// notably collapsing PEM private-key blocks to a single
@@ -2868,7 +2868,7 @@ pub struct FindArgs {
     pub target: String,
     /// Optional name pattern (find -name).
     pub pattern: Option<String>,
-    /// L7 (v0.1.3): print emitted paths verbatim. `find` emits file
+    /// Print emitted paths verbatim. `find` emits file
     /// paths only — secret patterns rarely fire — but the flag is
     /// exposed for symmetry with the other read verbs.
     #[arg(long)]
@@ -2906,7 +2906,7 @@ pub struct LifecycleArgs {
     /// Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying. Lets
+    /// Print the captured inverse before applying. Lets
     /// the operator (or a driving agent) see exactly what
     /// `inspect revert <new-id>` will undo, before the mutation runs.
     #[arg(long)]
@@ -2939,7 +2939,7 @@ pub struct ExecArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// Print secret-shaped values verbatim. Off by
     /// default so log captures and screenshots are safe — every
     /// emitted line otherwise runs through the four-masker pipeline
     /// (`pem` / `header` / `url` / `env` maskers): PEM private-key
@@ -2947,7 +2947,7 @@ pub struct ExecArgs {
     /// `Cookie` / `X-API-Key` / `Set-Cookie` header values become
     /// `<redacted>`, password portions of `scheme://user:pass@host`
     /// URLs are masked to `user:****@host`, and `KEY=VALUE` env
-    /// pairs with secret-shaped keys (P4 suffix list) become
+    /// pairs with secret-shaped keys (configured suffix list) become
     /// `head4****tail2`. On `exec`, `--show-secrets` stamps
     /// `[secrets_exposed=true]` into the audit args.
     #[arg(long)]
@@ -2966,30 +2966,30 @@ pub struct ExecArgs {
     /// Disable the live heartbeat. Streaming output is unaffected.
     #[arg(long)]
     pub no_heartbeat: bool,
-    /// F11 (v0.1.3): acknowledge that this exec has no captured
+    /// Acknowledge that this exec has no captured
     /// inverse. Required with `--apply`; without it, `inspect exec`
     /// refuses free-form mutations.
     #[arg(long)]
     pub no_revert: bool,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     /// For exec, this is always `revert.kind = unsupported`.
     #[arg(long)]
     pub revert_preview: bool,
-    /// F12 (v0.1.3): per-invocation env-overlay entry, repeatable.
+    /// Per-invocation env-overlay entry, repeatable.
     /// Merges on top of the namespace overlay (operator wins on
     /// collision).
     #[arg(long, value_name = "KEY=VALUE")]
     pub env: Vec<String>,
-    /// F12 (v0.1.3): drop the namespace's env overlay for this
+    /// Drop the namespace's env overlay for this
     /// invocation only.
     #[arg(long)]
     pub env_clear: bool,
-    /// F12 (v0.1.3): print the rendered remote command line (including
+    /// Print the rendered remote command line (including
     /// the `env KEY="VAL" -- ` overlay prefix and any `docker exec`
     /// wrapping) to stderr before dispatch.
     #[arg(long)]
     pub debug: bool,
-    /// F13 (v0.1.3): disable stale-session auto-reauth for this
+    /// Disable stale-session auto-reauth for this
     /// invocation. When set, a transport-stale dispatch failure
     /// surfaces as exit 12 with the chained `ssh_error: stale
     /// connection` SUMMARY hint instead of being transparently
@@ -3003,7 +3003,7 @@ pub struct ExecArgs {
 #[command(
     long_about = LONG_RUN,
     after_help = SEE_ALSO_READ,
-    // F17 (v0.1.3): both --steps and --steps-yaml are valid
+    // Both --steps and --steps-yaml are valid
     // manifest sources for the multi-step runner; --revert-on-failure
     // requires either one.
     group(ArgGroup::new("manifest_source").args(["steps", "steps_yaml"])),
@@ -3017,7 +3017,7 @@ pub struct RunArgs {
     /// Override the per-target timeout (seconds).
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// Print secret-shaped values verbatim. Off by
     /// default so log captures and screenshots are safe — every
     /// emitted line otherwise runs through the four-masker pipeline
     /// (`pem` / `header` / `url` / `env` maskers): PEM private-key
@@ -3025,7 +3025,7 @@ pub struct RunArgs {
     /// `Cookie` / `X-API-Key` / `Set-Cookie` header values become
     /// `<redacted>`, password portions of `scheme://user:pass@host`
     /// URLs are masked to `user:****@host`, and `KEY=VALUE` env
-    /// pairs with secret-shaped keys (P4 suffix list) become
+    /// pairs with secret-shaped keys (configured suffix list) become
     /// `head4****tail2`. On `exec`, `--show-secrets` stamps
     /// `[secrets_exposed=true]` into the audit args.
     #[arg(long)]
@@ -3052,30 +3052,30 @@ pub struct RunArgs {
     /// output for a snapshot). Lines are still sanitized for ANSI/C0.
     #[arg(long)]
     pub no_truncate: bool,
-    /// F9 (v0.1.3): refuse to forward local stdin to the remote
+    /// Refuse to forward local stdin to the remote
     /// command. If local stdin has data waiting (non-tty + readable)
     /// and this flag is set, `inspect run` exits 2 BEFORE dispatching
     /// the remote command — never silently discards input.
     #[arg(long, conflicts_with_all = ["stdin_max", "audit_stdin_hash"])]
     pub no_stdin: bool,
-    /// F9 (v0.1.3): cap on forwarded stdin per invocation. Accepts a
+    /// Cap on forwarded stdin per invocation. Accepts a
     /// raw byte count or a k/m/g suffix (case-insensitive). Default
     /// 10m. Set to `0` to disable the cap entirely.
     #[arg(long, value_name = "SIZE")]
     pub stdin_max: Option<String>,
-    /// F9 (v0.1.3): record `stdin_sha256` (hex SHA-256 of the
+    /// Record `stdin_sha256` (hex SHA-256 of the
     /// forwarded payload) in the audit entry. Off by default for
     /// perf; opt-in for security-sensitive runs.
     #[arg(long)]
     pub audit_stdin_hash: bool,
-    /// F10.7 (v0.1.3): strip ANSI escape sequences from captured
+    /// Strip ANSI escape sequences from captured
     /// output and prepend `TERM=dumb` to the remote command's env
     /// so progress bars / colorizers downgrade to plain text. Use
     /// for log captures and snapshots that must remain pipe-clean.
     /// Alias `--no-tty`. Mutually exclusive with `--tty`.
     #[arg(long = "clean-output", alias = "no-tty", conflicts_with = "tty")]
     pub clean_output: bool,
-    /// F10.7 (v0.1.3): force tty allocation on the remote side.
+    /// Force tty allocation on the remote side.
     /// Mutually exclusive with `--clean-output`. Reserved for the
     /// (future) interactive-run flag-set; currently a no-op marker
     /// so `--clean-output --tty` is a clap-level rejection.
@@ -3096,25 +3096,25 @@ pub struct RunArgs {
     /// applies are a thing) but caught at parse time.
     #[arg(long, hide = true)]
     pub apply: bool,
-    /// F12 (v0.1.3): per-invocation env-overlay entry, repeatable.
+    /// Per-invocation env-overlay entry, repeatable.
     /// Merges on top of the namespace overlay (operator wins on
     /// collision). With `--env-clear`, replaces the namespace overlay
     /// entirely.
     #[arg(long, value_name = "KEY=VALUE")]
     pub env: Vec<String>,
-    /// F12 (v0.1.3): drop the namespace's env overlay for this
+    /// Drop the namespace's env overlay for this
     /// invocation only. Composes with `--env`: pass `--env-clear --env
     /// LANG=C` to dispatch with only `LANG=C`. The audit entry still
     /// records what the namespace overlay would have been.
     #[arg(long)]
     pub env_clear: bool,
-    /// F12 (v0.1.3): print the rendered remote command line (including
+    /// Print the rendered remote command line (including
     /// the `env KEY="VAL" -- ` overlay prefix and any container
     /// wrapping) to stderr before dispatch. Use to confirm what
     /// actually crosses the SSH channel.
     #[arg(long)]
     pub debug: bool,
-    /// F13 (v0.1.3): disable stale-session auto-reauth for this
+    /// Disable stale-session auto-reauth for this
     /// invocation. When set, a transport-stale dispatch failure
     /// surfaces as exit 12 with the chained `ssh_error: stale
     /// connection` SUMMARY hint instead of being transparently
@@ -3122,7 +3122,7 @@ pub struct RunArgs {
     /// `servers.toml` has the same effect persistently.
     #[arg(long)]
     pub no_reauth: bool,
-    /// F14 (v0.1.3): script mode — read the entire bash payload from
+    /// Script mode — read the entire bash payload from
     /// `<PATH>` on the local filesystem and ship it as the remote
     /// command body via `bash -s` (or the interpreter declared in the
     /// script's shebang). The script is **never parsed by any local
@@ -3133,22 +3133,22 @@ pub struct RunArgs {
     /// Mutually exclusive with `--no-stdin` and `--stdin-script`.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["no_stdin", "stdin_script"])]
     pub file: Option<String>,
-    /// F14 (v0.1.3): script mode — read the script body from local
+    /// Script mode — read the script body from local
     /// stdin and ship it as the remote command body via `bash -s`.
     /// Stdin must NOT be a tty; the heredoc form
     /// `inspect run arte --stdin-script <<'BASH' ... BASH` is the
     /// canonical use. Mutually exclusive with `--no-stdin` and
     /// `--file`.
     ///
-    /// L11 (v0.1.3): composes with `--stream`. The combo takes a
+    /// Composes with `--stream`. The combo takes a
     /// two-phase dispatch path (write the script to a remote temp
     /// file in one ssh round-trip without a PTY, then run with
     /// PTY for line-streaming output) so the half-duplex
     /// PTY ⨯ stdin-bytes conflict never arises. Audit captures
-    /// `bidirectional: true` to identify L11 invocations.
+    /// `bidirectional: true` to identify bidirectional invocations.
     #[arg(long, conflicts_with_all = ["no_stdin"])]
     pub stdin_script: bool,
-    /// F16 (v0.1.3): line-stream remote stdout/stderr to local
+    /// Line-stream remote stdout/stderr to local
     /// stdout instead of buffering until the remote command exits.
     /// Required for long-running commands like `docker logs -f`,
     /// `tail -f /var/log/...`, `journalctl -fu vault`, or any other
@@ -3163,20 +3163,20 @@ pub struct RunArgs {
     /// `--stdin-script`. `--follow` is an alias.
     #[arg(long, alias = "follow")]
     pub stream: bool,
-    /// F14 (v0.1.3): record the full script body inline in the audit
+    /// Record the full script body inline in the audit
     /// entry. Off by default to keep the JSONL small; the body is
     /// otherwise dedup-stored under `~/.inspect/scripts/<sha256>.sh`
     /// (mode 0600) and the audit entry references it by hash.
     #[arg(long)]
     pub audit_script_body: bool,
-    /// F17 (v0.1.3): multi-step runner mode — read a JSON manifest
+    /// Multi-step runner mode — read a JSON manifest
     /// (file path, or `-` for stdin) describing an ordered list of
     /// steps to dispatch sequentially against every target the
     /// selector resolves to. Each step has `name`, `cmd` (or
-    /// `cmd_file` for an F14 script reference), `on_failure`
+    /// `cmd_file` for a script-body reference), `on_failure`
     /// (`"stop"` default | `"continue"`), optional `timeout_s`
     /// (per-step wall-clock cap, seconds), optional `revert_cmd`
-    /// (declared inverse for F11 composite revert; absent ⇒
+    /// (declared inverse for composite revert; absent ⇒
     /// `revert.kind = "unsupported"` for that step). Output is
     /// per-step structured (STEP markers + table summary, or a
     /// single JSON object under `--json`); every (step, target)
@@ -3186,7 +3186,7 @@ pub struct RunArgs {
     /// walks the inverses in reverse manifest order. Composes with
     /// `--stream` (forces PTY on every per-step dispatch for
     /// line-buffered live output), `--env` (per-step env overlay),
-    /// `--reason` (recorded on the parent audit entry), F13
+    /// `--reason` (recorded on the parent audit entry), and
     /// auto-reauth (a stale socket mid-pipeline triggers transparent
     /// reauth + retry on the failing step). Multi-target dispatch is
     /// sequential within each step; on_failure="stop" applies
@@ -3199,7 +3199,7 @@ pub struct RunArgs {
         conflicts_with_all = ["file", "stdin_script", "steps_yaml"],
     )]
     pub steps: Option<String>,
-    /// F17 (v0.1.3): YAML manifest variant of `--steps`. Same
+    /// YAML manifest variant of `--steps`. Same
     /// schema, just parsed as YAML instead of JSON for operators
     /// who maintain their migration manifests as YAML alongside
     /// CI/CD pipelines. Mutually exclusive with `--steps`.
@@ -3209,7 +3209,7 @@ pub struct RunArgs {
         conflicts_with_all = ["file", "stdin_script", "steps"],
     )]
     pub steps_yaml: Option<String>,
-    /// F17 (v0.1.3): when a step fails under `--steps` /
+    /// When a step fails under `--steps` /
     /// `--steps-yaml` with `on_failure = "stop"`, walk the inverses
     /// of the steps that already ran (in reverse manifest order)
     /// before exiting. Multi-target: each prior step's inverse fans
@@ -3361,7 +3361,7 @@ pub enum BundleMode {
     /// Run preflight + steps + postflight. Destructive steps require
     /// `--apply` unless they opt out (`apply: false`).
     Apply(BundleApplyArgs),
-    /// L6 (v0.1.3): show per-step + per-branch outcomes for a past
+    /// Show per-step + per-branch outcomes for a past
     /// bundle invocation by `bundle_id`. Reads the local audit log;
     /// no remote work. `--json` returns the structured per-branch
     /// outcomes for agent consumption.
@@ -3428,7 +3428,7 @@ pub struct PathArgArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
 }
@@ -3457,7 +3457,7 @@ pub struct ChmodArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
 }
@@ -3486,7 +3486,7 @@ pub struct ChownArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
 }
@@ -3519,23 +3519,23 @@ pub struct CpArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
-    /// F15 (v0.1.3): on a push, set the remote file's mode (octal,
+    /// On a push, set the remote file's mode (octal,
     /// e.g. `0755` or `755`) after the transfer. Applied via
     /// `chmod` on the remote; overrides the mode-mirror that the
     /// atomic-write helper would otherwise inherit from the prior
     /// file at the same path.
     #[arg(long, value_name = "OCTAL")]
     pub mode: Option<String>,
-    /// F15 (v0.1.3): on a push, set the remote file's owner
+    /// On a push, set the remote file's owner
     /// (`user` or `user:group`) after the transfer. Requires the
     /// SSH user have permission to chown — typically root via
     /// the namespace's existing privilege model.
     #[arg(long, value_name = "USER[:GROUP]")]
     pub owner: Option<String>,
-    /// F15 (v0.1.3): on a push, create missing parent directories
+    /// On a push, create missing parent directories
     /// on the remote (`mkdir -p`) before writing. Without this,
     /// a missing parent dir surfaces as `error: remote parent
     /// directory does not exist` and the transfer is aborted.
@@ -3553,7 +3553,7 @@ pub struct PutArgs {
     /// Remote destination as `<selector>:<path>` (e.g.
     /// `arte:/etc/foo`, `arte/_:/etc/foo`,
     /// `arte/atlas:/etc/vault/config.hcl`). Selector must carry a
-    /// `:<path>` — F7.2 shorthand `<ns>:/path` resolves to the
+    /// `:<path>` — shorthand `<ns>:/path` resolves to the
     /// host-level `_` service.
     pub remote: String,
     /// Apply the transfer. Without this, prints a dry-run preview.
@@ -3569,21 +3569,21 @@ pub struct PutArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
-    /// F15 (v0.1.3): set the remote file's mode (octal, e.g. `0755`
+    /// Set the remote file's mode (octal, e.g. `0755`
     /// or `755`) after the transfer. Applied via `chmod` on the
     /// remote; overrides the mode-mirror inherited from any prior
     /// file at the same path.
     #[arg(long, value_name = "OCTAL")]
     pub mode: Option<String>,
-    /// F15 (v0.1.3): set the remote file's owner (`user` or
+    /// Set the remote file's owner (`user` or
     /// `user:group`) after the transfer. Requires the SSH user
     /// have permission to chown.
     #[arg(long, value_name = "USER[:GROUP]")]
     pub owner: Option<String>,
-    /// F15 (v0.1.3): create missing parent directories on the
+    /// Create missing parent directories on the
     /// remote (`mkdir -p`) before writing. Without this, a missing
     /// parent surfaces as `error: remote parent directory does not
     /// exist` and the transfer aborts.
@@ -3599,7 +3599,7 @@ pub struct GetArgs {
     /// Remote source as `<selector>:<path>` (e.g.
     /// `arte:/etc/foo`, `arte/_:/etc/foo`,
     /// `arte/atlas:/etc/vault/config.hcl`). Selector must carry a
-    /// `:<path>` — F7.2 shorthand `<ns>:/path` resolves to the
+    /// `:<path>` — shorthand `<ns>:/path` resolves to the
     /// host-level `_` service.
     pub remote: String,
     /// Local destination path, or `-` to write to stdout.
@@ -3635,7 +3635,7 @@ pub struct EditArgs {
     /// Free-form note recorded in the audit entry. Limited to 240 characters.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// F11 (v0.1.3): print the captured inverse before applying.
+    /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
 }
@@ -3676,7 +3676,7 @@ pub enum AuditCommand {
     /// forward audit entries to an append-only log sink (syslog,
     /// journald, or a remote collector).
     Verify(AuditVerifyArgs),
-    /// L5 (v0.1.3): delete audit entries older than the retention
+    /// Delete audit entries older than the retention
     /// threshold and sweep orphan snapshot files. See
     /// `inspect audit --help` for the GC + RETENTION section that
     /// documents `--keep` syntax, the `[audit] retention` config
@@ -3717,7 +3717,7 @@ pub struct AuditVerifyArgs {
     pub format: crate::format::FormatArgs,
 }
 
-/// L5 (v0.1.3): retention GC over `~/.inspect/audit/`.
+/// Retention GC over `~/.inspect/audit/`.
 #[derive(Debug, Args)]
 pub struct AuditGcArgs {
     /// Retention threshold. Either a duration suffix (`90d`, `4w`,
@@ -3734,7 +3734,7 @@ pub struct AuditGcArgs {
     pub format: crate::format::FormatArgs,
 }
 
-// ---- F18 history (v0.1.3) ---------------------------------------------------
+// ---- history --------------------------------------------------------------
 
 #[derive(Debug, Args)]
 #[command(
@@ -3816,7 +3816,7 @@ pub struct HistoryRotateArgs {
     pub format: crate::format::FormatArgs,
 }
 
-// ---- F8 cache management ----------------------------------------------------
+// ---- cache management ----------------------------------------------------
 
 #[derive(Debug, Args)]
 #[command(
@@ -3876,7 +3876,7 @@ pub struct RevertArgs {
     pub yes: bool,
     #[arg(long)]
     pub yes_all: bool,
-    /// F11 (v0.1.3): revert the N most recent applied write entries
+    /// Revert the N most recent applied write entries
     /// (in reverse chronological order). Stops on the first
     /// `revert.kind = unsupported` entry with a loud explanation.
     /// Mutually exclusive with `<audit-id>`.
@@ -3884,7 +3884,7 @@ pub struct RevertArgs {
     pub last: Option<usize>,
 }
 
-// ---- F6 compose (v0.1.3) ----------------------------------------------------
+// ---- compose (v0.1.3) ----------------------------------------------------
 
 #[derive(Debug, Args)]
 #[command(
@@ -3975,7 +3975,7 @@ pub struct ComposePsArgs {
 pub struct ComposeConfigArgs {
     /// Project selector: `<ns>/<project>`.
     pub selector: String,
-    /// L7 (v0.1.3): print secret-shaped values verbatim. Off by
+    /// Print secret-shaped values verbatim. Off by
     /// default — every line otherwise runs through the redaction
     /// pipeline (env / header / URL / PEM maskers).
     #[arg(long)]
@@ -4001,27 +4001,27 @@ pub struct ComposeLogsArgs {
     /// Stream logs (`docker compose logs --follow`).
     #[arg(short = 'f', long)]
     pub follow: bool,
-    /// L7 (v0.1.3): print secret-shaped values verbatim.
+    /// Print secret-shaped values verbatim.
     #[arg(long)]
     pub show_secrets: bool,
-    /// L8 (v0.1.3): regex line-filter applied AFTER docker compose
+    /// Regex line-filter applied AFTER docker compose
     /// emits each line (compose itself has no built-in filter).
     /// Repeatable; multiple patterns OR together. Composes with
     /// `--exclude`. Mirrors `inspect logs --match`.
     #[arg(long, value_name = "REGEX")]
     pub r#match: Vec<String>,
-    /// L8 (v0.1.3): regex line-filter that drops matching lines after
+    /// Regex line-filter that drops matching lines after
     /// `--match`. Repeatable; multiple patterns OR together. Mirrors
     /// `inspect logs --exclude`.
     #[arg(long, value_name = "REGEX")]
     pub exclude: Vec<String>,
-    /// L8 (v0.1.3): assert this is a multi-service merged stream.
+    /// Assert this is a multi-service merged stream.
     /// Project-level form is already interleaved (compose's default);
     /// `--merged` makes the contract explicit and rejects per-service
     /// selectors. JSON output gains an explicit `mode: "merged"`.
     #[arg(long)]
     pub merged: bool,
-    /// L8 (v0.1.3): resume from the timestamp recorded in the cursor
+    /// Resume from the timestamp recorded in the cursor
     /// file. The verb forces `--timestamps` on docker compose logs so
     /// each line carries an ISO-8601 prefix; after the stream
     /// finishes, the latest timestamp is written back to the cursor
@@ -4065,7 +4065,7 @@ pub struct ComposeRestartArgs {
     pub format: crate::format::FormatArgs,
 }
 
-// F6 (v0.1.3): per-sub-verb args for the audited compose-state
+// Per-sub-verb args for the audited compose-state
 // mutations (`up`/`down`/`pull`/`build`) and the `inspect run`-style
 // `exec`. Each carries the standard write-verb safety knobs (`--apply`
 // / `--yes` / `--yes-all` / `--reason`) plus a small set of compose
@@ -4076,7 +4076,7 @@ pub struct ComposeRestartArgs {
 #[derive(Debug, Args)]
 pub struct ComposeUpArgs {
     /// Project or service selector: `<ns>/<project>[/<service>]`.
-    /// With a service portion (L8, v0.1.3), only that one service is
+    /// With a service portion, only that one service is
     /// brought up; other services in the project are unaffected.
     pub selector: String,
     /// Run the project in the foreground (drops the default `-d`).
@@ -4107,7 +4107,7 @@ pub struct ComposeUpArgs {
 #[derive(Debug, Args)]
 pub struct ComposeDownArgs {
     /// Project or service selector: `<ns>/<project>[/<service>]`.
-    /// With a service portion (L8, v0.1.3), the verb stops + removes
+    /// With a service portion, the verb stops + removes
     /// only that service's container (`docker compose -p <p> stop
     /// <svc> && rm -f <svc>`); other services in the project remain
     /// running. Per-service `--volumes` and `--rmi` are rejected
@@ -4203,10 +4203,10 @@ pub struct ComposeExecArgs {
     /// Working directory inside the container (`-w` passthrough).
     #[arg(short = 'w', long, value_name = "DIR")]
     pub workdir: Option<String>,
-    /// L7 (v0.1.3): print secret-shaped values verbatim.
+    /// Print secret-shaped values verbatim.
     #[arg(long)]
     pub show_secrets: bool,
-    /// L7 (v0.1.3): mask every `KEY=VALUE` line regardless of key
+    /// Mask every `KEY=VALUE` line regardless of key
     /// name. Useful when the remote command emits config blobs you
     /// have not vetted.
     #[arg(long)]

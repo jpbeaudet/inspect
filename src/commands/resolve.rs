@@ -5,7 +5,7 @@ use crate::error::ExitKind;
 use crate::selector::resolve::{resolve, TargetKind};
 
 pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     let targets = resolve(&args.selector)?;
@@ -26,7 +26,7 @@ pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
                 })
             })
             .collect();
-        // F19 (v0.1.3): route through `print_json_value` so `--select`
+        // Route through `print_json_value` so `--select`
         // applies to the resolved-targets array. Pre-fix this verb
         // pretty-printed via `to_string_pretty` + `println!`; the
         // `--select` filter compacts the rendered output (one line per

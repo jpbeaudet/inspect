@@ -1,5 +1,5 @@
 //! Shared shell snippet for atomic write+rename that **preserves the
-//! original file's mode/uid/gid** (audit §4.2 / P3.13).
+//! original file's mode/uid/gid** (audit §4.2).
 //!
 //! Without this, `mv tmp path` inherits the temp file's permissions
 //! (typically `0644` and the SSH user's uid:gid). For config files

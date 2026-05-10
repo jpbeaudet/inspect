@@ -1,4 +1,4 @@
-//! L2 (v0.1.3): OS keychain integration for opt-in cross-session
+//! OS keychain integration for opt-in cross-session
 //! passphrase / password persistence.
 //!
 //! ## Default behavior is unchanged.

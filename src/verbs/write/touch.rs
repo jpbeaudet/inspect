@@ -53,7 +53,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
     for (s, path) in &planned {
-        // F11 (v0.1.3): if the file did not pre-exist, the inverse
+        // If the file did not pre-exist, the inverse
         // is `rm <path>`. If it did, touch only nudges mtime — no
         // clean inverse without saving the prior timestamp.
         let probe_inner = format!("test -e {} && echo y || echo n", shquote(path));
@@ -85,7 +85,7 @@ pub fn run(args: PathArgArgs) -> Result<ExitKind> {
                 "{path} already existed; touch only updates mtime, no inverse captured"
             ))
         } else {
-            // F11 capture-site authoritative: payload is the literal
+            // Payload is the literal
             // command for the runner, wrapped in `docker exec` when
             // the original verb dispatched through a container.
             let inner_revert = format!("rm -f -- {}", shquote(path));

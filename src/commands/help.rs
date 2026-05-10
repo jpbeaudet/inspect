@@ -43,7 +43,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     if args.json {
         // HP-4: full surface envelope, or single-topic envelope when a
         // topic is named alongside `--json`.
-        // F19 (v0.1.3): when `--select` is set, route the rendered
+        // When `--select` is set, route the rendered
         // envelope through the same `print_json_value` chokepoint
         // every other JSON verb uses — so `inspect help all --json
         // --select '.topics[].id'` works for topic discovery without
@@ -95,7 +95,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
                 };
                 render(&body)
             }
-            // P8 (v0.1.1): no editorial topic, but it might be a verb.
+            // No editorial topic, but it might be a verb.
             // Fall back to clap's long-help renderer so users can type
             // either `inspect help logs` or `inspect logs --help`.
             None if help::is_verb(name) => render_clap_long_help(name),
@@ -104,7 +104,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     }
 }
 
-/// P8 fallback: render clap's long help for a top-level subcommand.
+/// Render clap's long help for a top-level subcommand.
 /// Returns `Success` when the subcommand exists (always, since we
 /// gate the call with [`help::is_verb`]); the only failure surface is
 /// the writer, which we route through the same handler as topic
@@ -154,9 +154,9 @@ fn render_no_pager(text: &str) -> Result<ExitKind> {
 
 fn unknown_topic(name: &str) -> Result<ExitKind> {
     let suggestion = help::suggest(name);
-    // F3 (v0.1.3): `inspect help <unknown>` now exits 2 (Error) with
+    // `Inspect help <unknown>` now exits 2 (Error) with
     // the canonical `error: unknown command or topic: <name>` line
-    // and a chained hint pointing at the top-level catalog. Pre-F3
+    // and a chained hint pointing at the top-level catalog. earlier
     // wording was "unknown help topic" + exit 1 — that drift was
     // surprising for operators coming from `git`/`cargo`/`kubectl`,
     // all of which exit non-zero on `help <unknown>`. The
@@ -202,9 +202,9 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_topic_returns_nomatches() {
-        // F3 (v0.1.3): unknown topic / unknown command now exits with
-        // ExitKind::Error (code 2). Pre-F3 it was NoMatches (code 1)
-        // — see CHANGELOG and INSPECT_v0.1.3_BACKLOG.md §F3.
+        // Unknown topic / unknown command now exits with
+        // ExitKind::Error (code 2). earlier it was NoMatches (code 1)
+        // — see CHANGELOG for the full topic list.
         let r = run(args(Some("definitely-not-a-topic"))).unwrap();
         assert!(matches!(r, ExitKind::Error));
     }

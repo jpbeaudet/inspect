@@ -15,7 +15,7 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     if let Some(s) = &args.since {
@@ -27,7 +27,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     let (runner, nses, targets) = plan(&args.selector)?;
 
-    // P10 (v0.1.1): handle --reset-cursor up front -- it does not stream
+    // Handle --reset-cursor up front -- it does not stream
     // any logs, just drops the cursor file(s) for every selected target.
     if args.reset_cursor {
         let mut deleted = 0usize;
@@ -45,13 +45,13 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     let mut any_lines = false;
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted. Threaded into both the merged-mode closures and the
     // per-step (batch + follow) emission paths.
     let mut select = args.format.select_filter()?;
 
-    // P5 (v0.1.1): merged multi-container view. We honor --since-last
+    // Merged multi-container view. We honor --since-last
     // and the log-driver gate per source, then dispatch to the merger
     // module which fans out execution and re-orders by RFC3339
     // timestamp (batch) or arrival order (follow).
@@ -128,7 +128,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         } else {
             60
         };
-        // F19 (v0.1.3): the merged closures emit one envelope per
+        // The merged closures emit one envelope per
         // merged line — they need the streaming filter handle so that
         // `--select` covers merged output too. The closure captures
         // `&mut select` directly (FnMut); on a per-frame filter
@@ -200,13 +200,13 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
-        // L7 (v0.1.3): per-step redactor. Used for the non-follow
+        // Per-step redactor. Used for the non-follow
         // batch path below; `stream_follow` constructs its own per
         // reconnect attempt so a transport drop mid-PEM-block does
         // not poison the post-reconnect state.
         let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
 
-        // P10: --since-last expands into --since <unix-ts> from the
+        // --since-last expands into --since <unix-ts> from the
         // saved cursor (or INSPECT_SINCE_LAST_DEFAULT on cold start).
         // We always rewrite the cursor at the start of the run so a
         // crash mid-stream still leaves the next call resumable; the
@@ -263,7 +263,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
         let cmd = build_logs(step.service_def(), step.service(), step.container(), &args);
 
-        // P1 (v0.1.1): in --follow mode, render each line as it
+        // In --follow mode, render each line as it
         // arrives instead of buffering until the SSH process exits.
         // We also implement client-side reconnect (3 tries with 1/2/4s
         // backoff) so a transient SSH drop doesn't end the user's
@@ -317,7 +317,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             continue;
         }
         for line in out.stdout.lines() {
-            // L7 (v0.1.3): redactor is stateful for PEM blocks; lines
+            // Redactor is stateful for PEM blocks; lines
             // inside a block return None and are swallowed so the
             // BEGIN-line marker is the only output for the whole
             // block.
@@ -483,7 +483,7 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
         s.push_str(" -f");
     }
     if args.merged {
-        // P5: required so the merger has a parseable RFC3339 prefix
+        // Required so the merger has a parseable RFC3339 prefix
         // on every line. The merger strips it before printing.
         s.push_str(" --timestamps");
     }
@@ -542,12 +542,12 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
     s
 }
 
-/// P1 (v0.1.1): client-side reconnect wrapper for `--follow`. Streams
+/// Client-side reconnect wrapper for `--follow`. Streams
 /// each line from the SSH child to stdout (or JSON), and on transient
 /// SSH failure retries up to 3 times with 1s/2s/4s backoff. Aborts
 /// cleanly on Ctrl-C (cancellation flag set by [`crate::exec::cancel`]).
 ///
-/// L7 (v0.1.3): a fresh redactor is constructed inside each retry
+/// A fresh redactor is constructed inside each retry
 /// iteration. A transport drop mid-PEM-block invalidates the prior
 /// in-block state because the post-reconnect stream is a new server
 /// process; carrying the flag across would over-redact (suppressing
@@ -569,7 +569,7 @@ fn stream_follow(
     json: bool,
     show_secrets: bool,
     any_lines: &mut bool,
-    // F19 (v0.1.3): per-frame `--select` streaming filter. Threaded
+    // Per-frame `--select` streaming filter. Threaded
     // in from the verb's run loop as `&mut Option<Filter>` so the
     // closure can re-borrow `select.as_mut()` per frame and we don't
     // have to wrestle with Option<&mut T> reborrowing through a

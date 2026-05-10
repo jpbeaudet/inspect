@@ -15,7 +15,6 @@ pub fn run(args: DisconnectAllArgs) -> anyhow::Result<ExitKind> {
     let sockets = list_sockets()?;
     if sockets.is_empty() {
         if args.format.is_json() {
-            // P0.6 sweep (v0.1.3): L7 envelope.
             let doc = OutputDoc::new(
                 "no inspect-managed connections to close",
                 json!({ "closed": [], "failed": [] }),
@@ -99,7 +98,6 @@ fn emit_json(
     failed: &[(String, String)],
     format: &crate::format::FormatArgs,
 ) -> anyhow::Result<()> {
-    // P0.6 sweep (v0.1.3): L7 envelope.
     let summary = format!(
         "closed {} connection(s){}",
         closed.len(),

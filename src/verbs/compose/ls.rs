@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): `inspect compose ls <ns>` — list compose projects.
+//! `Inspect compose ls <ns>` — list compose projects.
 //!
 //! Reads from the cached profile (populated by
 //! `discovery::probes::probe_compose_projects` at `inspect setup`

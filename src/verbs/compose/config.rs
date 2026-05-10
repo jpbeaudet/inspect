@@ -1,8 +1,8 @@
-//! F6 (v0.1.3): `inspect compose config <ns>/<project>` — effective
+//! `Inspect compose config <ns>/<project>` — effective
 //! merged compose config (redacted).
 //!
 //! Wraps `cd <wd> && docker compose -p <p> config` over the
-//! persistent ssh socket. Output streams through the L7 redaction
+//! persistent ssh socket. Output streams through the redaction
 //! pipeline (PEM / header / URL / env maskers) so secret-shaped
 //! values in `environment:` blocks and URL auth portions are
 //! masked unless `--show-secrets` is passed.

@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): `inspect compose build <ns>/<project>[/<service>]`
+//! `Inspect compose build <ns>/<project>[/<service>]`
 //! — build images for a compose project. Audited (`verb=compose.build`).
 //!
 //! Streams docker build output for visibility on long builds (some

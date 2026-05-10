@@ -20,11 +20,11 @@ pub const ENV_CODESPACES: &str = "CODESPACES";
 pub enum TtlSource {
     Flag,
     Env,
-    /// L4 (v0.1.3): per-namespace `session_ttl` from
+    /// Per-namespace `session_ttl` from
     /// `~/.inspect/servers.toml`. Slots between the env override and
     /// the auth-mode default.
     PerNamespace,
-    /// L4 (v0.1.3): default for `auth = "password"` namespaces (`12h`).
+    /// Default for `auth = "password"` namespaces (`12h`).
     /// Operators on legacy boxes don't want to re-prompt every 30m.
     PasswordDefault,
     CodespaceDefault,
@@ -44,7 +44,7 @@ impl TtlSource {
     }
 }
 
-/// L4 (v0.1.3): hard cap on any operator-supplied TTL when the
+/// Hard cap on any operator-supplied TTL when the
 /// namespace uses password auth. Mirrors the schema cap so
 /// `--ttl 48h` against a password-auth ns is rejected the same way
 /// `session_ttl = "48h"` is.
@@ -59,7 +59,7 @@ pub fn default_ttl() -> (String, TtlSource) {
     }
 }
 
-/// L4 (v0.1.3): TTL resolver with per-namespace context. Priority:
+/// TTL resolver with per-namespace context. Priority:
 /// `--ttl` flag → `INSPECT_PERSIST_TTL` env → per-namespace
 /// `session_ttl` → password-default (12h) when `auth = "password"`
 /// → Codespace/local default. When the resolved namespace uses
@@ -168,7 +168,7 @@ mod tests {
         assert!(parse_ttl("h30").is_err());
     }
 
-    // ---- L4 (v0.1.3): per-namespace + password defaults --------------------
+    // ---- : per-namespace + password defaults --------------------
 
     #[test]
     fn l4_resolve_with_ns_picks_per_ns_over_default() {

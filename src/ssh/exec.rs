@@ -19,7 +19,7 @@ use super::master::{check_socket, socket_path, MasterStatus};
 use super::options::SshTarget;
 const SSH_BIN: &str = "ssh";
 
-/// F13 (v0.1.3): when ssh itself fails (master gone, host unreachable,
+/// When ssh itself fails (master gone, host unreachable,
 /// auth rejected) it exits non-zero with a recognisable stderr token.
 /// `dispatch_with_reauth` only triggers on `Err(...)`, so we must
 /// promote those transport failures to errors here — otherwise the
@@ -45,7 +45,7 @@ fn transport_err(exit_code: i32, stderr: &str) -> Option<anyhow::Error> {
     None
 }
 
-/// P8-D fix (v0.1.3): decide whether the captured stderr from a
+/// Decide whether the captured stderr from a
 /// streaming remote command should be surfaced to the operator on a
 /// non-zero exit. Returns `Some(trimmed)` when there's a useful
 /// command-failure diagnostic, or `None` when the failure has already
@@ -101,14 +101,14 @@ impl RemoteOutput {
 pub struct RunOpts {
     /// Maximum time to wait for the remote command. Defaults to 30s.
     pub timeout: Option<Duration>,
-    /// F9 (v0.1.3): bytes to forward as the remote command's stdin.
+    /// Bytes to forward as the remote command's stdin.
     /// `None` (default) means stdin is `/dev/null`, matching pre-v0.1.3
     /// behavior. `Some(bytes)` pipes those bytes byte-for-byte to the
     /// remote command's stdin and closes the channel on EOF, so
     /// commands that read until EOF (`sh`, `psql`, `cat`, `tee`)
     /// terminate normally.
     pub stdin: Option<Vec<u8>>,
-    /// F16 (v0.1.3): force PTY allocation (`ssh -tt`). Two effects:
+    /// Force PTY allocation (`ssh -tt`). Two effects:
     /// (1) remote stdio flips from block-buffered to line-buffered, so
     /// `docker logs -f` / `tail -f` / `journalctl -fu` deliver lines
     /// in real time instead of in 4 KB bursts; (2) local Ctrl-C
@@ -141,14 +141,14 @@ impl RunOpts {
         }
     }
 
-    /// F9 (v0.1.3): forward `bytes` to the remote command's stdin.
+    /// Forward `bytes` to the remote command's stdin.
     /// Builder-style for ergonomic call sites.
     pub fn with_stdin(mut self, bytes: Vec<u8>) -> Self {
         self.stdin = Some(bytes);
         self
     }
 
-    /// F16 (v0.1.3): force PTY allocation (`ssh -tt`) on this run.
+    /// Force PTY allocation (`ssh -tt`) on this run.
     /// Required for `--stream` so the remote process line-buffers and
     /// SIGINT propagates back through the PTY. Builder-style.
     pub fn with_tty(mut self, tty: bool) -> Self {
@@ -176,7 +176,7 @@ pub fn run_remote(
     let use_socket = match check_socket(&socket, target) {
         MasterStatus::Alive => true,
         MasterStatus::Stale | MasterStatus::Missing => {
-            // F13 (v0.1.3): no live ControlMaster — either the
+            // No live ControlMaster — either the
             // socket file exists but the master process is gone
             // (Stale: codespace restart, OOM, ControlPersist expiry)
             // or the master was never opened / a prior reauth
@@ -213,7 +213,7 @@ pub fn run_remote(
         ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
-        // F16 (v0.1.3): -tt forces PTY allocation even when local
+        // -tt forces PTY allocation even when local
         // stdin is not a terminal (the runner spawns ssh with
         // Stdio::null/piped, never a tty). The PTY makes the remote
         // process line-buffer and propagates SIGINT through the tty
@@ -289,7 +289,7 @@ pub fn run_remote(
                     target.host
                 ));
             }
-            // F13: promote ssh-transport failures (master gone,
+            // Promote ssh-transport failures (master gone,
             // unreachable, auth rejected) to `Err` so the dispatch
             // wrapper classifies and (for stale) auto-reauths.
             if let Some(e) = transport_err(exit_code, &stderr) {
@@ -323,7 +323,7 @@ fn apply_extra_opts(cmd: &mut Command) {
     }
 }
 
-/// F9 (v0.1.3): if `bytes` is `Some`, take the spawned child's stdin
+/// If `bytes` is `Some`, take the spawned child's stdin
 /// handle and write the bytes from a background thread, then drop the
 /// handle (which closes the pipe and signals EOF to the remote
 /// command). Done off-thread so the caller can keep draining stdout
@@ -355,7 +355,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// F16-followup (v0.1.3): outcome of one cancellation-poll iteration in
+/// Outcome of one cancellation-poll iteration in
 /// the streaming SSH executor.
 #[derive(Debug, PartialEq, Eq)]
 enum CancelAction {
@@ -377,7 +377,7 @@ enum CancelAction {
     Escalate,
 }
 
-/// F16-followup (v0.1.3): returns the right cancel action given:
+/// Returns the right cancel action given:
 /// - the current `cancel::signal_count()`
 /// - the count we last handled (call site's `last_handled` cell)
 /// - the `Instant` of the most recently forwarded `\x03` (call site's
@@ -412,7 +412,7 @@ fn classify_cancel(
     }
 }
 
-/// Streaming variant of [`run_remote`] (P1, v0.1.1). Spawns ssh just
+/// Streaming variant of [`run_remote`]. Spawns ssh just
 /// like the buffered runner, but pumps stdout line-by-line into
 /// `on_line` so callers can render output as it arrives instead of
 /// waiting for the remote command to exit.
@@ -443,7 +443,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     let use_socket = match check_socket(&socket, target) {
         MasterStatus::Alive => true,
         MasterStatus::Stale | MasterStatus::Missing => {
-            // F13 (v0.1.3): see `run_remote` for rationale.
+            // See `run_remote` for rationale.
             return Err(anyhow!(
                 "control socket connect({}): Connection refused (master gone)",
                 socket.display()
@@ -463,14 +463,14 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
         ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
-        // F16 (v0.1.3): -tt forces a PTY for the remote command. See
+        // -tt forces a PTY for the remote command. See
         // the same hook in `run_remote` above for rationale.
         ssh.arg("-tt");
     }
     ssh.arg("-o").arg("BatchMode=yes").args(target.base_args());
     apply_extra_opts(&mut ssh);
     let stdin_bytes = opts.stdin.take();
-    // F16-followup (v0.1.3): when PTY is allocated, keep stdin as a
+    // When PTY is allocated, keep stdin as a
     // pipe (instead of /dev/null) even when the caller has no payload
     // to forward. The streaming loop holds the write end so that on
     // the first SIGINT we can write `\x03` (ASCII ETX, the default
@@ -528,7 +528,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     let mut reader = BufReader::new(stdout);
     let start = std::time::Instant::now();
     let mut line_bytes: Vec<u8> = Vec::with_capacity(4096);
-    // F16-followup (v0.1.3): track signal-count progress so a NEW
+    // Track signal-count progress so a NEW
     // Ctrl-C is detected even after we cleared the cancel flag from
     // a previous forwarded SIGINT.
     let mut last_handled_signal: u32 = crate::exec::cancel::signal_count();
@@ -618,20 +618,19 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
                 target.host
             ));
         }
-        // F13: promote transport failures so the dispatch wrapper
+        // Promote transport failures so the dispatch wrapper
         // classifies and (on stale) auto-reauths. Genuine remote
         // command failures fall through to `Ok(exit_code)`.
         if let Some(e) = transport_err(exit_code, &stderr) {
             return Err(e);
         }
-        // P8-D fix (v0.1.3): for genuine command failures (not
+        // For genuine command failures (not
         // transport, not max-sessions), surface the captured stderr
         // to the operator. Pre-fix, this stderr was collected only
         // for the upstream classifications and then silently
         // discarded — so an agent driving `inspect run` saw
         // `arte: exit N` with no path to "what to fix" without a
-        // side channel. `tee_eprintln!` also feeds the F18
-        // transcript so the diagnostic survives in post-mortems.
+        // side channel. `tee_eprintln!` also feeds the         // transcript so the diagnostic survives in post-mortems.
         // See `command_failure_stderr` doc-comment for the contract.
         if let Some(diag) = command_failure_stderr(exit_code, &stderr) {
             crate::tee_eprintln!("{diag}");
@@ -671,7 +670,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
     let use_socket = match check_socket(&socket, target) {
         MasterStatus::Alive => true,
         MasterStatus::Stale | MasterStatus::Missing => {
-            // F13 (v0.1.3): see `run_remote` for rationale.
+            // See `run_remote` for rationale.
             return Err(anyhow!(
                 "control socket connect({}): Connection refused (master gone)",
                 socket.display()
@@ -691,7 +690,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
         ssh.arg("-o").arg("ControlMaster=no");
     }
     if opts.tty {
-        // F16 (v0.1.3): -tt for streaming-capturing dispatches too,
+        // -tt for streaming-capturing dispatches too,
         // matching `run_remote` and `run_remote_streaming`.
         ssh.arg("-tt");
     }
@@ -812,7 +811,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
             target.host
         ));
     }
-    // F13: promote ssh-transport failures so the dispatch wrapper
+    // Promote ssh-transport failures so the dispatch wrapper
     // classifies and (for stale) auto-reauths. Genuine remote command
     // failures fall through to `Ok(RemoteOutput { exit_code, .. })`.
     if let Some(e) = transport_err(exit_code, &stderr) {
@@ -881,7 +880,7 @@ mod p8d_tests {
     fn p8d_no_emit_on_transport_class_stderr() {
         // Transport-classified stderr is wrapped into an anyhow Err
         // by `transport_err` and surfaced via the verb's error path.
-        // Use the synthetic test marker the F13 mock runner already
+        // Use the synthetic test marker the mock runner already
         // emits — keeps the test independent of OpenSSH wording.
         assert_eq!(command_failure_stderr(255, "transport:stale"), None);
         assert_eq!(command_failure_stderr(255, "transport:unreachable"), None);

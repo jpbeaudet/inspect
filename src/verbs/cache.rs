@@ -1,4 +1,4 @@
-//! F8 (v0.1.3) — cache orchestrator for read verbs.
+//! — cache orchestrator for read verbs.
 //!
 //! Single entry point [`get_runtime`] that the read verbs (`status`,
 //! `health`, `why`, …) call to get a [`RuntimeSnapshot`] tagged with

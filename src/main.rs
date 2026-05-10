@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     // the global cancel flag (see `exec::cancel`).
     exec::cancel::install_handlers();
 
-    // F18 (v0.1.3): install the per-process transcript context so
+    // Install the per-process transcript context so
     // every subsequent user-visible emit can tee into the in-memory
     // buffer. `init` records the operator's argv (post-redaction);
     // the namespace + audit_id link are filled in by the verbs as
@@ -46,7 +46,7 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     transcript::init(&argv);
 
-    // F3 (v0.1.3): `inspect help <verb>` is a synonym for
+    // `Inspect help <verb>` is a synonym for
     // `inspect <verb> --help`. We rewrite argv *before* clap parsing
     // so the rendered output is byte-for-byte identical (clap renders
     // `--help` from the live subcommand tree; `render_long_help` on
@@ -56,7 +56,7 @@ fn main() -> ExitCode {
     // topic, not `search --help`); only when the token is a verb
     // *and* not a topic do we rewrite.
     let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    // F10.1 (v0.1.3): namespace-flag-as-typo pre-parser. Catches
+    // Namespace-flag-as-typo pre-parser. Catches
     // operators with `kubectl -n <ns>` muscle memory writing
     // `inspect why atlas-neo4j --on arte` and emits a chained hint
     // pointing at the canonical `arte/atlas-neo4j` form. Pure error-
@@ -181,7 +181,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
     }
 }
 
-/// F3 (v0.1.3): rewrite `inspect help <verb> [extra...]` to
+/// Rewrite `inspect help <verb> [extra...]` to
 /// `inspect <verb> --help` when `<verb>` is a known top-level
 /// subcommand AND is *not* an editorial help topic. Editorial topics
 /// keep precedence (`inspect help search` → search topic page; only
@@ -195,7 +195,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
 /// * `inspect help <topic>` where the token is a topic — unchanged;
 ///   `commands::help::run` renders the editorial body.
 /// * `inspect help <unknown>` — unchanged; `commands::help::run`
-///   exits with `error: unknown command or topic: <name>` (F3).
+///   exits with `error: unknown command or topic: <name>`.
 fn rewrite_help_synonym(raw: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     if raw.len() < 3 {
         return raw;
@@ -238,7 +238,7 @@ fn is_known_top_level_verb(name: &str) -> bool {
     hit
 }
 
-/// F10.1 (v0.1.3): selector-taking verbs whose first positional
+/// Selector-taking verbs whose first positional
 /// argument is the selector. Used by [`detect_namespace_flag_typo`]
 /// to scope the kubectl-muscle-memory hint to verbs where the
 /// suggested `<ns>/<service>` rewrite makes sense.
@@ -247,7 +247,7 @@ const F10_SELECTOR_VERBS: &[&str] = &[
     "volumes", "images", "network", "resolve",
 ];
 
-/// F10.1 (v0.1.3): operators with `kubectl -n <ns>` muscle memory
+/// Operators with `kubectl -n <ns>` muscle memory
 /// commonly type `inspect <verb> <service> --<ns-flag> <ns>` before
 /// learning the canonical `<ns>/<service>` selector. Today's clap
 /// rejection ("unknown flag --on") is unhelpful — we detect the
@@ -377,7 +377,7 @@ mod f3_tests {
 
     #[test]
     fn f3_unknown_token_passes_through_unchanged() {
-        // commands::help::run will then emit the F3 unknown-or-topic
+        // commands::help::run will then emit the unknown-or-topic
         // error and exit 2.
         assert_eq!(
             rewrite(&["inspect", "help", "definitely-not-a-thing"]),

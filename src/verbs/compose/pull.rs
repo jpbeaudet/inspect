@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): `inspect compose pull <ns>/<project>[/<service>]`
+//! `Inspect compose pull <ns>/<project>[/<service>]`
 //! — pull images for a compose project. Audited (`verb=compose.pull`).
 //!
 //! Streams docker pull progress lines via the streaming-capturing

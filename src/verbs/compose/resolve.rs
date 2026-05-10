@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): selector + project resolution shared by every compose
+//! Selector + project resolution shared by every compose
 //! sub-verb.
 //!
 //! The selector grammar for `inspect compose` is intentionally
@@ -39,7 +39,7 @@ impl Parsed {
         if raw.is_empty() {
             bail!("empty selector — pass `<ns>` (compose ls) or `<ns>/<project>[/<service>]`");
         }
-        // Disallow `:` so a stray `arte:/path` (the F7-papercut #2
+        // Disallow `:` so a stray `arte:/path` (a known shorthand
         // host-path shape) lands here with a clear message instead of
         // splitting weirdly.
         if raw.contains(':') {
@@ -94,7 +94,7 @@ pub fn project_in_profile(namespace: &str, project: &str) -> Result<(Profile, Co
         .find(|p| p.name == project)
         .cloned()
         .ok_or_else(|| {
-            // F2 / F7-style chained hint: tell the operator both
+            // Tell the operator both
             // *why* and *what to do next* without forcing them to
             // re-read the spec.
             let known: Vec<&str> = profile

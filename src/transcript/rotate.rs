@@ -1,4 +1,4 @@
-//! F18 (v0.1.3): rotation + retention + compression for
+//! Rotation + retention + compression for
 //! `~/.inspect/history/<ns>-<YYYY-MM-DD>.log`.
 //!
 //! Three knobs in `~/.inspect/config.toml [history]`:
@@ -36,7 +36,7 @@ use crate::paths::set_file_mode_0600;
 
 /// Compiled history retention policy. Built from
 /// [`crate::config::global::HistoryConfig`] at the start of every
-/// rotate pass. Defaults match the F18 spec values.
+/// rotate pass. Defaults match the spec values.
 #[derive(Debug, Clone)]
 pub struct HistoryPolicy {
     pub retain_days: u32,

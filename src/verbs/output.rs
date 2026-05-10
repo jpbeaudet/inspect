@@ -25,7 +25,7 @@ pub struct Renderer {
     pub data: Vec<String>,
     pub next: Vec<String>,
     pub rows: Vec<Value>,
-    /// F7.4 (v0.1.3): when true, [`Self::print`] and the dispatch
+    /// When true, [`Self::print`] and the dispatch
     /// helpers suppress the `SUMMARY:` and `NEXT:` envelope.
     pub quiet: bool,
 }
@@ -46,7 +46,7 @@ impl Renderer {
         self.next.push(s.into());
         self
     }
-    /// F7.4 (v0.1.3): toggle `--quiet` on this renderer.
+    /// Toggle `--quiet` on this renderer.
     pub fn quiet(&mut self, q: bool) -> &mut Self {
         self.quiet = q;
         self
@@ -94,7 +94,7 @@ impl Renderer {
     ///
     /// * `Human` falls back to [`Self::print`] (with full envelope).
     /// * `Json` emits one envelope per line via [`emit_value`] which
-    ///   routes through `transcript::emit_stdout` (the pre-F19 path
+    ///   routes through `transcript::emit_stdout` (the earlier path
     ///   bypassed transcript via raw `println!` — fixed in this
     ///   commit alongside the `--select` plumbing per the
     ///   sweep-the-pattern policy in CLAUDE.md).
@@ -102,7 +102,7 @@ impl Renderer {
     ///   delegate to [`crate::format::render::render_rows`] using the
     ///   buffered envelopes.
     ///
-    /// `select` is the F19 (v0.1.3) `--select` filter (taken by value
+    /// `select` is the `--select` filter (taken by value
     /// so the dispatcher owns the borrow checker around per-row
     /// re-borrows + the end-of-stream slurp flush). When the filter
     /// is set and yields zero results across all rows + slurp flush,
@@ -192,7 +192,7 @@ pub struct JsonOut;
 
 impl JsonOut {
     /// Emit one envelope as a JSON line. The optional `filter` is the
-    /// F19 (v0.1.3) `--select` streaming filter — when present, the
+    /// `--select` streaming filter — when present, the
     /// envelope is converted to `serde_json::Value`, the filter is
     /// applied, and the rendered output (if any) is emitted in place
     /// of the bare envelope.
@@ -213,7 +213,7 @@ impl JsonOut {
     }
 }
 
-/// F19 (v0.1.3): emit one value through stdout, optionally filtered.
+/// Emit one value through stdout, optionally filtered.
 ///
 /// Returns `true` if the call wrote one or more lines to stdout. Slurp
 /// mode and runtime/raw-non-string errors return `false` (slurp defers
@@ -256,7 +256,7 @@ pub(crate) fn emit_value(
     }
 }
 
-/// F19 (v0.1.3): flush a streaming `Filter`'s slurp buffer at end-of-
+/// Flush a streaming `Filter`'s slurp buffer at end-of-
 /// stream. No-op for per-frame mode (`finish` returns an empty string
 /// in that case). Returns the per-frame `Ok(())` / `Ok(NoMatches)` /
 /// `Err` shape so streaming verbs can propagate exit kinds uniformly.
@@ -299,7 +299,7 @@ pub(crate) fn flush_filter_with_status(filter: Option<&mut ndjson::Filter>) -> R
     }
 }
 
-/// F19 (v0.1.3): emit a single JSON envelope, optionally filtered.
+/// Emit a single JSON envelope, optionally filtered.
 ///
 /// The free-function counterpart to [`OutputDoc::print_json`] for
 /// callers that hand-roll their `serde_json::Value` rather than going
@@ -387,7 +387,7 @@ pub struct OutputDoc {
     pub next: Vec<NextStep>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub meta: Map<String, Value>,
-    /// F7.4 (v0.1.3): when true, the human renderer suppresses the
+    /// When true, the human renderer suppresses the
     /// `SUMMARY:` and `NEXT:` envelope lines so stdout is safe to
     /// pipe into `tail` / `head` / `grep -A`. Never serialized
     /// (skip-on-default + skip when false) — JSON output is already
@@ -418,7 +418,7 @@ impl OutputDoc {
         self
     }
 
-    /// F7.4 (v0.1.3): builder hook for the global `--quiet` flag.
+    /// Builder hook for the global `--quiet` flag.
     pub fn with_quiet(mut self, quiet: bool) -> Self {
         self.quiet = quiet;
         self
@@ -426,7 +426,7 @@ impl OutputDoc {
 
     /// Print to stdout as a single-line JSON envelope.
     ///
-    /// `select` is the F19 (v0.1.3) `--select` triple: filter source,
+    /// `select` is the `--select` triple: filter source,
     /// raw-rendering flag, slurp flag. `None` reproduces the v0.1.2
     /// behavior (one envelope, full shape). `Some` evaluates the
     /// filter against the envelope and emits the rendered result.
@@ -459,7 +459,7 @@ impl OutputDoc {
                 emit_stdout("DATA:    (none)");
             }
         } else if self.quiet {
-            // F7.4: pipe-clean DATA only — no envelope, no
+            // Pipe-clean DATA only — no envelope, no
             // indentation prefix, just the data lines as-is.
             for l in data_lines {
                 emit_stdout(l);

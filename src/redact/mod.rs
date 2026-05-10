@@ -1,4 +1,4 @@
-//! Output redaction pipeline (L7, v0.1.3).
+//! Output redaction pipeline.
 //!
 //! Every line streamed from a remote command on `inspect run`,
 //! `inspect exec`, `inspect logs`, `inspect grep`, `inspect cat`,
@@ -16,7 +16,7 @@
 //!    portion with `<redacted>`.
 //! 3. **URL** — line-level regex. Masks the password in
 //!    `scheme://user:pass@host` patterns: `user:****@host`.
-//! 4. **Env** — line-level KEY=VALUE masker (P4, v0.1.1). Preserved
+//! 4. **Env** — line-level KEY=VALUE masker. Preserved
 //!    verbatim; the existing `head4****tail2` partial-mask shape and
 //!    suffix list stay unchanged.
 //!
@@ -144,7 +144,7 @@ impl OutputRedactor {
             return Some(Cow::Borrowed(line));
         }
 
-        // S2 (post-v0.1.3 security audit): /proc/<pid>/environ and
+        // /proc/<pid>/environ and
         // similar interfaces emit NUL-separated `KEY=VALUE` records
         // with no newline terminator. The streaming line reader
         // splits on `\n` only, so the entire blob arrives as a single
@@ -253,7 +253,7 @@ impl OutputRedactor {
 ///
 /// Audit reviewers and forensic exports must never see plaintext
 /// secrets in the recorded command, even when an operator inadvertently
-/// types `psql -p s3cret …` on the CLI. The L7 stream redactor only
+/// types `psql -p s3cret …` on the CLI. The stream redactor only
 /// runs on stdout/stderr; this helper provides the same coverage for
 /// the *command text itself*.
 ///
@@ -261,7 +261,7 @@ impl OutputRedactor {
 /// (`scheme://user:pass@host`), env-var pairs (`KEY=VALUE` where KEY
 /// matches the secret-suffix list). PEM is irrelevant for a single
 /// command line and is skipped. The function is line-oriented so
-/// multi-line script bodies (e.g. F14's `--audit-script-body` or
+/// multi-line script bodies (e.g. `--audit-script-body` or
 /// `inspect bundle` step text) are masked line-by-line.
 ///
 /// Returns the input unchanged when nothing fires; otherwise an owned
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn s2_nul_separated_environ_blob_is_masked() {
         // /proc/<pid>/environ shape: NUL-separated KEY=VALUE pairs,
-        // no terminating newline. Pre-S2 the whole blob arrived as a
+        // no terminating newline. earlier the whole blob arrived as a
         // single line and only the first KEY was inspected, leaking
         // every secret after the first NUL.
         let r = OutputRedactor::new(false, false);

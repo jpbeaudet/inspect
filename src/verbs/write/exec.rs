@@ -46,10 +46,10 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     // hosts before the prompt fires. v0.1.1 dropped the separate
     // `--allow-exec` second-confirmation flag in favour of the read/
     // write split (`inspect run` for read, `inspect exec --apply`
-    // for write); see [INSPECT_v0.1.1_PATCH_SPEC.md] P6/P7.
+    // for write).
     let mut gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     gate.fanout_threshold = exec_fanout_threshold();
-    // F11 (v0.1.3): exec is the one write verb whose payload is
+    // Exec is the one write verb whose payload is
     // free-form shell, so we cannot synthesise an inverse. Refuse
     // `--apply` unless the operator opts in via `--no-revert`.
     if args.apply && !args.no_revert {
@@ -86,7 +86,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
 
-    // F12 (v0.1.3): per-invocation env-overlay overrides. Validate
+    // Per-invocation env-overlay overrides. Validate
     // once before the per-step loop so a typo in `--env` short-
     // circuits the whole exec invocation.
     let user_env: Vec<(String, String)> = {
@@ -103,12 +103,12 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     } else {
         args.heartbeat.unwrap_or(30)
     };
-    // F13 (v0.1.3): track transport-class outcomes across steps.
+    // Track transport-class outcomes across steps.
     let mut uniform_transport: Option<crate::ssh::transport::TransportClass> = None;
     let mut transport_failures = 0usize;
 
     for s in &steps {
-        // L7 (v0.1.3): one redactor per step. PEM block state must
+        // One redactor per step. PEM block state must
         // not leak across steps because a step truncated mid-block
         // would otherwise poison the next step's detection. The
         // composer is cheap to construct (regex are global Lazy).
@@ -123,7 +123,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             }
             None => user_cmd.clone(),
         };
-        // F12 (v0.1.3): apply per-namespace env overlay (merged with
+        // Apply per-namespace env overlay (merged with
         // `--env` overrides). Empty overlay → cmd unchanged.
         let effective_overlay =
             crate::exec::env_overlay::merge(Some(&s.ns.env_overlay), &user_env, args.env_clear);
@@ -177,7 +177,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         let redactor_ref = &redactor;
         let mut on_line = |line: &str| {
             *last_seen_cb.lock().unwrap() = Instant::now();
-            // L7 (v0.1.3): the redactor returns None for lines inside
+            // The redactor returns None for lines inside
             // (or ending) an active PEM private-key block; we skip
             // emission entirely so the BEGIN-line marker is the only
             // output for the whole block.
@@ -224,7 +224,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
 
         let dur = started.elapsed().as_millis() as u64;
 
-        // F13: classify dispatch outcome and split the existing
+        // Classify dispatch outcome and split the existing
         // success / command-failed code paths from the new
         // transport-failure path.
         let (out, dispatch_class, dispatch_retried, dispatch_reauth_id) =
@@ -288,7 +288,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
                 s.service().map(|x| format!("/{x}")).unwrap_or_default()
             ),
         );
-        // P4 (v0.1.1) + L7 (v0.1.3): stamp audit args with whether
+        // Stamp audit args with whether
         // the operator opted into `--show-secrets` AND whether the
         // redactor fired during this step, so post-hoc reviewers can
         // distinguish verbatim output from masked output. The
@@ -298,7 +298,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         e.exit = out.exit_code;
         e.duration_ms = dur;
         e.reason = crate::safety::validate_reason(args.reason.as_deref())?;
-        // F11 (v0.1.3): exec records `unsupported` revert + the
+        // Exec records `unsupported` revert + the
         // operator's explicit `--no-revert` acknowledgement so audit
         // readers can tell free-form mutations apart from mutations
         // that simply pre-date the contract.
@@ -329,7 +329,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             crate::redact::redact_for_audit(&cmd).into_owned()
         });
         e.secrets_masked_kinds = collect_kinds(&redactor);
-        // F13: stamp retry / reauth correlation fields and a
+        // Stamp retry / reauth correlation fields and a
         // `failure_class` of `ok` / `command_failed` so audit
         // consumers can filter by outcome alongside transport-error
         // entries.
@@ -394,7 +394,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     renderer.summary(trailer).next("inspect audit ls");
     renderer.print();
 
-    // F13: uniform transport failures route to ExitKind::Transport so
+    // Uniform transport failures route to ExitKind::Transport so
     // wrappers/scripts can branch on 12/13/14 and re-establish the
     // session before retrying.
     if let Some(c) = uniform_transport {
@@ -403,7 +403,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         }
     }
 
-    // P11: surface the remote command's exit code when the run was
+    // Surface the remote command's exit code when the run was
     // single-target or every target returned the same code. Mixed
     // exits collapse to ExitKind::Error to keep `set -e` scripts safe.
     if let Some(inner_code) = last_inner {
@@ -418,7 +418,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     })
 }
 
-/// L7 (v0.1.3): tag the audit `args` text with the redaction outcome.
+/// Tag the audit `args` text with the redaction outcome.
 /// `[secrets_exposed=true]` when the operator opted out via
 /// `--show-secrets`; `[secrets_masked=true]` when the redactor fired
 /// during this step; clean cmd otherwise.
@@ -443,7 +443,7 @@ fn stamp_args(
     }
 }
 
-/// L7 (v0.1.3): collect the redactor's per-kind activity for
+/// Collect the redactor's per-kind activity for
 /// `AuditEntry::secrets_masked_kinds`. Returns `None` (so
 /// `skip_serializing_if` elides the field) when no masker fired.
 fn collect_kinds(redactor: &crate::redact::OutputRedactor) -> Option<Vec<String>> {

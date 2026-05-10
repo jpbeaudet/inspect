@@ -4,9 +4,9 @@
 //! TCP and UDP via `ss -[tu]lnp` (preferred) with `netstat -[tu]lnp`
 //! fallback; for a container selector, `docker port <name>` is
 //! more honest (returns the published mapping with proto already
-//! tagged). L9 (v0.1.3) adds the UDP probe + a `--proto tcp|udp|all`
+//! tagged). adds the UDP probe + a `--proto tcp|udp|all`
 //! filter so DNS forwarders / mDNS responders / syslog receivers /
-//! IPSec daemons / WireGuard endpoints — invisible pre-L9 — surface
+//! IPSec daemons / WireGuard endpoints — invisible earlier — surface
 //! through the same verb operators already use for TCP.
 
 use anyhow::{anyhow, Result};
@@ -18,7 +18,7 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::{Envelope, Renderer};
 use crate::verbs::quote::shquote;
 
-/// F7.3 (v0.1.3): inclusive port filter.
+/// Inclusive port filter.
 #[derive(Debug, Clone, Copy)]
 enum PortFilter {
     None,
@@ -60,7 +60,7 @@ impl PortFilter {
     }
 }
 
-/// L9 (v0.1.3): which proto axis (or axes) the verb scans.
+/// Which proto axis (or axes) the verb scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProtoAxis {
     Tcp,
@@ -145,7 +145,7 @@ fn line_has_port(line: &str, mut pred: impl FnMut(u16) -> bool) -> bool {
     false
 }
 
-/// L9 (v0.1.3): scan a `docker port <ctr>` line for its proto tag.
+/// Scan a `docker port <ctr>` line for its proto tag.
 /// Output looks like `8200/tcp -> 0.0.0.0:8200` or `53/udp ->
 /// 0.0.0.0:53`. Returns `"tcp"` when no `/proto` suffix is found
 /// (some docker versions omit the proto for tcp).
@@ -195,7 +195,7 @@ pub fn run(args: PortsArgs) -> Result<ExitKind> {
             continue;
         }
 
-        // L9: walk the output. For host probes we attribute each
+        // Walk the output. For host probes we attribute each
         // line to the proto announced by the most recent
         // `--- tcp ---` / `--- udp ---` marker. For container
         // probes we read the proto out of the `<port>/<proto>`
@@ -218,7 +218,7 @@ pub fn run(args: PortsArgs) -> Result<ExitKind> {
             } else {
                 line_proto_for_docker(line)
             };
-            // L9: client-side proto filter is needed for the
+            // Client-side proto filter is needed for the
             // docker-port path (we can't push --proto down into
             // `docker port`); the host-probe path has already been
             // narrowed by the build_probe_cmd command set.
@@ -248,7 +248,7 @@ pub fn run(args: PortsArgs) -> Result<ExitKind> {
     renderer.dispatch(&fmt, select)
 }
 
-/// L9 (v0.1.3): recognize the `--- tcp ---` / `--- udp ---` markers
+/// Recognize the `--- tcp ---` / `--- udp ---` markers
 /// emitted by `build_probe_cmd`. Returns the proto string when the
 /// line is a marker, `None` otherwise.
 fn parse_marker(line: &str) -> Option<&'static str> {

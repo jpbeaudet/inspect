@@ -87,12 +87,23 @@ The CHANGELOG stays as-is — it is a historical document and
 preserves its release-window markers. The closed backlog moves to
 `archives/v<MAJOR.MINOR.PATCH>/` unmodified.
 
-### C. Test names
+### C. Test names + per-release archive test files
 
 **Do not rename test functions.** `f14_stream_records_streamed_true`
 stays. Test names are git-archaeology IDs, not user-facing prose,
-and bisecting against a release becomes painful if they drift. Test
-*comments* go through Class A/B/C the same as source.
+and bisecting against a release becomes painful if they drift.
+
+Test *comments* in active suites get Class A/B/C the same as source.
+But **per-release archive test files** — `tests/phase_a_v011.rs`,
+`tests/phase_b_v011.rs`, `tests/phase_c_v011.rs`,
+`tests/phase_f_v013.rs`, etc. — keep their release-window markers
+in section headers and bullet-list module docstrings. These files
+are themselves archaeology: their `//! - **P3** ...` style manifests
+document what the release shipped, and stripping the P/F/L prefixes
+dissociates them from the test names underneath. Treat the file's
+top-level `//!` block and per-section `// FN — heading` dividers
+as immutable; clean only inline body comments that read as
+substance, not as section IDs.
 
 ### D. Module-level `//!` doc-comments
 

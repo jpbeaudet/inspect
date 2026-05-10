@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): `inspect compose ps <ns>/<project>` — per-service
+//! `Inspect compose ps <ns>/<project>` — per-service
 //! status table for one compose project.
 //!
 //! Wraps `docker compose -p <project> ps --all --format json` over

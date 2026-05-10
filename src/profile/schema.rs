@@ -35,7 +35,7 @@ pub struct Profile {
     #[serde(default)]
     pub networks: Vec<Network>,
 
-    /// F6 (v0.1.3): compose projects discovered on this host via
+    /// Compose projects discovered on this host via
     /// `docker compose ls --format json`. Empty when the host runs
     /// no compose projects (or docker compose is not installed).
     /// Read by `inspect compose ls`, `inspect compose ps`, and the
@@ -198,7 +198,7 @@ pub struct Service {
     pub kind: ServiceKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-    /// P13: when a per-container `docker inspect` timed out at
+    /// When a per-container `docker inspect` timed out at
     /// discovery time we surface a partial entry (name + container_id
     /// only) and flag it here so `inspect setup --retry-failed` and
     /// downstream verbs can detect incomplete data.
@@ -331,7 +331,7 @@ pub struct Network {
     pub scope: Option<String>,
 }
 
-/// F6 (v0.1.3): a single compose project as reported by
+/// A single compose project as reported by
 /// `docker compose ls --format json`. Discovered at `inspect setup`
 /// time and cached on the [`Profile`]; consulted by `inspect compose
 /// ls`, `inspect compose ps`, and the `compose_projects:` line in
@@ -342,7 +342,7 @@ pub struct Network {
 /// because compose resolves relative `volumes`, `env_file`, etc.
 /// against it. Without this we'd reproduce the exact "operator drops
 /// back to `inspect run -- 'cd /opt/luminary-onyx && sudo docker
-/// compose …'`" pattern F6 was filed to eliminate.
+/// compose …'`" pattern that compose-mode was filed to eliminate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComposeProject {
     /// Project name (the value of `-p` / `COMPOSE_PROJECT_NAME`).

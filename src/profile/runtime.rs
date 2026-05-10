@@ -1,4 +1,4 @@
-//! F8 (v0.1.3) — runtime tier of the discovery cache.
+//! — runtime tier of the discovery cache.
 //!
 //! Background: the existing `Profile` cache at
 //! `~/.inspect/profiles/<ns>.yaml` is the **inventory tier** — slow-changing
@@ -68,7 +68,7 @@ const RUNTIME_FILENAME: &str = "runtime.json";
 /// most often: is the container actually running right now, is its
 /// health probe passing, and how many times has docker restarted it
 /// (a non-zero restart count after a deploy is the "flapping" smoke
-/// signal F4 will lean on).
+/// signal a future feature will lean on).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceRuntime {
     /// Real container name as docker reports it. Matches
@@ -101,7 +101,7 @@ pub struct RuntimeSnapshot {
     pub fetched_at_unix_secs: u64,
     #[serde(default)]
     pub services: Vec<ServiceRuntime>,
-    /// F8 observability: monotonically increasing count of how many
+    /// Monotonically increasing count of how many
     /// times this namespace's runtime has been refreshed (live-fetched
     /// then persisted) since the cache file was first created. Surfaced
     /// by `inspect cache show`. `#[serde(default)] = 0` so caches
@@ -229,7 +229,7 @@ impl SourceInfo {
 }
 
 /// Format a duration in seconds as a compact human string: `47s`,
-/// `3m12s`, `1h05m`. Matches the F8 spec example
+/// `3m12s`, `1h05m`. Matches the spec example
 /// `cached 47s ago (runtime: 47s, inventory: 3m12s)`.
 fn fmt_age(secs: u64) -> String {
     if secs < 60 {
@@ -335,7 +335,7 @@ pub fn save_runtime(snap: &RuntimeSnapshot) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// F8: a refresh that *bumps* `refresh_count`, preserving the prior
+/// A refresh that *bumps* `refresh_count`, preserving the prior
 /// count from any existing on-disk snapshot. Use this from the cache
 /// orchestrator's live-fetch path; never from raw [`save_runtime`]
 /// callers (tests, fixture writers) — those are intentionally
@@ -348,7 +348,7 @@ pub fn save_refreshed(mut snap: RuntimeSnapshot) -> Result<PathBuf> {
     save_runtime(&snap)
 }
 
-/// F8: advisory file lock around the cache-refresh critical section.
+/// Advisory file lock around the cache-refresh critical section.
 ///
 /// On unix (the only supported platform) this uses `flock(2)` with
 /// `LOCK_EX` against a sidecar `.lock` file inside the per-namespace

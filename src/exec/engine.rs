@@ -44,7 +44,7 @@ pub enum ExecOutput {
 
 /// Parse and execute a query end-to-end.
 pub fn execute(query: &str, opts: crate::exec::ExecOpts) -> Result<ExecOutput> {
-    // L3: chain unwinding + `$param` substitution happen inside
+    // Chain unwinding + `$param` substitution happen inside
     // `default_alias_resolver`, so a `@svc-logs(svc=pulse) |= "x"`
     // query with a chained body expands fully before the parser runs.
     let expanded = crate::logql::expand_aliases(query, crate::logql::default_alias_resolver)?;

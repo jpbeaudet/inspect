@@ -11,7 +11,7 @@ use crate::redact;
 pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
     let r = resolver::resolve(&args.namespace)?;
-    // L4 (v0.1.3): surface config-validation errors from `show` so a
+    // Surface config-validation errors from `show` so a
     // typo in `auth` / `password_env` / `session_ttl` is loud at
     // inspection time rather than waiting for the next `connect`.
     r.config.validate(&r.name)?;

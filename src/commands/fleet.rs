@@ -111,7 +111,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
 
     // Resolve --ns to a concrete list. `@group` is exclusive; mixing it
     // into a comma-list is rejected up-front so the precedence is
-    // unambiguous (L1).
+    // unambiguous.
     let chosen = expand_ns_pattern(&args.ns, &known)?;
     if chosen.is_empty() {
         return Err(anyhow!(
@@ -153,7 +153,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     let inner_selector = first_positional_index(&inner_args).map(|i| inner_args[i].as_str());
     let total_targets = estimate_total_targets(&chosen, inner_selector, force_ns_mode);
 
-    // L7: build the safety gate via the public constructor so any future
+    // Build the safety gate via the public constructor so any future
     // side-effects in `SafetyGate::new` stay in sync.
     let mut gate = SafetyGate::new(true, args.yes_all, args.yes_all);
     gate.fanout_threshold = FANOUT_THRESHOLD;
@@ -177,7 +177,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     }
 
     // Resolve concurrency. Emits a stderr warning if an env-supplied
-    // value was clamped (L4).
+    // value was clamped.
     let concurrency = resolve_concurrency(args.concurrency)?;
 
     // Self-binary path for child invocations.
@@ -209,7 +209,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
         })
         .collect();
 
-    // S1: collect every `key_passphrase_env` configured for OTHER
+    // Collect every `key_passphrase_env` configured for OTHER
     // namespaces so each child only sees its own credential env var.
     let foreign_passphrase_envs = passphrase_envs_by_ns(&all);
 
@@ -340,7 +340,7 @@ fn expand_ns_pattern(pat: &str, known: &[String]) -> Result<Vec<String>> {
     if trimmed.is_empty() {
         return Err(anyhow!("--ns must not be empty"));
     }
-    // L1: `@group` is exclusive. Mixing into a comma-list is ambiguous;
+    // `@group` is exclusive. Mixing into a comma-list is ambiguous;
     // require the user to either use the group alone or spell members out.
     let has_group_marker = trimmed.contains('@');
     let has_comma = trimmed.contains(',');
@@ -508,7 +508,7 @@ fn target_count_for_ns(parsed: Option<&Selector>, profile: Option<&Profile>) -> 
     }
 }
 
-/// S1 helper: build a map `namespace -> {passphrase env names}` from the
+/// Build a map `namespace -> {passphrase env names}` from the
 /// resolved namespace list. Children get every other namespace's vars
 /// stripped from their environment before spawn.
 fn passphrase_envs_by_ns(
@@ -592,7 +592,7 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
                 if matches!(check_socket(&sock, &target), MasterStatus::Alive) {
                     continue;
                 }
-                // L4 (v0.1.3): fleet prewarm honors per-namespace
+                // Fleet prewarm honors per-namespace
                 // auth mode but never prompts (allow_interactive=false);
                 // a password-auth namespace without `password_env` set
                 // will fail prewarm fast and retry in the child.
@@ -734,7 +734,7 @@ fn run_child(
         cmd.env_remove(FORCE_NS_VAR);
         cmd.env_remove(FORCE_PARENT_PID_VAR);
     }
-    // S1: drop foreign-namespace passphrase env vars from the child's
+    // Drop foreign-namespace passphrase env vars from the child's
     // environment. Each child only sees the `key_passphrase_env`
     // configured for its own namespace (if any).
     let own = passphrase_envs.get(&plan.namespace);
@@ -810,7 +810,7 @@ fn emit_json(
     ok: usize,
     failed: usize,
 ) -> anyhow::Result<()> {
-    // F19 (v0.1.3): build the envelope as a `serde_json::Value` so
+    // Build the envelope as a `serde_json::Value` so
     // `--select` can be applied uniformly through the same chokepoint
     // as every other JSON-emitting verb (`OutputDoc::print_json` /
     // `print_json_value`). Pre-fix this path hand-rolled JSON via

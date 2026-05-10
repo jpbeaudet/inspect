@@ -11,7 +11,7 @@
 //! fingerprints are still the source of truth for "drifted vs fresh"; the
 //! diff is a human-readable explanation of *what* changed.
 //!
-//! L10 (v0.1.3): port-level entries. `DriftDiff` gains a `port_changes:
+//! Port-level entries. `DriftDiff` gains a `port_changes:
 //! Vec<PortChange>` field with four kinds — `Added`, `Removed`, `Bind`
 //! (same container_port + proto, different host), `Proto` (same
 //! container_port + host, different proto). The cheap probe now also
@@ -19,7 +19,7 @@
 //! `discovery::ports_parse` handles every shape collected from the field
 //! corpus (IPv4 + IPv6 binds, ranges, unbound exposed ports,
 //! comma-separated lists). UDP port changes between snapshots flow
-//! through the same parser (L9 made `proto: "udp"` first-class on the
+//! through the same parser (the parser made `proto: "udp"` first-class on the
 //! cached side; the parser already understood `/udp` tokens).
 
 use std::time::Duration;
@@ -36,7 +36,7 @@ pub struct DriftRow {
     pub id: String,
     pub name: String,
     pub image: String,
-    /// L10 (v0.1.3): structured port set for the container, parsed
+    /// Structured port set for the container, parsed
     /// from `docker ps`'s `Ports` column on the live side and
     /// projected from `Service.ports` on the cached side. Sorted
     /// canonically by `(container, proto, host)` so the diff layer
@@ -49,10 +49,10 @@ impl DriftRow {
         // Stable, tab-separated. Order: id\tname\timage\tports. Names
         // matter for the human diff but the id is the primary key for
         // sameness — if ids match but image (or ports) changed,
-        // that's a "changed" entry, not add+remove. L10 (v0.1.3):
+        // that's a "changed" entry, not add+remove. :
         // port set folded into the fingerprint so a port-only change
         // (e.g. 5432:5432 -> 5433:5432) flips the fingerprint and
-        // surfaces a drift signal — pre-L10 it was silent.
+        // surfaces a drift signal — earlier it was silent.
         let mut s = format!("{}\t{}\t{}", self.id, self.name, self.image);
         for p in &self.ports {
             s.push('\t');
@@ -70,7 +70,7 @@ pub struct DriftContainerChange {
     pub to_image: String,
 }
 
-/// L10 (v0.1.3): the kind of port-level change between two snapshots.
+/// The kind of port-level change between two snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortChangeKind {
     /// Port present in live, absent in cached.
@@ -97,7 +97,7 @@ impl PortChangeKind {
     }
 }
 
-/// L10 (v0.1.3): one port-level change attributed to a container.
+/// One port-level change attributed to a container.
 /// `before` / `after` carry the structured payloads — `Added` has
 /// `before: None`, `Removed` has `after: None`, both `Bind` and
 /// `Proto` have both populated.
@@ -115,7 +115,7 @@ pub struct DriftDiff {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub changed: Vec<DriftContainerChange>,
-    /// L10 (v0.1.3): per-port differences within containers that
+    /// Per-port differences within containers that
     /// exist in both snapshots. Containers that are entirely added
     /// or removed surface in `added` / `removed` and do NOT also
     /// fan their per-port deltas into `port_changes` (that would be
@@ -176,11 +176,11 @@ pub enum DriftStatus {
 }
 
 /// Cheap probe of the live host. Container ids + names + images +
-/// L10 ports. Sorted by container id for stable hashing.
+/// ports. Sorted by container id for stable hashing.
 fn cheap_rows(namespace: &str, target: &SshTarget) -> anyhow::Result<Vec<DriftRow>> {
     // Docker's Go template needs the literal `\t` to make tabs; the shell
     // single-quote here passes the backslash-t through to docker untouched.
-    // L10 (v0.1.3): the `{{.Ports}}` column is appended so the probe
+    // The `{{.Ports}}` column is appended so the probe
     // captures port-level state in the same single ssh round-trip;
     // the column itself may be empty (containers without exposed
     // ports) and that case parses to `Vec::new()`.
@@ -210,11 +210,11 @@ fn parse_docker_ps(s: &str) -> Vec<DriftRow> {
             let id = it.next()?.trim().to_string();
             let name = it.next()?.trim().to_string();
             let image = it.next()?.trim().to_string();
-            // L10: 4th column is `{{.Ports}}`. Pre-L10 cached
+            // 4th column is `{{.Ports}}`. earlier cached
             // probe data without this column produces `it.next() ==
             // None`, which we handle by parsing an empty string
             // (yielding `ports: vec![]`) — the diff degrades to
-            // pre-L10 behavior on legacy cache rows.
+            // earlier behavior on legacy cache rows.
             let ports_raw = it.next().unwrap_or("").trim();
             if id.is_empty() {
                 return None;
@@ -232,7 +232,7 @@ fn parse_docker_ps(s: &str) -> Vec<DriftRow> {
 }
 
 /// Project the cached profile down to the same shape as [`cheap_rows`].
-/// L10 (v0.1.3): the `Service.ports: Vec<Port>` field already carries
+/// The `Service.ports: Vec<Port>` field already carries
 /// the structured port set the live probe surfaces — re-sort here so
 /// the canonical (container, proto, host) order matches the parser's
 /// output.
@@ -324,7 +324,7 @@ pub(crate) fn compute_diff(cached: &[DriftRow], live: &[DriftRow]) -> DriftDiff 
                         to_image: r.image.clone(),
                     });
                 }
-                // L10 (v0.1.3): per-port diff for containers present
+                // Per-port diff for containers present
                 // in both snapshots. Containers that are entirely
                 // added/removed surface in the container-level lists
                 // and DO NOT also fan their per-port deltas into
@@ -360,7 +360,7 @@ pub(crate) fn compute_diff(cached: &[DriftRow], live: &[DriftRow]) -> DriftDiff 
     diff
 }
 
-/// L10 (v0.1.3): compute port-level changes for a single container
+/// Compute port-level changes for a single container
 /// pair (cached vs live). The four kinds — Added / Removed / Bind /
 /// Proto — are produced by:
 ///
@@ -552,7 +552,7 @@ pub fn format_diff_human(diff: &DriftDiff) -> String {
         }
         lines.push(s);
     }
-    // L10 (v0.1.3): port-level changes get their own block so the
+    // Port-level changes get their own block so the
     // operator's eye lands on them next to the container-level diff.
     // Each row's payload is shaped like the `inspect ports` output
     // (`<host>:<container>/<proto>`) so a quick `inspect ports
@@ -598,7 +598,7 @@ fn format_port_change_payload(c: &PortChange) -> String {
 }
 
 /// Render a [`DriftDiff`] as a JSON object. Fields are stable for v0.1.2;
-/// L10 (v0.1.3) adds the `port_changes` array.
+/// adds the `port_changes` array.
 pub fn format_diff_json(diff: &DriftDiff) -> String {
     use crate::commands::list::json_string;
     let added: Vec<String> = diff.added.iter().map(|s| json_string(s)).collect();
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(v["changed"][0]["name"], "z");
         assert_eq!(v["changed"][0]["from"], "a");
         assert_eq!(v["changed"][0]["to"], "b");
-        // L10: port_changes is always present (empty array when no
+        // Port_changes is always present (empty array when no
         // port-level changes), so agent consumers don't need to
         // handle the missing-field case.
         assert!(v["port_changes"].is_array());
@@ -791,7 +791,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // L10 (v0.1.3) — port-level diff tests.
+    // — port-level diff tests.
     // -------------------------------------------------------------------
 
     #[test]
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn l10_full_5_container_fixture_per_spec() {
-        // Mirrors the L10 spec's acceptance test: A gains a port
+        // Mirrors the spec's acceptance test: A gains a port
         // (Added), B loses one (Removed), C bind moves (Bind), D
         // proto flips (Proto), E unchanged. Exactly 4 entries.
         let cached = vec![

@@ -113,7 +113,7 @@ pub fn find(id: &str) -> Option<&'static Topic> {
 }
 
 /// Returns true if `name` matches a top-level verb listed in
-/// [`VERB_TOPICS`]. Used by `inspect help <verb>` (P8) to fall back
+/// [`VERB_TOPICS`]. Used by `inspect help <verb>` to fall back
 /// to clap's long-help renderer when there is no editorial topic of
 /// the same id.
 pub fn is_verb(name: &str) -> bool {
@@ -217,18 +217,18 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("disconnect", &["ssh", "discovery"]),
     ("connections", &["ssh", "discovery"]),
     ("disconnect-all", &["ssh", "discovery"]),
-    // L4 (v0.1.3): the new `inspect ssh ...` family. Cross-links into
+    // The new `inspect ssh ...` family. Cross-links into
     // the ssh editorial topic (which gained the password-auth +
-    // add-key sections in L4) and safety (audit-log shape).
+    // add-key sections) and safety (audit-log shape).
     ("ssh", &["ssh", "safety"]),
-    // L2 (v0.1.3): the `inspect keychain ...` family. Cross-links
+    // The `inspect keychain ...` family. Cross-links
     // into the ssh editorial topic (which gained the credential-
-    // lifetime section in L2) and safety (audit-log shape for the
+    // lifetime section) and safety (audit-log shape for the
     // remove sub-verb).
     ("keychain", &["ssh", "safety"]),
     // Aliases.
     ("alias", &["aliases", "selectors", "search"]),
-    // F6 (v0.1.3): the compose verb cluster cross-links into the
+    // The compose verb cluster cross-links into the
     // compose editorial topic plus safety/formats. Listed once at
     // the top level — sub-verbs (`compose ls`, `compose ps`, …) are
     // discoverable via `inspect compose --help` and don't need
@@ -330,7 +330,7 @@ pub fn suggest(needle: &str) -> Option<&'static str> {
             _ => {}
         }
     }
-    // P8: also consider verbs, so `inspect help serch` suggests
+    // Also consider verbs, so `inspect help serch` suggests
     // `search` even though no topic by that id exists in the
     // editorial registry.
     for (verb, _) in VERB_TOPICS {
@@ -362,8 +362,8 @@ mod tests {
 
     #[test]
     fn topic_count_matches_bible() {
-        // 14 HP-1 editorial topics + 1 F6 (v0.1.3) compose topic
-        // + 1 F19 (v0.1.3) select topic.
+        // 14 HP-1 editorial topics + 1 compose topic
+        // + 1 select topic.
         assert_eq!(TOPICS.len(), 16);
     }
 

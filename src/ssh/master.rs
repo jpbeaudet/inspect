@@ -20,15 +20,15 @@ const ENV_INTERACTIVE_PASSPHRASE: &str = "INSPECT_INTERACTIVE_PASSPHRASE";
 const ENV_INTERACTIVE_PASSWORD: &str = "INSPECT_INTERACTIVE_PASSWORD";
 const SSH_BIN: &str = "ssh";
 
-/// L4 (v0.1.3): how many wrong passwords we tolerate during a single
+/// How many wrong passwords we tolerate during a single
 /// `inspect connect` invocation before aborting with a chained hint
 /// to `inspect help ssh`. Each wrong password costs one ssh master
 /// invocation; the cap exists so a noisy keyboard or stale
 /// muscle-memory does not lock the operator out repeatedly.
 pub const PASSWORD_MAX_ATTEMPTS: usize = 3;
 
-/// Smoke-caught (post-F13): how many wrong key passphrases we tolerate
-/// during a single `inspect connect` (or F13 auto-reauth) interactive
+/// Smoke-caught: how many wrong key passphrases we tolerate
+/// during a single `inspect connect` (or auto-reauth) interactive
 /// flow before aborting. Pinned to the same cap as
 /// [`PASSWORD_MAX_ATTEMPTS`] so the key-auth and password-auth paths
 /// have indistinguishable retry UX — typo on the auto-reauth prompt
@@ -50,17 +50,17 @@ pub enum AuthMode {
     EnvPassphrase,
     /// inspect started a master; passphrase came from interactive prompt.
     InteractivePrompt,
-    /// L4 (v0.1.3): inspect started a master; password came from a
+    /// Inspect started a master; password came from a
     /// configured `password_env`.
     EnvPassword,
-    /// L4 (v0.1.3): inspect started a master; password came from an
+    /// Inspect started a master; password came from an
     /// interactive prompt (one-shot per attempt; up to 3 attempts).
     InteractivePassword,
-    /// L2 (v0.1.3): inspect started a master; key passphrase came
+    /// Inspect started a master; key passphrase came
     /// from the OS keychain (previously saved with
     /// `--save-passphrase`).
     KeychainPassphrase,
-    /// L2 (v0.1.3): inspect started a master; password came from
+    /// Inspect started a master; password came from
     /// the OS keychain (previously saved with `--save-passphrase`
     /// against a `auth = "password"` namespace).
     KeychainPassword,
@@ -264,17 +264,17 @@ pub struct AuthSelection<'a> {
     pub allow_interactive: bool,
     /// Skip the "is there already a user mux?" probe.
     pub skip_existing_mux_check: bool,
-    /// L4 (v0.1.3): when `true`, take the password-auth branch instead
+    /// When `true`, take the password-auth branch instead
     /// of the key-auth branch (skip agent attempt, send
     /// `PreferredAuthentications=password`, use `password_env` or
     /// prompt). Set by `inspect connect` when the resolved namespace
     /// has `auth = "password"`.
     pub password_auth: bool,
-    /// L4 (v0.1.3): name of the env var holding the SSH password.
+    /// Name of the env var holding the SSH password.
     /// Falls back to interactive prompt when `None` (and
     /// `allow_interactive` is true).
     pub password_env: Option<&'a str>,
-    /// L2 (v0.1.3): when `true`, save the prompted credential to
+    /// When `true`, save the prompted credential to
     /// the OS keychain after a successful master start so future
     /// connects in fresh shell sessions don't re-prompt. Set by
     /// `inspect connect --save-passphrase`. Backend unavailable →
@@ -328,7 +328,7 @@ pub fn start_master(
         });
     }
 
-    // L4 (v0.1.3): password-auth branch — skip the agent/key attempt
+    // Password-auth branch — skip the agent/key attempt
     // entirely (key auth is disabled at the ssh level via
     // `PubkeyAuthentication=no` so a configured agent key cannot
     // bypass the operator's intent to authenticate by password) and
@@ -350,7 +350,7 @@ pub fn start_master(
 
     // (4) Env-var passphrase.
     //
-    // F13 (v0.1.3, smoke-driven): when `key_passphrase_env` is
+    // When `key_passphrase_env` is
     // configured but the variable is unset or empty in the current
     // environment (operator returned to a fresh shell after a
     // codespace restart, forgot to re-export, etc.), do NOT hard-
@@ -392,7 +392,7 @@ pub fn start_master(
         }
     }
 
-    // (4.5) L2 (v0.1.3): consult the OS keychain. This step fires only
+    // (4.5) : consult the OS keychain. This step fires only
     // when an entry was previously saved for `namespace`; missing
     // entries (or backend errors) silently fall through to the
     // interactive prompt below — we never spam stderr on every connect
@@ -427,7 +427,7 @@ pub fn start_master(
 
     // (5) Interactive — N-attempt retry loop shared with the
     // password-auth path so wrong passphrase / wrong password have
-    // identical UX. F13 auto-reauth rides this loop too because
+    // identical UX. auto-reauth rides this loop too because
     // `reauth_namespace` calls `start_master`.
     if auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return run_interactive_master_with_retries(
@@ -483,7 +483,7 @@ fn run_master(
 /// passphrase value (it's a passphrase helper, not a yes/no helper),
 /// so ssh sees garbage, reprompts, and we burn turns in a tight loop
 /// until the operator ^C's. (Smoke-caught: arte's known_hosts entry
-/// was wiped on codespace restart, F13's auto-reauth path hung 41+
+/// was wiped on codespace restart, the auto-reauth path hung 41+
 /// askpass invocations into the host-key prompt loop.)
 fn build_master_command(
     target: &SshTarget,
@@ -519,7 +519,7 @@ fn build_master_command(
     cmd
 }
 
-/// L4 (v0.1.3): like `run_master` but with caller-supplied ssh `-o`
+/// Like `run_master` but with caller-supplied ssh `-o`
 /// options appended (e.g. `PreferredAuthentications=password` for
 /// the password-auth branch). Each entry is a single `KEY=VALUE`
 /// string, applied as `-o KEY=VALUE`.
@@ -618,7 +618,7 @@ fn extra_env_pairs() -> Vec<(OsString, OsString)> {
     Vec::new()
 }
 
-/// L4 (v0.1.3): ssh `-o` options that switch a master attempt to
+/// Ssh `-o` options that switch a master attempt to
 /// password authentication only. `PubkeyAuthentication=no` ensures
 /// an agent-loaded key cannot pre-empt the operator's intent;
 /// `NumberOfPasswordPrompts=1` makes one ssh invocation = one
@@ -630,7 +630,7 @@ const PASSWORD_AUTH_SSH_OPTS: &[&str] = &[
     "NumberOfPasswordPrompts=1",
 ];
 
-/// L4 (v0.1.3): password-auth branch of `start_master`. Tries
+/// Password-auth branch of `start_master`. Tries
 /// `password_env` first when set; otherwise prompts on the
 /// controlling tty (when `allow_interactive`); retries up to
 /// `PASSWORD_MAX_ATTEMPTS` times on auth failure.
@@ -672,7 +672,7 @@ fn start_master_password(
         });
     }
 
-    // L2 (v0.1.3): consult the OS keychain before prompting. Mirrors
+    // Consult the OS keychain before prompting. Mirrors
     // the key-auth path; missing entry / backend error → silent fall
     // through to the prompt loop. A keychain hit costs no attempts
     // against the PASSWORD_MAX_ATTEMPTS counter (the operator's stored
@@ -884,10 +884,10 @@ fn validate_key_passphrase_locally(key_path: &Path, askpass: &AskpassScript) -> 
     }
 }
 
-/// Smoke-caught (post-F13): the shared prompt-attempt-warn-retry loop
+/// Smoke-caught: the shared prompt-attempt-warn-retry loop
 /// for both interactive auth flavors. The key-auth path used to be a
 /// single-shot prompt — one wrong passphrase aborted the entire
-/// connect (and any F13 auto-reauth) with `auto-reauth for '<ns>'
+/// connect (and any auto-reauth) with `auto-reauth for '<ns>'
 /// failed`, while password auth had three attempts. The two paths
 /// now share this helper so the trap class — "two interactive auth
 /// flavors with divergent retry UX" — cannot reappear.
@@ -979,7 +979,7 @@ fn run_interactive_master_with_retries(
             )
         };
         std::env::remove_var(config.env_var);
-        // L2 (v0.1.3): save BEFORE wiping if requested AND the master
+        // Save BEFORE wiping if requested AND the master
         // came up. Backend errors are warnings, not hard failures.
         if result.is_ok() && save_to_keychain {
             save_credential_to_keychain(namespace, &secret, config.save_kind);
@@ -1019,7 +1019,7 @@ fn run_interactive_master_with_retries(
     ))
 }
 
-/// L4 (v0.1.3): per-namespace marker that records whether we have
+/// Per-namespace marker that records whether we have
 /// already shown the "password auth is less secure" warning for this
 /// namespace. `~/.inspect/.password_warned/<ns>` (touched on first
 /// successful password connect, deleted by `inspect ssh add-key`
@@ -1031,7 +1031,7 @@ pub fn password_warned_path(namespace: &str) -> PathBuf {
         .join(namespace)
 }
 
-/// L2 (v0.1.3): save a credential to the OS keychain after a
+/// Save a credential to the OS keychain after a
 /// successful interactive master start when the operator passed
 /// `--save-passphrase`. Backend errors are warnings, not hard
 /// failures — the master is already up, so the connect verb has
@@ -1059,7 +1059,7 @@ fn save_credential_to_keychain(namespace: &str, secret: &str, kind: &str) {
     }
 }
 
-/// L4 (v0.1.3): emit the one-time warning on first successful
+/// Emit the one-time warning on first successful
 /// password connect for `<ns>`, then create the marker so subsequent
 /// connects stay quiet.
 fn maybe_warn_password_auth(namespace: &str) {
@@ -1176,9 +1176,9 @@ mod accept_new_tests {
 
 #[cfg(test)]
 mod interactive_retry_parity_tests {
-    //! Smoke-caught (post-F13): the key-auth interactive prompt was a
+    //! Smoke-caught: the key-auth interactive prompt was a
     //! single-shot — one wrong passphrase aborted the whole connect
-    //! (and any F13 auto-reauth) with `auto-reauth for '<ns>' failed`,
+    //! (and any auto-reauth) with `auto-reauth for '<ns>' failed`,
     //! while password auth had 3 retries. The two paths now share
     //! [`run_interactive_master_with_retries`] so the cap, prompt
     //! shape, and warning format cannot drift apart again. These

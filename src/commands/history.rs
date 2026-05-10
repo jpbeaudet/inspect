@@ -1,4 +1,4 @@
-//! F18 (v0.1.3): `inspect history show|list|clear|rotate`.
+//! `Inspect history show|list|clear|rotate`.
 //!
 //! Management surface for the per-namespace per-day transcript files
 //! at `~/.inspect/history/<ns>-<YYYY-MM-DD>.log[.gz]`. The transcript
@@ -16,7 +16,7 @@ use crate::transcript::rotate::{list_transcripts, read_transcript, run_rotate, R
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 
 pub fn run(args: HistoryArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2). Each
     // subcommand has its own format block — touching them
     // all in one place keeps the contract uniform.
@@ -82,7 +82,7 @@ fn show(o: &crate::cli::HistoryShowArgs) -> Result<ExitKind> {
     let audit_filter = o.audit_id.as_deref();
     let json = o.format.is_json();
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // the top of the streaming loop so a parse error fails fast before
     // any frame is emitted.
     let mut select = o.format.select_filter()?;

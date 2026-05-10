@@ -132,7 +132,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let new_hash = sha256_hex(w.new_text.as_bytes());
         let b64 = base64::engine::general_purpose::STANDARD.encode(w.new_text.as_bytes());
 
-        // F11 (v0.1.3): pre-stage the inverse before dispatching.
+        // Pre-stage the inverse before dispatching.
         let revert = Revert::state_snapshot(
             format!("sha256:{prev_hash}"),
             format!(

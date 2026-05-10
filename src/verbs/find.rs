@@ -10,19 +10,19 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(args: FindArgs) -> Result<ExitKind> {
-    // F19 (v0.1.3): activate the FormatArgs mutex check
+    // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted.
     let mut select = args.format.select_filter()?;
 
     let mut total_hits = 0usize;
     for step in iter_steps(&nses, &targets) {
-        // L7 (v0.1.3): per-step redactor for symmetry with the other
+        // Per-step redactor for symmetry with the other
         // read verbs. `find` emits file paths only — secret patterns
         // rarely fire — but a path like
         // `/srv/dump/postgres://u:p@db/secret.sql` would otherwise
@@ -46,7 +46,7 @@ pub fn run(args: FindArgs) -> Result<ExitKind> {
             find_cmd.push_str("-name ");
             find_cmd.push_str(&shquote(pat));
         }
-        // F5 dual-axis (v0.1.3): docker exec must receive the
+        // Docker exec must receive the
         // container_name, not the canonical service name. See
         // `Step::container()` doc; same fix shipped for cat/ls/grep.
         let cmd = match step.container() {

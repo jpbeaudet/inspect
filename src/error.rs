@@ -12,7 +12,7 @@ use thiserror::Error;
 
 /// Logical exit kinds that map to documented exit codes.
 ///
-/// `Inner(u8)` (P11, v0.1.1) carries through the remote command's own
+/// `Inner(u8)` carries through the remote command's own
 /// exit code on `inspect run` / `inspect exec`. Shells truncate to 8
 /// bits, so we store the bottom byte; callers should pass
 /// `(remote_exit_code & 0xff) as u8`.
@@ -22,7 +22,7 @@ pub enum ExitKind {
     NoMatches,
     Error,
     Inner(u8),
-    /// F13 (v0.1.3): SSH transport-level failure. Maps to dedicated
+    /// SSH transport-level failure. Maps to dedicated
     /// exit codes 12 / 13 / 14 (stale / unreachable / auth_failed) so
     /// wrapper agents can distinguish a dead socket from a real
     /// remote command failure. The verb's own SUMMARY trailer carries
@@ -240,7 +240,7 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         summary: "more than one output format flag was set",
         help_topic: Some("formats"),
     },
-    // ---- select / jq filter (F19, v0.1.3) -----------------------------
+    // ---- select / jq filter -----------------------------
     // Three discrete fragments rather than a single broader "filter"
     // match so an unrelated error message containing the word "filter"
     // (e.g. compose-logs --match/--exclude prose) cannot accidentally
@@ -338,7 +338,7 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         summary: "namespace name does not match the [a-z0-9][a-z0-9_-]* shape",
         help_topic: Some("discovery"),
     },
-    // S4 (post-v0.1.3 security audit): user / host shape validation.
+    // User / host shape validation.
     // Defense-in-depth against ssh_config `Match exec %u` expansion
     // (CVE-2026-35386 family).
     ErrorEntry {
@@ -383,7 +383,7 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("recipes"),
     },
     // ---- help ---------------------------------------------------------
-    // F3 (v0.1.3): wording changed from "unknown help topic" to
+    // Wording changed from "unknown help topic" to
     // "unknown command or topic" so `inspect help <foo>` reflects
     // both lookup paths (verb synonym + editorial topic). The
     // fragment match is still substring-based, and the catalog row

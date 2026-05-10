@@ -33,7 +33,7 @@ use crate::verbs::output::{NextStep, OutputDoc};
 /// renderer falls back to a generic projection of `doc.data` for
 /// table/csv/etc.
 ///
-/// `select` is the F19 (v0.1.3) `--select` triple (filter source, raw
+/// `select` is the `--select` triple (filter source, raw
 /// flag, slurp flag). It is meaningful only on the JSON branch; the
 /// non-JSON branches return `Ok(Success)` because `FormatArgs::resolve`
 /// already rejects `--select` against any non-JSON-class format with

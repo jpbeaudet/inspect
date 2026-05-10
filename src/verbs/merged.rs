@@ -1,4 +1,4 @@
-//! `--merged` multi-container log view (P5, v0.1.1).
+//! `--merged` multi-container log view.
 //!
 //! When a `inspect logs` selector matches multiple services and the user
 //! passes `--merged`, we render a single interleaved stream prefixed by
@@ -18,7 +18,7 @@
 //!   between hosts is documented in the help body; the alternative
 //!   (buffered window-merge) would cap the live feel of `--follow`.
 //!
-//! Field-pitfall driver: P5 in `INSPECT_v0.1.1_PATCH_SPEC.md`. Operators
+//! Field-pitfall driver: merged tail across services. Operators
 //! correlating across multiple services lost mental context juggling
 //! N terminal panes; the merged view restores chronology.
 
@@ -136,7 +136,7 @@ pub fn batch_merged(
                     let opts = RunOpts::with_timeout(timeout_secs);
                     let out = runner.run(src.namespace, src.target, &src.cmd, opts)?;
                     let mut buf = Vec::new();
-                    // L7 (v0.1.3): each source has its own redactor so
+                    // Each source has its own redactor so
                     // a PEM block from source A doesn't poison source
                     // B's state — the merge happens after redaction.
                     let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
@@ -195,7 +195,7 @@ pub fn follow_merged(
                 let opts = RunOpts::with_timeout(timeout_secs);
                 let mut seq: u64 = 0;
                 let svc = src.svc.clone();
-                // L7 (v0.1.3): per-source redactor — same rationale as
+                // Per-source redactor — same rationale as
                 // `batch_merged` (PEM state must not cross sources).
                 let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
                 let _ =
@@ -247,7 +247,7 @@ pub fn print_human(prefix_svc: &str, body: &str) {
 /// JSON-out variant: emit a single envelope keyed on the namespace
 /// recorded by the source plus a `svc` field for the merged stream.
 ///
-/// `filter` is the F19 (v0.1.3) `--select` streaming filter, threaded
+/// `filter` is the `--select` streaming filter, threaded
 /// through the same chokepoint as the non-merged path so `--select`
 /// covers both flavors uniformly.
 pub fn print_json(

@@ -1,4 +1,4 @@
-//! F12 (v0.1.3): per-namespace remote environment overlay.
+//! Per-namespace remote environment overlay.
 //!
 //! Renders an `env KEY1="VAL1" KEY2="VAL2" ...` prefix that the remote
 //! shell parses and applies before the operator's command runs. The
@@ -74,7 +74,7 @@ pub fn dquote_expandable(s: &str) -> String {
 /// arteOS at smoke time). The `[-]` form in env's synopsis is
 /// the `--ignore-environment` short option, not a `--`-style
 /// terminator. The pre-fix recipe rendered `env KEY=VAL -- CMD`
-/// which surfaced as F12 P5.F12.5 fail on the live smoke. Drop
+/// which surfaced live during release smoke. Drop
 /// the `--` and rely on the natural `env KEY=VAL CMD` shape that
 /// every env (GNU, BSD, busybox) supports. Safe because
 /// `is_valid_env_key` already rejects keys starting with `-` (POSIX
@@ -126,7 +126,7 @@ pub fn parse_kv(raw: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
-/// F12 (v0.1.3): compute the effective overlay for a single
+/// Compute the effective overlay for a single
 /// `inspect run` / `inspect exec` invocation.
 ///
 /// * `base` — the namespace overlay from `[namespaces.<ns>.env]`,
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn dquote_keeps_metachars_literal() {
-        // F12 quoting-safety contract: `;` inside a value never splits
+        // `;` inside a value never splits
         // the remote command list. Test mirrors the spec's
         // `MALICIOUS = "v;rm -rf /"` reproducer.
         assert_eq!(dquote_expandable("v;rm -rf /"), "\"v;rm -rf /\"");

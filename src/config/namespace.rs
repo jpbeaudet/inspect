@@ -25,7 +25,7 @@ pub struct NamespaceConfig {
     /// `show --json` purposes — never written to `servers.toml`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_inline: Option<String>,
-    /// F12 (v0.1.3): per-namespace remote environment overlay. Applied
+    /// Per-namespace remote environment overlay. Applied
     /// transparently to every `inspect run` / `inspect exec` invocation
     /// against this namespace as `env KEY1="VAL1" KEY2="VAL2" -- <cmd>`.
     /// Values are passed through the remote shell with double-quoting,
@@ -36,7 +36,7 @@ pub struct NamespaceConfig {
     /// `None` (the default) means no overlay is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
-    /// F13 (v0.1.3): per-namespace opt-out for stale-session
+    /// Per-namespace opt-out for stale-session
     /// auto-reauth. Default (when `None`) is `true` — every dispatch
     /// that hits a transport-stale failure transparently re-auths
     /// and retries once. Operators who want every session expiry to
@@ -44,28 +44,28 @@ pub struct NamespaceConfig {
     /// `auto_reauth = false` in `~/.inspect/servers.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_reauth: Option<bool>,
-    /// F18 (v0.1.3): per-namespace transcript override. When the
+    /// Per-namespace transcript override. When the
     /// `[namespaces.<ns>.history]` table is present, its fields
     /// override the global defaults: `disabled = true` skips
     /// transcript writes for this namespace entirely (audit log is
     /// still written), `redact = "off"|"normal"|"strict"` overrides
-    /// the L7 redaction mode applied to lines tee'd into the
+    /// the redaction mode applied to lines tee'd into the
     /// transcript file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryNsOverride>,
-    /// L4 (v0.1.3): authentication mode. `Some("key")` (default
+    /// Authentication mode. `Some("key")` (default
     /// when `None`) uses the existing key/agent path; `Some("password")`
     /// switches to interactive / `password_env`-sourced password auth
     /// for legacy boxes and locked-down bastions that do not accept
     /// keys. Any other value is rejected by `validate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
-    /// L4 (v0.1.3): name of the env var holding the SSH password
+    /// Name of the env var holding the SSH password
     /// when `auth = "password"`. Never store the password itself on
     /// disk. Falls back to an interactive prompt when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_env: Option<String>,
-    /// L4 (v0.1.3): per-namespace `ControlPersist` override. Default
+    /// Per-namespace `ControlPersist` override. Default
     /// is `12h` for password-auth namespaces (vs. the existing 30m
     /// local / 4h codespace defaults for key auth). Capped at `24h`
     /// — `validate` rejects anything longer so a forgotten laptop
@@ -74,7 +74,7 @@ pub struct NamespaceConfig {
     pub session_ttl: Option<String>,
 }
 
-/// F18 (v0.1.3): per-namespace transcript policy override. See
+/// Per-namespace transcript policy override. See
 /// [`NamespaceConfig::history`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryNsOverride {
@@ -84,9 +84,9 @@ pub struct HistoryNsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
     /// Per-namespace transcript redaction mode: `"normal"` (default
-    /// — L7 four-masker pipeline), `"strict"` (reserved; identical
+    /// — four-masker pipeline), `"strict"` (reserved; identical
     /// to `"normal"` in v0.1.3), `"off"` (write raw lines without
-    /// masking). `None` ⇒ inherit the global L7 default.
+    /// masking). `None` ⇒ inherit the global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redact: Option<String>,
 }
@@ -94,7 +94,7 @@ pub struct HistoryNsOverride {
 impl NamespaceConfig {
     /// Merge `other` over `self`: any field set in `other` takes precedence.
     pub fn merge_over(&self, other: &NamespaceConfig) -> NamespaceConfig {
-        // F12 (v0.1.3): env overlay merge semantics. When both file
+        // Env overlay merge semantics. When both file
         // and env override carry a map, `other`'s keys win on
         // collision but file-only keys survive. This matches the
         // resolver's general "env over file" idiom (env is a
@@ -151,7 +151,7 @@ impl NamespaceConfig {
                 field: "user",
             });
         }
-        // S4 (post-v0.1.3 security audit): reject shell metacharacters
+        // Reject shell metacharacters
         // and whitespace in `user` / `host`. Both are passed to ssh as
         // separate argv entries (so direct command injection isn't
         // possible) but ssh_config `Match exec` blocks expand `%u` /
@@ -178,7 +178,7 @@ impl NamespaceConfig {
         if self.key_path.is_some() && self.key_inline.is_some() {
             return Err(ConfigError::ConflictingKeySources);
         }
-        // F12 (v0.1.3): every env-overlay key must be a POSIX-portable
+        // Every env-overlay key must be a POSIX-portable
         // identifier ([A-Za-z_][A-Za-z0-9_]*). Reject anything else
         // here so a typo'd config does not silently produce a remote
         // command line that the shell parses as something else
@@ -194,7 +194,7 @@ impl NamespaceConfig {
                 }
             }
         }
-        // L4 (v0.1.3): auth must be exactly `key` or `password` when
+        // Auth must be exactly `key` or `password` when
         // set; password_env requires auth=password to make sense;
         // session_ttl must parse and be ≤ 24h.
         if let Some(mode) = self.auth.as_deref() {
@@ -228,7 +228,7 @@ impl NamespaceConfig {
     }
 }
 
-/// F12 (v0.1.3): `[A-Za-z_][A-Za-z0-9_]*`, max 256 chars. Mirrors
+/// `[A-Za-z_][A-Za-z0-9_]*`, max 256 chars. Mirrors
 /// POSIX 3.231 (Name) which `sh`, `env`, and `printenv` all enforce.
 pub fn is_valid_env_key(s: &str) -> bool {
     if s.is_empty() || s.len() > 256 {
@@ -242,7 +242,7 @@ pub fn is_valid_env_key(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// S4 (post-v0.1.3 security audit): POSIX-portable login-name shape,
+/// POSIX-portable login-name shape,
 /// `[A-Za-z_][A-Za-z0-9_.-]*`, max 64 chars. Same shape `useradd(8)`
 /// enforces by default. Defense-in-depth against ssh_config
 /// `Match exec %u` expansion (CVE-2026-35386 family).
@@ -258,7 +258,7 @@ pub fn is_valid_user(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
-/// S4 (post-v0.1.3 security audit): IP literal or DNS-shaped name.
+/// IP literal or DNS-shaped name.
 /// We are deliberately permissive — `:` for IPv6 literals, `[]` for
 /// bracketed IPv6, `.` for IPv4 / DNS, `-` and alnum for DNS labels
 /// — and reject anything else. Whitespace, `;`, `&`, `|`, `$`, `\``,
@@ -373,7 +373,7 @@ mod tests {
         assert!(validate_namespace_name("bad name").is_err());
     }
 
-    // ---- S4 (post-v0.1.3 security audit): user / host shape ---------------
+    // ---- user / host shape (post-v0.1.3 security audit) -------------------
 
     #[test]
     fn s4_user_shape_accepts_posix_login_names() {
@@ -459,7 +459,7 @@ mod tests {
         ));
     }
 
-    // ---- L4 (v0.1.3): auth / password_env / session_ttl --------------------
+    // ---- : auth / password_env / session_ttl --------------------
 
     #[test]
     fn l4_auth_mode_defaults_to_key_when_unset() {

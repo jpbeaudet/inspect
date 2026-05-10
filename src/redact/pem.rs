@@ -1,4 +1,4 @@
-//! Multi-line PEM private-key block redactor (L7, v0.1.3).
+//! Multi-line PEM private-key block redactor.
 //!
 //! Recognized BEGIN forms (`-----BEGIN ... PRIVATE KEY-----`):
 //! - `-----BEGIN PRIVATE KEY-----`            (PKCS#8 unencrypted)

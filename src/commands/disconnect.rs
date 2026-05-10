@@ -14,7 +14,7 @@ use crate::verbs::output::{NextStep, OutputDoc};
 pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
 
-    // P8-C fix (v0.1.3): pair with the corresponding `set_namespace`
+    // Pair with the corresponding `set_namespace`
     // in `connect.rs` so disconnect also lands in the per-ns
     // transcript log. Set early — before resolver::resolve so even a
     // resolution failure produces a transcript block recording the
@@ -32,8 +32,8 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
         closed = true;
     }
 
-    // P8-C fix (v0.1.3): write an audit entry for the disconnect
-    // itself so the F18 transcript footer carries an
+    // Write an audit entry for the disconnect
+    // itself so the transcript footer carries an
     // `audit_id=<id>` cross-link. Same rationale as `connect`: gives
     // `audit grep verb=disconnect` a cleanly enumerable forensic
     // surface, and a `revert` preview pointing at the inverse
@@ -54,7 +54,6 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     if args.format.is_json() {
-        // P0.6 sweep (v0.1.3): L7 envelope.
         let summary = if closed {
             format!("'{}' disconnected (was {})", resolved.name, prior.label())
         } else {

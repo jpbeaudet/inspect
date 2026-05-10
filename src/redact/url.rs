@@ -1,4 +1,4 @@
-//! URL credential masker (L7, v0.1.3).
+//! URL credential masker.
 //!
 //! Replaces the password portion of `scheme://user:pass@host` patterns
 //! with `****`, preserving the scheme, username, and host so the
@@ -22,7 +22,7 @@ fn url_cred_re() -> &'static Regex {
         // scheme: alpha first, then alnum / + / - / .
         // user:   any non-:/@/whitespace character
         // pass:   greedy `[^\s]+` so that passwords *containing*
-        //         `@` (the L7 audit §5.4 case
+        //         `@` (the audit §5.4 case
         //         `postgres://admin:p@ssw0rd!@host/db`) are masked
         //         in full. Greedy + regex backtracking finds the
         //         rightmost `@` that is followed by a host-shaped

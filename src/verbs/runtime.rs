@@ -34,7 +34,7 @@ pub trait RemoteRunner: Send + Sync {
         opts: RunOpts,
     ) -> Result<RemoteOutput>;
 
-    /// Streaming variant (P1, v0.1.1). Default implementation buffers
+    /// Streaming variant. Default implementation buffers
     /// via [`Self::run`] and delivers lines after the command exits —
     /// correct for mocks and replay-based tests. Live runners should
     /// override to pump output as it arrives.
@@ -77,7 +77,7 @@ pub trait RemoteRunner: Send + Sync {
         Ok(out)
     }
 
-    /// F13 (v0.1.3): re-establish the persistent master socket for
+    /// Re-establish the persistent master socket for
     /// `namespace`. Called by the dispatch wrapper when a transport-
     /// stale failure is detected and the verb's caller has not opted
     /// out via `--no-reauth` / `auto_reauth = false`. Live runner
@@ -129,7 +129,7 @@ impl RemoteRunner for LiveRunner {
     }
 
     fn reauth(&self, namespace: &str, _target: &SshTarget) -> Result<()> {
-        // F13 (v0.1.3): delegate to the same code path that interactive
+        // Delegate to the same code path that interactive
         // `inspect connect <ns>` uses. Honors askpass / agent semantics
         // so the operator gets the same passphrase prompt path as a
         // first-time connect. Non-tty + no-agent failure surfaces as
@@ -149,20 +149,19 @@ struct MockEntry {
     stderr: String,
     #[serde(default)]
     exit: i32,
-    /// F9 (v0.1.3): when `true` and the caller forwarded stdin via
+    /// When `true` and the caller forwarded stdin via
     /// `RunOpts.stdin`, the mock prepends the (lossily UTF-8 decoded)
     /// stdin to its `stdout`. Lets tests assert that bytes really
     /// crossed the runner boundary without needing a live ssh.
     #[serde(default)]
     echo_stdin: bool,
-    /// F13 (v0.1.3): when set, the mock returns `Err(anyhow!("transport:<class>"))`
-    /// from `run()` instead of an `Ok(RemoteOutput)`. Lets the F13
-    /// acceptance suite drive the dispatch-wrapper's reauth + retry
+    /// When set, the mock returns `Err(anyhow!("transport:<class>"))`
+    /// from `run()` instead of an `Ok(RemoteOutput)`. Lets the     /// acceptance suite drive the dispatch-wrapper's reauth + retry
     /// path without a live ssh. Recognized values: `"stale"`,
     /// `"unreachable"`, `"auth_failed"`.
     #[serde(default)]
     transport_class: Option<String>,
-    /// F13 (v0.1.3): consume this entry at most `max_uses` times.
+    /// Consume this entry at most `max_uses` times.
     /// Once exhausted, the entry is skipped on subsequent matches so
     /// a follow-up entry (e.g. a successful retry after reauth) can
     /// take over. `None` means infinite reuse (today's behavior).
@@ -172,10 +171,10 @@ struct MockEntry {
 
 pub struct MockRunner {
     entries: Vec<MockEntry>,
-    /// F13 (v0.1.3): per-entry consumption counter for `max_uses`.
+    /// Per-entry consumption counter for `max_uses`.
     /// Indexed by `entries` position; 0 means "never matched yet".
     use_counts: Mutex<Vec<u32>>,
-    /// F13 (v0.1.3): how many reauth invocations the mock has served.
+    /// How many reauth invocations the mock has served.
     /// Lets tests assert that auto-reauth fired exactly once (the
     /// contract is one retry per verb invocation).
     reauth_count: Mutex<u32>,
@@ -202,7 +201,7 @@ impl RemoteRunner for MockRunner {
         cmd: &str,
         opts: RunOpts,
     ) -> Result<RemoteOutput> {
-        // F13 (v0.1.3): scan in declaration order; respect `max_uses`
+        // Scan in declaration order; respect `max_uses`
         // so a stale-marker entry can be consumed once and the next
         // matching entry takes over on the post-reauth retry.
         let mut counts = self.use_counts.lock().unwrap();
@@ -248,7 +247,7 @@ impl RemoteRunner for MockRunner {
     }
 
     fn reauth(&self, _namespace: &str, _target: &SshTarget) -> Result<()> {
-        // F13 (v0.1.3): test-side reauth simulation. `INSPECT_MOCK_REAUTH`
+        // Test-side reauth simulation. `INSPECT_MOCK_REAUTH`
         // selects success (`ok`, default) vs failure (`fail`). Counter
         // is bumped on every call so tests can assert reauth fired
         // exactly once per verb invocation.
@@ -289,13 +288,13 @@ pub fn current_runner() -> Box<dyn RemoteRunner> {
 pub fn resolve_target(namespace: &str) -> Result<(ResolvedNamespace, SshTarget)> {
     use crate::config::resolver as ns_resolver;
     let ns = ns_resolver::resolve(namespace)?;
-    // F12 (v0.1.3): the resolver itself does not validate (so callers
+    // The resolver itself does not validate (so callers
     // can introspect partial configs); every dispatch site DOES need
     // validation, including the new env-overlay key check, so do it
     // here at the single boundary every verb crosses.
     ns.config.validate(&ns.name)?;
     let target = SshTarget::from_resolved(&ns)?;
-    // F18 (v0.1.3): every verb that resolves a namespace crosses
+    // Every verb that resolves a namespace crosses
     // this function exactly once. Stamp the transcript context with
     // the resolved name + per-ns transcript policy here so all
     // subsequent emit calls flow into the right per-namespace file.

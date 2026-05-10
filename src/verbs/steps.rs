@@ -1,4 +1,4 @@
-//! F17 (v0.1.3): multi-step runner for `inspect run --steps <manifest.json>`.
+//! Multi-step runner for `inspect run --steps <manifest.json>`.
 //!
 //! Migration-operator field feedback: *"When I run a 5-step heredoc, all
 //! 5 steps are one 'run' with one exit code. If step 3 fails I see it in
@@ -7,10 +7,10 @@
 //! and returned per-step exit codes would be amazing for migration
 //! scripts."*
 //!
-//! F17 promotes the defensive `set +e; … || echo MARKER` pattern from a
+//! `--steps` promotes the defensive `set +e; … || echo MARKER` pattern from a
 //! widespread workaround to a first-class verb mode with **structured
 //! per-step output that an LLM-driven wrapper can reason about**. Without
-//! F17, agentic callers cannot reliably build "run these N steps, stop
+//! it, agentic callers cannot reliably build "run these N steps, stop
 //! on first failure, give me the per-step result table" workflows on top
 //! of `inspect run`.
 //!
@@ -44,7 +44,7 @@
 //! target's failure aborts the next manifest step on every target. Each
 //! (step, target) pair writes its own `run.step` audit entry, all
 //! sharing the parent's `steps_run_id`. Parallel fan-out within a
-//! single step is L13 in this release.
+//! single step is a future enhancement.
 
 use std::sync::Mutex;
 use std::time::Instant;
@@ -62,8 +62,7 @@ use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
 use crate::verbs::runtime::RemoteRunner;
 
-/// Default per-step wall-clock cap in seconds. Mirrors the F16
-/// `--stream` default (8 hours) because the migration-operator's use
+/// Default per-step wall-clock cap in seconds. Mirrors the /// `--stream` default (8 hours) because the migration-operator's use
 /// case is hours-long pipelines whose individual steps may run for
 /// many minutes.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 60 * 60 * 8;
@@ -72,19 +71,19 @@ const DEFAULT_STEP_TIMEOUT_SECS: u64 = 60 * 60 * 8;
 /// (the operator always sees every line); the captured copy stops
 /// growing past this size and stamps `output_truncated: true` on the
 /// per-target result so downstream JSON consumers know the captured
-/// blob is partial. 10 MiB matches the F9 `--stdin-max` default —
+/// blob is partial. 10 MiB matches the `--stdin-max` default —
 /// "this is what counts as 'a lot of bytes' in this tool."
 const MAX_STEP_CAPTURE_BYTES: usize = 10 * 1024 * 1024;
 
-/// L13 (v0.1.3): default per-step parallel-fanout cap when
+/// Default per-step parallel-fanout cap when
 /// `parallel: true` is set without an explicit `parallel_max`.
 /// Matches `inspect fleet`'s concurrency cap so operators get the
 /// same scale-axis behavior across both surfaces.
 const PARALLEL_MAX_DEFAULT: usize = 8;
 
-/// L13 (v0.1.3): hard ceiling on `parallel_max`. Above this an
+/// Hard ceiling on `parallel_max`. Above this an
 /// operator should reach for `inspect fleet`, which has its own
-/// large-fanout safety gate (the L13 path stays focused on
+/// large-fanout safety gate (the path stays focused on
 /// migration-bundle scale: 8–32 simultaneous targets).
 const PARALLEL_MAX_CEILING: usize = 64;
 
@@ -102,7 +101,7 @@ struct StepSpec {
     name: String,
     #[serde(default)]
     cmd: Option<String>,
-    /// F14 composition: read the body from a local script file.
+    /// Read the body from a local script file.
     #[serde(default)]
     cmd_file: Option<String>,
     #[serde(default = "default_on_failure")]
@@ -110,11 +109,11 @@ struct StepSpec {
     /// Per-step wall-clock cap (seconds). Default 8 hours.
     #[serde(default)]
     timeout_s: Option<u64>,
-    /// Declared inverse for F11 composite revert. Absent ⇒ this step's
+    /// Declared inverse for composite revert. Absent ⇒ this step's
     /// per-step audit entry records `revert.kind = "unsupported"`.
     #[serde(default)]
     revert_cmd: Option<String>,
-    /// L13 (v0.1.3): when `true` AND the selector resolves to >1
+    /// When `true` AND the selector resolves to >1
     /// target, dispatch the step's per-target work in parallel
     /// instead of sequentially. Default `false` so existing
     /// manifests behave identically. Capped by [`StepSpec::parallel_max`]
@@ -126,9 +125,9 @@ struct StepSpec {
     /// contiguous (documented contract).
     #[serde(default)]
     parallel: bool,
-    /// L13 (v0.1.3): per-step concurrency cap for the parallel
+    /// Per-step concurrency cap for the parallel
     /// fan-out. `None` ⇒ default 8 (matches the existing
-    /// `inspect fleet` cap and the F18 transcript's spec). Above
+    /// `inspect fleet` cap and the transcript's spec). Above
     /// this many in-flight targets, additional targets queue and
     /// run as slots free up. Hard ceiling at 64 — operators
     /// running against 64+ simultaneous targets should reach for
@@ -190,7 +189,7 @@ struct TargetStepResult {
     /// captured output + revert details.
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_id: Option<String>,
-    /// F13 (v0.1.3): `true` when the dispatch wrapper retried this
+    /// `True` when the dispatch wrapper retried this
     /// (step, target) after a stale-session reauth.
     #[serde(skip_serializing_if = "is_false")]
     retried: bool,
@@ -319,14 +318,14 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// F17 dispatch entrypoint. Called from `verbs::run::run` when
+/// `--steps` dispatch entrypoint. Called from `verbs::run::run` when
 /// `args.steps` or `args.steps_yaml` is set. Returns the verb-level
 /// exit kind.
 pub fn run(args: &RunArgs) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;
     let json = matches!(fmt, crate::format::OutputFormat::Json);
 
-    // F17 (v0.1.3): exactly one of --steps or --steps-yaml must be
+    // Exactly one of --steps or --steps-yaml must be
     // set — the clap layer already enforces this, but resolving here
     // keeps the rest of this function unaware of which spelling fired.
     let (manifest_path, is_yaml) = match (&args.steps, &args.steps_yaml) {
@@ -381,7 +380,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         .collect();
     let target_count = resolved.len();
 
-    // F12 (v0.1.3): per-invocation env overrides. Validated once
+    // Per-invocation env overrides. Validated once
     // before the per-step loop so a typo short-circuits.
     let user_env: Vec<(String, String)> = {
         let mut out = Vec::with_capacity(args.env.len());
@@ -391,7 +390,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         out
     };
 
-    // F17 (v0.1.3): one fresh `steps_run_id` per --steps invocation,
+    // One fresh `steps_run_id` per --steps invocation,
     // stamped on every per-(step, target) entry, every auto-revert
     // entry, AND on the parent. Reuse the standard AuditEntry::new
     // id-shape so the linkage matches the existing `<ms>-<4hex>`
@@ -406,7 +405,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     let audit_store = match AuditStore::open() {
         Ok(s) => Some(s),
         Err(e) => {
-            // Match the F9/F16 fallback shape: warn, proceed.
+            // Match the fallback shape: warn, proceed.
             crate::tee_eprintln!("warning: audit log unavailable ({e}); proceeding without audit");
             None
         }
@@ -414,7 +413,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
 
     let manifest_step_names: Vec<String> = manifest.steps.iter().map(|s| s.name.clone()).collect();
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted. Wrapped in a Mutex (zero-cost in sequential mode) so
     // the parallel execution path can share the single filter
@@ -425,7 +424,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     let mut results: Vec<StepResult> = Vec::with_capacity(manifest.steps.len());
     let mut composite_payload_items: Vec<serde_json::Value> = Vec::new();
     let mut stopped_at: Option<String> = None;
-    // L12 (v0.1.3): pre-compute total step count for the F18-style
+    // Pre-compute total step count for the transcript-style
     // step-boundary headers (`── step 3 of 5: <name> ──`). The
     // dispatch path can still abort early via stop-on-failure, but
     // the headers always render against the manifest's full size so
@@ -481,7 +480,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             continue;
         }
 
-        // F14 composition: read cmd_file once, hold the body for
+        // Read cmd_file once, hold the body for
         // both the dispatch closure and the per-target metadata
         // stamp. (Same body is shipped to every target — the
         // manifest is the source of truth, not the host.)
@@ -498,13 +497,13 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         // `"$1"` (e.g. `docker exec "$1" sh -c '…'`) saw an empty
         // `$1` and exited with `invalid container name or ID: value
         // is empty`, including the auto-revert path. Surfaced live
-        // during P4.F17 (`migration.json` step 1 failed because
+        // during smoke (`migration.json` step 1 failed because
         // `$1` was unbound). Both flavours are now handled:
         //   - cmd path: prepend `set -- <quoted-args>;` so the
         //     remote `sh -c <cmd>` evaluates `cmd` with the
         //     positionals already set.
         //   - cmd_file path: append `-- <quoted-args>` to
-        //     `bash -s` (matches F14's `render_script_invocation`).
+        //     `bash -s` (matches `render_script_invocation`).
         let dispatched_cmd: String = if let Some(file) = &spec.cmd_file {
             let body = match std::fs::read(file)
                 .with_context(|| format!("reading step '{}' cmd_file '{}'", spec.name, file))
@@ -541,14 +540,13 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
 
         let timeout_secs = spec.timeout_s.unwrap_or(DEFAULT_STEP_TIMEOUT_SECS);
 
-        // L12 (v0.1.3): print the step-boundary opener in the F18
-        // transcript header format (`── step N of M: <name> ──`)
+        // Print the step-boundary opener in the         // transcript header format (`── step N of M: <name> ──`)
         // when streaming, so an operator skimming the live tail of
         // a multi-step migration sees the same fence shape they'd
         // see when extracting blocks from the per-day transcript
         // file. Without `--stream`, the legacy `STEP <name> ▶` form
         // stays — non-streaming runs are typically short and the
-        // F18 fence's extra horizontal real estate isn't worth it.
+        // fence's extra horizontal real estate isn't worth it.
         if !json {
             let step_n = step_idx + 1;
             if args.stream {
@@ -570,7 +568,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 crate::tee_println!("STEP {} ▶ (across {} target(s))", spec.name, target_count);
             }
         } else {
-            // F19 (v0.1.3): step-begin envelopes flow through the same
+            // Step-begin envelopes flow through the same
             // `--select` filter as per-target stream lines and the
             // step-end envelope.
             let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
@@ -584,7 +582,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             )?;
         }
 
-        // L13 (v0.1.3): branch on `parallel: true` per spec. The
+        // Branch on `parallel: true` per spec. The
         // sequential path stays the default so existing manifests
         // behave identically. Parallel branches use std::thread::scope
         // batched in chunks of `parallel_max` (default 8, ceiling 64);
@@ -658,7 +656,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
             StepStatus::Ok
         };
 
-        // L12 (v0.1.3): step-closer in the F18 transcript fence
+        // Step-closer in the transcript fence
         // format when streaming (`── step N ◀ exit=… duration=…ms
         // audit_id=… ──`), so the live tail's per-step boundaries
         // match the per-day transcript fence shape exactly. The
@@ -752,7 +750,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                 }
             }
         } else {
-            // F19 (v0.1.3): step-end envelopes flow through the same
+            // Step-end envelopes flow through the same
             // `--select` filter (see step-begin emission above).
             let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
             JsonOut::write(
@@ -802,7 +800,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
         .filter(|r| matches!(r.status, StepStatus::Skipped))
         .count();
 
-    // ---- F17 + F11: --revert-on-failure auto-unwind --------------
+    // ---- --revert-on-failure auto-unwind ------------------------
     //
     // Walk the per-(step, target) entries that already ran (Ok or
     // Failed) in REVERSE manifest order. For each prior step, fan
@@ -1090,7 +1088,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     }
 
     if json {
-        // F19 (v0.1.3): end-of-stream slurp flush so a `--select-slurp`
+        // End-of-stream slurp flush so a `--select-slurp`
         // filter sees its accumulated buffer rendered before the verb
         // exits. No-op for per-frame mode.
         let mut sel = select.lock().unwrap_or_else(|p| p.into_inner());
@@ -1104,7 +1102,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
     })
 }
 
-/// L13 (v0.1.3): per-target dispatch context. References-only so the
+/// Per-target dispatch context. References-only so the
 /// struct is `Send + Sync` for thread::scope dispatch in the parallel
 /// path. The runner is passed as `&(dyn RemoteRunner + Send + Sync)`
 /// (from `runner.as_ref()`), which inherits the trait's Send/Sync
@@ -1123,7 +1121,7 @@ struct PerTargetCtx<'a> {
     script_path: Option<&'a str>,
     timeout_secs: u64,
     user_env: &'a [(String, String)],
-    /// F19 (v0.1.3): shared `--select` streaming filter handle. Behind
+    /// Shared `--select` streaming filter handle. Behind
     /// a `Mutex` because steps can run in parallel mode (one filter
     /// instance shared across all per-target threads — same writer-
     /// lock pattern as the stdout `tee_println!` serialization). In
@@ -1131,7 +1129,7 @@ struct PerTargetCtx<'a> {
     select: &'a Mutex<Option<crate::query::ndjson::Filter>>,
 }
 
-/// L13 (v0.1.3): clamp `parallel_max` to its default-or-ceiling.
+/// Clamp `parallel_max` to its default-or-ceiling.
 /// `None` ⇒ default 8; `Some(n)` capped at the hard ceiling
 /// [`PARALLEL_MAX_CEILING`]; `Some(0)` is treated as the default
 /// (operators expect 0 to mean "no limit", but our actual contract
@@ -1144,7 +1142,7 @@ fn resolve_parallel_max(declared: Option<usize>) -> usize {
     }
 }
 
-/// L13 (v0.1.3): run all targets for one step in parallel, batched
+/// Run all targets for one step in parallel, batched
 /// at most `parallel_max` at a time. Per-line emit uses
 /// `writer_lock` so two threads can't interleave bytes mid-line.
 /// Returns per-target results in **manifest order**, regardless of
@@ -1221,7 +1219,7 @@ fn run_targets_parallel(
             }
         });
 
-        // L13 stop-on-failure: any failure in this batch trips
+        // Any failure in this batch trips
         // the global cancel flag so peers in subsequent batches
         // see it and skip. Subsequent steps' loop level also
         // sets `stopped_at` based on the aggregate.
@@ -1262,8 +1260,8 @@ fn run_targets_parallel(
     out.into_iter().map(|s| s.unwrap()).collect()
 }
 
-/// L13 (v0.1.3): per-target dispatch body. Extracted from F17's
-/// inline loop so the same code can drive both the sequential
+/// Per-target dispatch body. Extracted from the
+/// `--steps` inline loop so the same code can drive both the sequential
 /// path and the `parallel: true` parallel path. When
 /// `writer_lock` is `Some`, every per-line emit acquires it for
 /// the duration of the print so two parallel targets cannot
@@ -1286,7 +1284,7 @@ fn run_one_target(
     // Wrap in `docker exec` when the resolved target is a
     // service-level selector. cmd_file uses bash -s with -i so
     // docker exec keeps stdin attached for the body to flow in
-    // (same shape F14 uses).
+    // (same shape `--audit-script-body` uses).
     let inner = match (target_step.container(), spec.cmd_file.is_some()) {
         (Some(container), false) => format!(
             "docker exec {} sh -c {}",
@@ -1309,7 +1307,7 @@ fn run_one_target(
     let mut output_truncated = false;
     let started = Instant::now();
 
-    // L12 (v0.1.3): per-(step, target) L7 redactor. One per
+    // Per-(step, target) output redactor. One per
     // (step, target) so PEM-block gate state can't leak across
     // pairs. `--show-secrets` bypasses every masker.
     let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
@@ -1347,7 +1345,7 @@ fn run_one_target(
                         Some(m) => m,
                         None => return,
                     };
-                    // L13 (v0.1.3): hold the writer lock across
+                    // Hold the writer lock across
                     // the entire emit (not just one byte) so the
                     // line + its trailing newline land atomically.
                     // No-op closure when sequential.
@@ -1355,7 +1353,7 @@ fn run_one_target(
                     if !json {
                         crate::tee_println!("{label_for_step} | {masked}");
                     } else {
-                        // F19 (v0.1.3): grab the shared filter mutex
+                        // Grab the shared filter mutex
                         // for the duration of this emit. Per-frame
                         // filter errors go to stderr and the stream
                         // continues.
@@ -1481,7 +1479,7 @@ fn run_one_target(
                     .collect(),
             );
         }
-        // L13 (v0.1.3): stamp manifest target-list index when the
+        // Stamp manifest target-list index when the
         // step is dispatched in parallel so a post-mortem walking
         // entries in completion order can sort by `target_idx` to
         // recover manifest order. Sequential entries elide the

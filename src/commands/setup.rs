@@ -26,7 +26,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
         return drift_only(&resolved.name, &target, &args.format);
     }
 
-    // P13: --retry-failed re-runs discovery and merges *only* services
+    // --retry-failed re-runs discovery and merges *only* services
     // that were previously flagged `discovery_incomplete`. Containers
     // whose previous probe succeeded keep their cached entry, so we
     // don't pay the cost of a full re-discovery just to fix one
@@ -100,7 +100,7 @@ fn drift_only(
         DriftStatus::Drifted { .. } => "drifted",
     };
     if format.is_json() {
-        // F19 (v0.1.3): build the envelope as a `serde_json::Value` so
+        // Build the envelope as a `serde_json::Value` so
         // `--select` can be applied through the shared
         // `print_json_value` chokepoint. `format_diff_json` returns an
         // already-serialized JSON string, which we re-parse so it can
@@ -186,7 +186,7 @@ fn print_human(p: &Profile, status: &str) {
         b(p.remote_tooling.journalctl),
     );
     if !p.remote_tooling.jq {
-        // F19 (v0.1.3): `jq` is informational only from this release
+        // `Jq` is informational only from this release
         // onward. Every recipe in the manual / runbook / help system
         // uses the in-binary `--select` flag (jaq engine). A missing
         // `jq` is not a problem and never blocks any inspect verb.
@@ -234,7 +234,7 @@ fn print_json(
     // We don't emit the full profile here — that's what `inspect profile`
     // is for. We emit a stable summary envelope.
     //
-    // F19 (v0.1.3): build the envelope as a `serde_json::Value` and
+    // Build the envelope as a `serde_json::Value` and
     // route through `print_json_value` so `--select` works the same way
     // it does on every other JSON-emitting verb. The pre-fix form
     // hand-rolled JSON via `format!`/`println!` and bypassed both the
@@ -281,7 +281,7 @@ fn b(x: bool) -> char {
     }
 }
 
-/// P13: build a merged profile for `--retry-failed`. We start from
+/// Build a merged profile for `--retry-failed`. We start from
 /// `prev` and, for every service that was flagged
 /// `discovery_incomplete`, swap in the corresponding entry from
 /// `fresh` if (and only if) the fresh probe succeeded for that

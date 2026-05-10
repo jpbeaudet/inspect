@@ -1,6 +1,6 @@
-//! HTTP-header secret masker (L7, v0.1.3).
+//! HTTP-header secret masker.
 //!
-//! Catches the four header names listed in the L7 spec —
+//! Catches the four header names listed in the spec —
 //! `Authorization`, `X-API-Key`, `Cookie`, `Set-Cookie` — and
 //! replaces the value portion with `<redacted>`. Matching is
 //! case-insensitive (HTTP header names are case-insensitive per

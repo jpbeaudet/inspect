@@ -1,4 +1,4 @@
-//! `inspect audit ls|show|grep|verify|gc` (bible §8.2; gc = L5
+//! `inspect audit ls|show|grep|verify|gc` (gc = retention
 //! v0.1.3).
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     // helpers — it walks files directly so we don't pre-load every
     // entry just to discard most of them.
     if let AuditCommand::Gc(o) = &args.command {
-        // F19 (v0.1.3): exercise the format mutex (e.g.
+        // Exercise the format mutex (e.g.
         // `--select` without `--json`) before walking the
         // audit tree — same shape as the other subcommands.
         o.format.resolve()?;
@@ -28,7 +28,7 @@ pub fn run(args: AuditArgs) -> Result<ExitKind> {
     match args.command {
         AuditCommand::Ls(o) => {
             let format = o.format.clone();
-            // F19 (v0.1.3): activate the FormatArgs mutex check
+            // Activate the FormatArgs mutex check
             // (e.g. `--select` without `--json` → exit 2).
             format.resolve()?;
             list(&entries, &format, Some(o.limit), o.reason.as_deref())
@@ -64,7 +64,7 @@ fn list(
     let mut sorted: Vec<_> = entries.iter().collect();
     sorted.sort_by_key(|e| std::cmp::Reverse(e.ts));
 
-    // P12: optional case-insensitive substring filter on `reason`.
+    // Optional case-insensitive substring filter on `reason`.
     let needle = reason_filter.map(|s| s.to_lowercase());
     if let Some(needle) = &needle {
         sorted.retain(|e| {
@@ -135,7 +135,7 @@ fn list(
     for e in view {
         let badge = if e.exit == 0 { "ok " } else { "ERR" };
         let revert = if e.is_revert { " (revert)" } else { "" };
-        // P12: append the reason as the trailing column when present.
+        // Append the reason as the trailing column when present.
         let reason_cell = match &e.reason {
             Some(text) => format!("  reason: {}", truncate_reason(text, 60)),
             None => String::new(),
@@ -182,7 +182,7 @@ fn show(
     // SMOKE 2026-05-09 fail-fast (v0.1.3): empty id_prefix used to
     // silently match the first entry in iteration order (because
     // `"".starts_with("")` is true for every audit id). Surfaced
-    // during P3.3: a `--select-raw` projection upstream yielded
+    // during smoke: a `--select-raw` projection upstream yielded
     // empty/null on a no-match, the shell substituted `STOP_ID=""`,
     // and `inspect audit show ""` happily returned an unrelated
     // ancient `connect.reauth` entry — confusing every downstream
@@ -248,7 +248,7 @@ fn show(
         r.data_line(format!("reverts:   {rev}"));
     }
     // v0.1.3 (smoke find): the text `audit show` rendering used to
-    // omit the F11 `revert` block entirely, forcing agents to
+    // omit the `revert` block entirely, forcing agents to
     // round-trip via `--json` to see whether the audit had a
     // capturable inverse. Now rendered inline.
     if let Some(rv) = &e.revert {
@@ -464,7 +464,7 @@ fn verify(
     })
 }
 
-/// L5 (v0.1.3): dispatch for `inspect audit gc --keep <X>`.
+/// Dispatch for `inspect audit gc --keep <X>`.
 fn gc(args: &AuditGcArgs) -> Result<ExitKind> {
     let policy = match parse_retention(&args.keep) {
         Ok(p) => p,

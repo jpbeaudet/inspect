@@ -1,4 +1,4 @@
-//! `inspect run <sel> -- <cmd>` (P6, v0.1.1).
+//! `inspect run <sel> -- <cmd>`.
 //!
 //! Read-only execution counterpart to [`crate::verbs::write::exec`]. Streams
 //! the remote command's output line-by-line, never touches the audit log,
@@ -6,9 +6,9 @@
 //! state with an ad-hoc shell snippet (`ps`, `cat /proc/...`, `df -h`,
 //! `redis-cli info`, ...) without paying for the write-verb interlock.
 //!
-//! Field-pitfall driver: P6 in [INSPECT_v0.1.1_PATCH_SPEC.md]. Operators
-//! routinely typed `inspect exec ... -- <read-only thing>` and ran into
-//! the exec safety prompts on every iteration.
+//! Operators routinely typed `inspect exec ... -- <read-only thing>` and
+//! ran into the exec safety prompts on every iteration; this verb exists
+//! so the read-only path doesn't pay that cost.
 
 use anyhow::Result;
 
@@ -19,7 +19,7 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
 
-/// F10.7 (v0.1.3): strip ANSI CSI / OSC escape sequences from a
+/// Strip ANSI CSI / OSC escape sequences from a
 /// rendered output line. Conservative: matches `ESC [ ... <final>`
 /// (CSI) and `ESC ] ... BEL` / `ESC ] ... ESC \` (OSC). Anything
 /// else (single-byte controls already stripped by `safe_terminal_line`)
@@ -78,12 +78,13 @@ fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(String::from_utf8(out).unwrap_or_default())
 }
 
-/// F9 (v0.1.3): default cap on forwarded stdin per `inspect run` invocation.
-/// Above this the verb refuses, with a chained hint pointing at `inspect put`
-/// (F15) for bulk file transfer (uncapped, audit-tracked, F11-revertible).
+/// Default cap on forwarded stdin per `inspect run` invocation.
+/// Above this the verb refuses, with a chained hint pointing at
+/// `inspect put` for bulk file transfer (uncapped, audit-tracked,
+/// fully revertible).
 pub const DEFAULT_STDIN_MAX: u64 = 10 * 1024 * 1024;
 
-/// F9 (v0.1.3): parse a size string like `10m`, `512k`, `1g`, or a raw
+/// Parse a size string like `10m`, `512k`, `1g`, or a raw
 /// byte count. Case-insensitive. `0` means "no cap".
 pub fn parse_stdin_max(s: &str) -> Result<u64> {
     let trimmed = s.trim();
@@ -104,7 +105,7 @@ pub fn parse_stdin_max(s: &str) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("--stdin-max: '{s}' overflows u64"))
 }
 
-/// F9 (v0.1.3): is local stdin a tty? When `true`, `inspect run` does not
+/// Is local stdin a tty? When `true`, `inspect run` does not
 /// forward stdin (matches `ssh -T host cmd <terminal>` semantics) — we
 /// never hang waiting for the operator to type input that was never piped.
 fn local_stdin_is_tty() -> bool {
@@ -123,7 +124,7 @@ fn local_stdin_is_tty() -> bool {
     }
 }
 
-/// F9 (v0.1.3): read local stdin into a `Vec<u8>`, refusing if the
+/// Read local stdin into a `Vec<u8>`, refusing if the
 /// payload exceeds `cap_bytes`. `cap_bytes == 0` means "no cap".
 fn read_stdin_capped(cap_bytes: u64) -> Result<Vec<u8>> {
     use std::io::Read;
@@ -150,7 +151,7 @@ fn read_stdin_capped(cap_bytes: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// F14 (v0.1.3): a resolved script-mode payload. The body is shipped
+/// A resolved script-mode payload. The body is shipped
 /// to the remote via `bash -s` (or a different interpreter declared in
 /// the script's shebang); `script_path` is `Some(path)` for `--file`
 /// mode and `None` for `--stdin-script` mode.
@@ -161,14 +162,14 @@ pub(crate) struct ScriptSource {
     pub script_path: Option<String>,
 }
 
-/// F14 (v0.1.3): interpreter dispatched on the remote when no shebang
+/// Interpreter dispatched on the remote when no shebang
 /// is declared. `bash -s` is a strict superset of `sh -s` for the
-/// cross-layer-quoting use case the operator's field feedback called
-/// out; if a target lacks `bash`, the operator declares `#!/bin/sh`
-/// in the script and F14 honors it.
+/// cross-layer-quoting use case that drove script mode; if a target
+/// lacks `bash`, the operator declares `#!/bin/sh` in the script and
+/// the runner honors it.
 const DEFAULT_SCRIPT_INTERP: &str = "bash";
 
-/// L11 (v0.1.3): build the per-(SHA, pid) remote temp path for the
+/// Build the per-(SHA, pid) remote temp path for the
 /// two-phase script delivery. The pid suffix prevents two
 /// concurrent `inspect run` invocations on the same script from
 /// stomping on each other's temp file (rare but real on shared
@@ -180,7 +181,7 @@ fn build_remote_script_temp_path(sha256: &str) -> String {
     format!("/tmp/.inspect-l11-{sha_short}-{pid}.sh")
 }
 
-/// F14 (v0.1.3): parse the first line of a script for `#!` and pick
+/// Parse the first line of a script for `#!` and pick
 /// the interpreter. Recognizes `#!/usr/bin/env <interp>` and
 /// `#!/path/to/<interp>` forms. Falls back to [`DEFAULT_SCRIPT_INTERP`]
 /// when no shebang is present or the line is malformed.
@@ -217,7 +218,7 @@ fn detect_interpreter(body: &[u8]) -> String {
     sanitize_interp(basename)
 }
 
-/// F14 (v0.1.3): allow only `[A-Za-z0-9_.-]` in interpreter names so
+/// Allow only `[A-Za-z0-9_.-]` in interpreter names so
 /// a hostile or malformed shebang cannot inject shell metacharacters
 /// into the rendered remote command. Anything else falls back to
 /// [`DEFAULT_SCRIPT_INTERP`].
@@ -232,21 +233,21 @@ fn sanitize_interp(s: &str) -> String {
     s.to_string()
 }
 
-/// F14 (v0.1.3): does this interpreter accept `-s` as the
+/// Does this interpreter accept `-s` as the
 /// "read-script-from-stdin" flag? Bash and `sh` (POSIX) do; everything
 /// else (python, node, ruby, ...) takes a bare `-` instead.
 fn interp_uses_dash_s(interp: &str) -> bool {
     matches!(interp, "bash" | "sh" | "zsh" | "ksh" | "dash")
 }
 
-/// F14 (v0.1.3): render the remote dispatch shape for a script-mode
+/// Render the remote dispatch shape for a script-mode
 /// invocation. For bash-family interpreters this is `bash -s -- a b c`
 /// (positional args land in `$1` / `$2` / ...). For others (python,
 /// node, ...) this is `python3 - a b c` (POSIX convention; args land
 /// in `sys.argv[1:]` etc.).
 fn render_script_invocation(interp: &str, args: &[String]) -> String {
     // Interpreter is a controlled identifier (parsed from the
-    // shebang's basename or the F14 default `bash`); rendering it
+    // shebang's basename or the default `bash`); rendering it
     // unquoted keeps the audit `rendered_cmd` field readable and
     // matches the standard `bash -s` / `python3 -` shape operators
     // expect to see in dispatch logs.
@@ -269,10 +270,10 @@ fn render_script_invocation(interp: &str, args: &[String]) -> String {
     }
 }
 
-/// F14 (v0.1.3): resolve the script-mode payload (or `None` if the
+/// Resolve the script-mode payload (or `None` if the
 /// caller is in classic argv-cmd mode). Reads the file or stdin once,
 /// hashes it, and detects the interpreter from the shebang. Honors
-/// the same `--stdin-max` cap as F9 stdin forwarding.
+/// the same `--stdin-max` cap as ordinary stdin forwarding.
 pub(crate) fn resolve_script_source(
     args: &RunArgs,
     cap_bytes: u64,
@@ -352,7 +353,7 @@ pub(crate) fn resolve_script_source(
     Ok(None)
 }
 
-/// F14 (v0.1.3): write the script body to the content-addressed store
+/// Write the script body to the content-addressed store
 /// at `~/.inspect/scripts/<sha256>.sh` (mode 0600 inside a 0700 dir),
 /// idempotently. Errors are non-fatal — the audit entry still
 /// references the body by hash even if the dedup write failed; the
@@ -385,21 +386,21 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     // *only* to surface a clear chained hint here — without the
     // explicit flag, `--apply` would slip into the trailing-var-arg
     // cmd vec and the remote `bash -c` would die with
-    // `bash: --: invalid option`. Surfaced live during P3.1 of the
-    // 2026-05-09 smoke run; the runbook's pre-fix `inspect run --apply`
-    // recipes were also wrong (now `inspect exec --apply` /
-    // structured lifecycle verbs in `docs/SMOKE_v0.1.3.md`).
+    // `bash: --: invalid option`. The pre-fix `inspect run --apply`
+    // recipes in the smoke runbook were also wrong (now
+    // `inspect exec --apply` / structured lifecycle verbs in
+    // `docs/SMOKE_v0.1.3.md`).
     if args.apply {
         crate::error::emit(
             "`--apply` is not on `inspect run` (which is read-only and not audited). \
              For audited mutations use `inspect exec --apply -- '<command>'` (free-form, requires \
              `--no-revert` because the inverse cannot be synthesised) or the structured write \
              verbs (`inspect stop` / `restart` / `start` / `put` / `chmod` / `chown` / `edit` / \
-             `rm` / `mkdir` / `touch`) which capture a real F11 inverse.",
+             `rm` / `mkdir` / `touch`) which capture a real inverse.",
         );
         return Ok(ExitKind::Error);
     }
-    // F17 (v0.1.3): multi-step runner mode short-circuits the
+    // Multi-step runner mode short-circuits the
     // classic per-target dispatch loop. The steps module owns its
     // own selector resolution, env-overlay merge, per-step audit
     // entries, and parent composite-revert capture; the bare-`run`
@@ -410,7 +411,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     if args.steps.is_some() || args.steps_yaml.is_some() {
         return crate::verbs::steps::run(&args);
     }
-    // F14 (v0.1.3): script mode (`--file` / `--stdin-script`) does not
+    // Script mode (`--file` / `--stdin-script`) does not
     // require a command after `--`. Classic argv-cmd mode still does.
     let script_mode_requested = args.file.is_some() || args.stdin_script;
     if !script_mode_requested && args.cmd.is_empty() {
@@ -430,18 +431,18 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let json = matches!(fmt, crate::format::OutputFormat::Json);
 
     // ---------------------------------------------------------------
-    // F9 / F14 (v0.1.3): stdin handling. Decide what (if anything) to
+    // Stdin handling. Decide what (if anything) to
     // forward to the remote command's stdin BEFORE we resolve targets
     // or dial out — both --no-stdin's loud-failure and the size-cap
     // exit must fire pre-dispatch, with zero remote commands issued.
     //
-    // F14 cases:
+    // Three cases:
     //   * `--file <path>`    : script body is the local file; remote
     //                          command becomes `bash -s -- <args>`
     //                          and the body rides on the stdin pipe.
     //   * `--stdin-script`   : script body is local stdin (must be
     //                          non-tty, non-empty).
-    //   * neither set        : F9 contract — pipe local stdin to the
+    //   * neither set        : pipe local stdin to the
     //                          remote command verbatim.
     // ---------------------------------------------------------------
     let cap_bytes = match args.stdin_max.as_deref() {
@@ -454,9 +455,9 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         },
         None => DEFAULT_STDIN_MAX,
     };
-    // F14: resolve the script source first. If this fails (file
+    // Resolve the script source first. If this fails (file
     // missing, stdin tty, payload above cap), exit 2 BEFORE dispatch
-    // — same invariant as F9.
+    // — same invariant as ordinary stdin forwarding.
     let script: Option<ScriptSource> = match resolve_script_source(&args, cap_bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -465,10 +466,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     };
     let stdin_payload: Option<Vec<u8>> = if let Some(s) = &script {
-        // F14: script body claims the remote stdin pipe. Local stdin
+        // Script body claims the remote stdin pipe. Local stdin
         // is NOT additionally forwarded — the spec is explicit that
         // operators wanting both pipe a script via `--file` and let
-        // F9 forward stdin (a v0.1.5 follow-up).
+        // ordinary stdin forwarding flow through (a future
+        // follow-up).
         Some(s.body.clone())
     } else if local_stdin_is_tty() {
         // Tty: never forward, never read — match v0.1.2 behavior so a
@@ -522,7 +524,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // F19 (v0.1.3): construct the streaming `--select` filter ONCE at
+    // Construct the streaming `--select` filter ONCE at
     // function entry so a parse error fails fast before any frame is
     // emitted. The streaming line closure captures a `&mut Option<…>`
     // re-borrow each per-step iteration; the post-stream summary
@@ -531,7 +533,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     // stream frames and the run-level summary uniformly.
     let mut select = args.format.select_filter()?;
 
-    // F12 (v0.1.3): per-invocation env overrides. Validate once,
+    // Per-invocation env overrides. Validate once,
     // before the per-step loop, so a typo in `--env` short-circuits
     // the whole run instead of failing N times.
     let user_env: Vec<(String, String)> = {
@@ -542,7 +544,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         out
     };
 
-    // F16 (v0.1.3): streaming runs default to an 8-hour timeout
+    // Streaming runs default to an 8-hour timeout
     // (matches `inspect logs --follow`) since the operator is
     // expected to terminate via Ctrl-C, not by reaching the timeout.
     // Non-streaming runs keep the existing 120s default. The operator
@@ -554,23 +556,23 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let mut bad = 0usize;
     let mut last_inner: Option<i32> = None;
     let mut all_same = true;
-    // L7 (v0.1.3): one redactor per step (declared inside the loop).
+    // One redactor per step (declared inside the loop).
     // PEM block state must not leak across steps because a step
     // truncated mid-block would otherwise poison the next step's
     // detection. The composer is cheap to construct; regex are
     // compiled once globally via Lazy.
-    // F9 (v0.1.3): when stdin is being forwarded, every step's run is
+    // When stdin is being forwarded, every step's run is
     // audited (verb=`run`, with stdin_bytes / optional stdin_sha256)
     // so a post-hoc audit can answer "what input did this command
     // consume?" by size. Without forwarded stdin, `inspect run`
     // remains un-audited (matches v0.1.2 read-verb behavior).
     let audit_store = match crate::safety::audit::AuditStore::open() {
-        // F13 (v0.1.3): always open the audit store on `run` so the
+        // Always open the audit store on `run` so the
         // `connect.reauth` audit entry can be written when the
         // dispatch wrapper fires the reauth path. Stdin-forwarded
-        // runs additionally write per-step audit entries (F9
-        // contract preserved); plain runs write only when the
-        // wrapper actually triggers reauth.
+        // runs additionally write per-step audit entries (the
+        // stdin-audit contract preserved); plain runs write only
+        // when the wrapper actually triggers reauth.
         Ok(s) => Some(s),
         Err(e) => {
             if stdin_payload.is_some() {
@@ -580,11 +582,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     };
     let stdin_audited = stdin_payload.is_some() && audit_store.is_some();
-    // F16 (v0.1.3): streamed runs are always audited so a post-hoc
+    // Streamed runs are always audited so a post-hoc
     // audit can tell `--stream` invocations apart from short-lived
     // commands (e.g. `tail -f` vs `ls -la`) without parsing args text.
     let stream_audited = args.stream && audit_store.is_some();
-    // F14 (v0.1.3): dedup-store the script body once, before the
+    // Dedup-store the script body once, before the
     // per-step loop. Errors here are non-fatal — the audit entry
     // still references the body by hash, and the operator's `--file`
     // is still on disk.
@@ -593,7 +595,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             crate::tee_eprintln!("warning: script dedup-store write failed ({e}); proceeding");
         }
     }
-    // F13 (v0.1.3): track transport-class outcomes across steps so the
+    // Track transport-class outcomes across steps so the
     // SUMMARY trailer / JSON `failure_class` field / exit code can
     // reflect a uniform transport failure when every failed step
     // shares the same class. `Some(c)` means every transport failure
@@ -617,15 +619,15 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     };
     let mut truncated_lines = 0usize;
 
-    // L11 (v0.1.3): bidirectional dispatch is `--stream` + a script
-    // source. Pre-L11 this combo was clap-rejected because feeding
-    // the script body via SSH stdin and forcing `-tt` PTY for
-    // streaming put both directions through the same tty layer
+    // Bidirectional dispatch is `--stream` + a script
+    // source. This combo was originally clap-rejected because
+    // feeding the script body via SSH stdin and forcing `-tt` PTY
+    // for streaming put both directions through the same tty layer
     // (line-discipline echo, cooked-mode munging, interactive bash
-    // prompts on a non-tty stdin). L11 splits the dispatch in two:
-    // phase 1 cats the script body into a remote temp file with no
-    // PTY (buffered), phase 2 runs the temp file with PTY for
-    // line-streaming. The directions never interleave.
+    // prompts on a non-tty stdin). The split: phase 1 cats the
+    // script body into a remote temp file with no PTY (buffered),
+    // phase 2 runs the temp file with PTY for line-streaming. The
+    // directions never interleave.
     let bidirectional = args.stream && script.is_some();
 
     for s in &steps {
@@ -636,14 +638,14 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         let label = format!("{}{}", s.ns.namespace, svc_label);
         let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
 
-        // L11 (v0.1.3): if bidirectional, do phase 1 (write the
-        // script bytes to a remote temp file) before constructing
-        // the streaming command. The temp file's lifecycle is
-        // bounded by phase 3 (cleanup, after the streaming
-        // dispatch) so a Ctrl-C between phases leaves at most one
-        // orphaned `.inspect-l11-<sha>-<pid>.sh` file per
-        // namespace — bounded, signed (the SHA in the name maps
-        // back to the audit entry), and cheap to manually clean.
+        // If bidirectional, do phase 1 (write the script bytes to a
+        // remote temp file) before constructing the streaming
+        // command. The temp file's lifecycle is bounded by phase 3
+        // (cleanup, after the streaming dispatch) so a Ctrl-C
+        // between phases leaves at most one orphaned
+        // `.inspect-l11-<sha>-<pid>.sh` file per namespace —
+        // bounded, signed (the SHA in the name maps back to the
+        // audit entry), and cheap to manually clean.
         let bidir_temp_path: Option<String> = if bidirectional {
             let sc = script
                 .as_ref()
@@ -702,32 +704,29 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         // Apply server-side line filter (--filter-line-pattern) by piping
         // through `grep -E`, mirroring the same pushdown logs/grep use.
         //
-        // F14 (v0.1.3): in script-mode, the remote command becomes
+        // In script-mode, the remote command becomes
         // `<interp> -s -- <args>` (or `<interp> - <args>` for non-bash
         // interpreters). The container variant adds `-i` so docker
         // exec keeps stdin attached for the script body to flow in.
         //
-        // L11 (v0.1.3): when bidirectional, the remote command instead
+        // When bidirectional, the remote command instead
         // runs the temp file written in phase 1. No stdin payload is
         // forwarded in phase 2 — the body is already on disk on the
         // remote.
         let inner = if let Some(temp_path) = bidir_temp_path.as_deref() {
             let interp = &script.as_ref().unwrap().interp;
             let positional: Vec<String> = args.cmd.iter().map(|a| shquote(a)).collect();
-            // SMOKE 2026-05-09 fix: pre-fix shape was
-            // `<interp> <temp> -- <args>` (e.g. `bash /tmp/script.sh
-            // -- inspect-smoke-X`). Without `-s`, bash treats
-            // `<temp>` as the script and `--` as a literal
-            // positional arg — so the script saw `$1=--` and
+            // The pre-fix shape was `<interp> <temp> -- <args>` (e.g.
+            // `bash /tmp/script.sh -- inspect-smoke-X`). Without
+            // `-s`, bash treats `<temp>` as the script and `--` as a
+            // literal positional arg — so the script saw `$1=--` and
             // `$2=inspect-smoke-X` instead of `$1=inspect-smoke-X`.
-            // Surfaced live during P4.L11: the migration.sh's first
-            // echo printed `starting against --` and `docker exec ""
-            // sh -c …` died with `No such container: sh`. Fix:
-            // `<interp> -- <temp> <args>` — the leading `--`
-            // terminates bash's option parsing, then `<temp>`
-            // becomes the script and `<args>` become its
-            // positionals (`$1=arg1`). Handles args starting with
-            // `-` correctly (still a positional, not a bash flag).
+            // The corrected shape `<interp> -- <temp> <args>` puts
+            // the leading `--` ahead of `<temp>` so it terminates
+            // bash's option parsing, then `<temp>` becomes the
+            // script and `<args>` become its positionals
+            // (`$1=arg1`). Handles args starting with `-` correctly
+            // (still a positional, not a bash flag).
             let body = if positional.is_empty() {
                 format!("{interp} -- {temp}", temp = shquote(temp_path))
             } else {
@@ -773,7 +772,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             Some(pat) => format!("{inner} | grep -E {}", shquote(pat)),
             None => inner,
         };
-        // F10.7 (v0.1.3): `--clean-output` prepends `TERM=dumb` so any
+        // `--clean-output` prepends `TERM=dumb` so any
         // remote tool that consults $TERM (less, ls --color=auto,
         // progress bars) downgrades to plain text. ANSI stripping
         // happens client-side post-mask as a belt-and-braces second
@@ -784,7 +783,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             cmd
         };
 
-        // F12 (v0.1.3): apply the per-namespace env overlay (merged
+        // Apply the per-namespace env overlay (merged
         // with `--env` overrides). Overlay is empty when neither the
         // namespace config nor `--env` provides anything, in which
         // case `apply_to_cmd` returns the cmd borrowed unchanged.
@@ -809,7 +808,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             let svc_name_ref = &svc_name;
             let redactor_ref = &redactor;
             let truncated_lines_ref = &mut truncated_lines;
-            // F19 (v0.1.3): per-step re-borrow of the verb-level
+            // Per-step re-borrow of the verb-level
             // `--select` filter handle so the streaming closure can
             // reach it without owning it across per-step iterations.
             let select_ref: &mut Option<crate::query::ndjson::Filter> = &mut select;
@@ -824,18 +823,18 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                 policy,
                 || {
                     let mut opts_call = RunOpts::with_timeout(timeout_secs);
-                    // L11 (v0.1.3): in bidirectional mode the script
+                    // In bidirectional mode the script
                     // body was already shipped in phase 1; phase 2
                     // must NOT also pipe it via stdin (would re-feed
                     // it as input to the running script and corrupt
                     // semantics). Only forward stdin in non-
-                    // bidirectional script mode (existing F14 path).
+                    // bidirectional script mode (the ordinary script-mode path).
                     if !bidirectional {
                         if let Some(bytes) = stdin_payload_ref {
                             opts_call = opts_call.with_stdin(bytes.clone());
                         }
                     }
-                    // F16 (v0.1.3): force PTY allocation for --stream
+                    // Force PTY allocation for --stream
                     // so the remote process line-buffers and SIGINT
                     // propagates back through the tty layer.
                     opts_call = opts_call.with_tty(args.stream);
@@ -845,7 +844,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                         cmd_ref,
                         opts_call,
                         &mut |line| {
-                            // L7 (v0.1.3): the redactor returns None
+                            // The redactor returns None
                             // for lines inside (or ending) an active
                             // PEM private-key block. We skip emission
                             // entirely so the BEGIN-line marker is the
@@ -892,11 +891,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             outcome
         };
 
-        // F13: stamp `retry_of` / `reauth_id` / `failure_class` onto
+        // Stamp `retry_of` / `reauth_id` / `failure_class` onto
         // every audit entry produced for this step so a downstream
         // consumer can correlate the original failed attempt and its
         // retry across the audit log.
-        // F14: also stamp script-mode metadata (path / sha256 / bytes
+        // Also stamp script-mode metadata (path / sha256 / bytes
         // / interp / optional inline body) so the audit JSONL is the
         // single source of truth for "what script ran here?".
         let script_ref = script.as_ref();
@@ -942,10 +941,10 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
                     }
                 }
                 last_inner = Some(code);
-                // F9 contract: per-step audit only when stdin is being
-                // forwarded. F13 widens this to also audit when the
-                // wrapper retried (so the retry stamps `retry_of` /
-                // `reauth_id` for correlation).
+                // Per-step audit only when stdin is being forwarded;
+                // also audited when the wrapper retried (so the
+                // retry stamps `retry_of` / `reauth_id` for
+                // correlation).
                 if stdin_audited || stream_audited || exit.retried {
                     if let Some(store) = &audit_store {
                         let mut e = crate::safety::audit::AuditEntry::new("run", &label);
@@ -1029,7 +1028,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             }
         }
 
-        // L11 (v0.1.3): phase 3 — clean up the remote temp file
+        // Phase 3 — clean up the remote temp file
         // unconditionally after the streaming dispatch returns.
         // Failures here are warnings, not errors — the operator's
         // verb has already run; an orphaned `.inspect-l11-*.sh`
@@ -1073,7 +1072,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     }
 
-    // F13 (v0.1.3): determine the verb-level failure_class. Priority:
+    // Determine the verb-level failure_class. Priority:
     // 1. Uniform transport class across every failure → that class.
     // 2. Any transport failure mixed with command failures → still
     //    surface the transport class because it's the more actionable
@@ -1118,11 +1117,11 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
             );
         }
     } else {
-        // F13: emit a final summary envelope so JSON consumers can
+        // Emit a final summary envelope so JSON consumers can
         // read the verb-level outcome (ok/failed counts +
         // failure_class) in one structured record. Streaming line
         // envelopes earlier in the run remain unchanged.
-        // F19 (v0.1.3): the same `--select` filter that gated the
+        // The same `--select` filter that gated the
         // streaming line envelopes also gates this summary envelope,
         // so a single `--select '.phase'` (or
         // `select(.failure_class!=null)`) covers both per-frame and
@@ -1138,7 +1137,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
-    // F13: when every failure shared the same transport class, exit
+    // When every failure shared the same transport class, exit
     // with the dedicated transport exit code (12/13/14) and a chained
     // hint. Mixed / command-only failures fall through to existing
     // `ExitKind::Inner` / `ExitKind::Error` logic.
@@ -1148,7 +1147,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         }
     }
 
-    // P11 (v0.1.1): surface the remote command's exit code on
+    // Surface the remote command's exit code on
     // single-target / uniform multi-target runs so shell idioms like
     // `inspect run arte/api -- 'exit 7'` behave the way they would
     // for a direct ssh.
@@ -1164,7 +1163,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     })
 }
 
-/// L7 (v0.1.3): tag the audit `args` text with the redaction outcome,
+/// Tag the audit `args` text with the redaction outcome,
 /// matching the `inspect exec` convention so audit reviewers can tell
 /// `[secrets_exposed=true]` (operator opted out via `--show-secrets`)
 /// from `[secrets_masked=true]` (the redactor fired during this step)
@@ -1194,7 +1193,7 @@ fn stamp_args(
     }
 }
 
-/// L7 (v0.1.3): collect the redactor's per-kind activity for
+/// Collect the redactor's per-kind activity for
 /// `AuditEntry::secrets_masked_kinds`. Returns `None` (so
 /// `skip_serializing_if` elides the field) when no masker fired.
 fn collect_kinds(redactor: &crate::redact::OutputRedactor) -> Option<Vec<String>> {

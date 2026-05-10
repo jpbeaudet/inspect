@@ -1,4 +1,4 @@
-//! F6 (v0.1.3): `inspect compose exec <ns>/<project>/<service> -- <cmd>`
+//! `Inspect compose exec <ns>/<project>/<service> -- <cmd>`
 //! — run a command inside a compose service container. Mirrors
 //! `inspect run`'s contract:
 //!
@@ -8,7 +8,7 @@
 //!   purpose-built write verbs (`compose restart`, `compose up`,
 //!   `compose down`) or `inspect exec` (the generic write verb).
 //! - **No apply gate.** Mirrors `inspect run` exactly.
-//! - **Output redacted** through the L7 four-masker pipeline
+//! - **Output redacted** through the four-masker pipeline
 //!   unless `--show-secrets` is passed; `--redact-all` masks every
 //!   `KEY=VALUE` line regardless of key name.
 //! - **`-u` / `-w` passthrough** to `docker compose exec` for

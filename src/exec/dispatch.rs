@@ -1,4 +1,4 @@
-//! F13 (v0.1.3): transport-failure-aware dispatch wrapper.
+//! Transport-failure-aware dispatch wrapper.
 //!
 //! Verbs that ship operator-supplied commands to the remote host
 //! (`run`, `exec`) call into [`dispatch_with_reauth`] instead of the
@@ -51,7 +51,7 @@ pub struct DispatchOutcome<T> {
 }
 
 /// Run `do_dispatch` once (and, on transport-stale, again after a
-/// reauth) under the F13 contract. Returns a [`DispatchOutcome`] the
+/// reauth) under the contract. Returns a [`DispatchOutcome`] the
 /// caller threads into its audit + SUMMARY rendering.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_with_reauth<T>(
@@ -98,9 +98,9 @@ pub fn dispatch_with_reauth<T>(
             format!("trigger=transport_stale,original_verb={original_verb},selector={selector}");
         e.exit = 0;
         let id = e.id.clone();
-        // P8-C fix (v0.1.3): the reauth entry is a side-effect of the
+        // The reauth entry is a side-effect of the
         // operator's verb invocation, not the primary audit. Skip the
-        // F18 transcript link so the verb's own audit_id (appended
+        // transcript link so the verb's own audit_id (appended
         // later on retry success) wins the footer slot. The reauth
         // entry remains discoverable via `audit show <reauth_id>` /
         // `audit grep verb=connect.reauth` and chains forensically to

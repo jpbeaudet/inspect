@@ -89,7 +89,7 @@ pub enum SelectorError {
         note: String,
     },
 
-    /// F7.1 (v0.1.3): the namespace is registered but its profile
+    /// The namespace is registered but its profile
     /// has zero services — discovery either never ran or matched
     /// nothing. Lead the hint with `inspect setup <ns>`, not
     /// `inspect profile`. The original "no targets" framing keeps
@@ -118,7 +118,7 @@ pub fn resolve(input: &str) -> Result<Vec<ResolvedTarget>, SelectorError> {
 
 /// Return the list of namespaces a selector resolves to, without
 /// going through service-level resolution. Used by verbs that want
-/// to render an empty-state output (F7.5) for a known namespace
+/// to render an empty-state output for a known namespace
 /// whose profile contains zero services — the verb still needs the
 /// namespace name(s) to address `docker ps` and friends.
 pub fn chosen_namespaces_for(input: &str) -> Result<Vec<String>, SelectorError> {
@@ -193,7 +193,7 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
     }
 
     if targets.is_empty() {
-        // F7.1 (v0.1.3): the namespace is registered but discovery
+        // The namespace is registered but discovery
         // either never ran or classified zero services. The default
         // "inspect profile / inspect setup --force" hint sends the
         // operator down the wrong path (refresh a cache that does
@@ -204,7 +204,7 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
         // Bare-namespace expansions (`inspect status arte` →
         // `arte/*` → `ServiceSpec::All`) and host-level targets
         // intentionally fall through so the verb layer can render
-        // its own empty-state output (F7.5).
+        // its own empty-state output.
         let sel_targets_specific_service = matches!(sel.service, Some(ServiceSpec::Atoms(_)));
         if sel_targets_specific_service
             && chosen_namespaces.len() == 1
@@ -217,7 +217,7 @@ pub fn resolve_ast(sel: &Selector) -> Result<Vec<ResolvedTarget>, SelectorError>
                 namespace: chosen_namespaces[0].clone(),
             });
         }
-        // F7.5 (v0.1.3): a `ServiceSpec::All` selector ("everything in
+        // A `ServiceSpec::All` selector ("everything in
         // this namespace") against an empty profile is not an error —
         // it is "you have no services configured". Return an empty
         // target list and let the verb layer (status, ps, etc.) emit
@@ -427,7 +427,7 @@ fn resolve_services_for_ns(
             let names: Vec<String> = profile
                 .map(|p| p.services.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
-            // F5: parallel list of (name, container_name) pairs so the
+            // Parallel list of (name, container_name) pairs so the
             // selector resolver can also accept the docker container
             // name (e.g. `luminary-onyx-onyx-vault-1`) as a synonym
             // for the canonical compose service name (`onyx-vault`).
@@ -477,7 +477,7 @@ fn resolve_services_for_ns(
                             }
                             continue;
                         }
-                        // 4) F5: exact docker container_name match
+                        // 4) Exact docker container_name match
                         //    (when distinct from the compose service
                         //    name). Resolve to the canonical name and
                         //    record a one-line breadcrumb for the
@@ -541,7 +541,7 @@ fn resolve_services_for_ns(
     }
 }
 
-/// F5: emit a one-line breadcrumb on stderr when a selector matched
+/// Emit a one-line breadcrumb on stderr when a selector matched
 /// against a service's docker `container_name` (rather than its
 /// canonical compose service `name`). The hint is informational —
 /// the verb still proceeds — and points the operator at the canonical

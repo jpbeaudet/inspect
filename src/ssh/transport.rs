@@ -1,4 +1,4 @@
-//! F13 (v0.1.3): SSH transport-failure classifier.
+//! SSH transport-failure classifier.
 //!
 //! Distinguishes four buckets at the SSH-executor boundary:
 //!
@@ -91,8 +91,7 @@ impl TransportClass {
 pub fn classify(message: &str) -> Option<TransportClass> {
     let m = message.to_ascii_lowercase();
 
-    // Synthetic test marker emitted by the mock runner. Lets the F13
-    // acceptance suite drive the classifier deterministically without
+    // Synthetic test marker emitted by the mock runner. Lets the     // acceptance suite drive the classifier deterministically without
     // a live ssh process. Match the exact prefix to avoid false
     // positives on operator-typed strings.
     if let Some(rest) = m.strip_prefix("transport:") {

@@ -1,4 +1,4 @@
-//! `inspect revert <audit-id>` (bible §8.2; F11 v0.1.3 universal contract).
+//! `inspect revert <audit-id>` (universal-revert contract).
 //!
 //! Restores a prior write by replaying the inverse the original verb
 //! pre-staged at capture-before-apply time. Three flavours:
@@ -34,7 +34,7 @@ use crate::verbs::quote::shquote;
 pub fn run(args: RevertArgs) -> Result<ExitKind> {
     let store = AuditStore::open()?;
 
-    // F11 (v0.1.3): `--last [N]` walks the N most recent applied
+    // `--last [N]` walks the N most recent applied
     // write entries in reverse chronological order. Each one is
     // dispatched through the same single-entry path so the dry-run /
     // confirmation contract is identical.
@@ -80,10 +80,10 @@ fn run_last(args: &RevertArgs, n: usize, store: &AuditStore) -> Result<ExitKind>
 }
 
 fn revert_one(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -> Result<ExitKind> {
-    // F11 backward-compat: entries written before v0.1.3 carry no
+    // Entries written before v0.1.3 carry no
     // `revert` field. Fall back to the legacy `previous_hash` +
     // `snapshot` revert path for those; refuse with a chained hint
-    // for legacy entries that have neither (e.g. lifecycle pre-F11).
+    // for legacy entries that have neither (e.g. lifecycle earlier).
     let kind = entry
         .revert
         .as_ref()
@@ -103,7 +103,7 @@ fn revert_one(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -> Resu
     }
 }
 
-/// F17 (v0.1.3): walk the parent `run --steps` entry's composite
+/// Walk the parent `run --steps` entry's composite
 /// payload in reverse order, dispatching each per-step inverse as its
 /// own audit-logged entry. Used by `inspect revert <steps_run_id>`.
 ///
@@ -207,7 +207,7 @@ fn revert_composite(args: &RevertArgs, entry: &AuditEntry, store: &AuditStore) -
         r.print();
         return Ok(ExitKind::Success);
     }
-    // F11 / LLM-trap: a targeted `revert <id> --apply` is already an
+    // A targeted `revert <id> --apply` is already an
     // explicit, double-witnessed intent (the audit-id + the apply
     // flag). No interactive prompt — only the large-fanout interlock
     // fires, which is a no-op at target_count=1. Drift detection on
@@ -299,7 +299,7 @@ fn revert_unsupported(entry: &AuditEntry) -> Result<ExitKind> {
             entry.id, entry.verb
         ));
     } else if entry.revert.is_none() {
-        // Legacy v0.1.2 entry without the F11 contract.
+        // Legacy v0.1.2 entry without the contract.
         crate::error::emit(format!(
             "audit '{}' (verb '{}') predates the revert contract (v0.1.2 or earlier) \
              and has no captured inverse. Inspect the entry with `inspect audit show {}` \
@@ -346,7 +346,7 @@ fn revert_command_pair(
         step.ns.namespace,
         step.service().map(|x| format!("/{x}")).unwrap_or_default()
     );
-    // F11 capture-site authoritative (v0.1.3 smoke fix): `revert.payload`
+    // `Revert.payload`
     // is the literal command the runner should dispatch, exactly as the
     // original verb dispatched. Lifecycle inverses (`docker start`,
     // `systemctl start`) run host-level; in-container inverses
@@ -368,7 +368,7 @@ fn revert_command_pair(
         r.print();
         return Ok(ExitKind::Success);
     }
-    // F11 / LLM-trap: targeted revert with --apply is already an
+    // Targeted revert with --apply is already an
     // explicit, double-witnessed intent. No interactive prompt.
     if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {
         eprintln!("aborted: {why}");
@@ -500,7 +500,7 @@ fn revert_state_snapshot(
         return Ok(ExitKind::Success);
     }
 
-    // F11 / LLM-trap: targeted revert with --apply is already an
+    // Targeted revert with --apply is already an
     // explicit, double-witnessed intent. No interactive prompt.
     // Drift over the captured snapshot still requires --force.
     if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {

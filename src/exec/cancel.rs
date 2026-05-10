@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
-/// F16-followup (v0.1.3): monotonically increasing count of SIGINT /
+/// Monotonically increasing count of SIGINT /
 /// SIGTERM signals received. The streaming SSH executor uses this to
 /// distinguish "first Ctrl-C" (forward through PTY → SIGINT to remote
 /// process group) from "second Ctrl-C within 1s" (escalate to SSH
@@ -35,7 +35,7 @@ pub fn is_cancelled() -> bool {
     CANCELLED.load(Ordering::Relaxed)
 }
 
-/// F16-followup (v0.1.3): monotonically increasing count of cancel
+/// Monotonically increasing count of cancel
 /// signals received. Wraps at `u32::MAX` (~ 4 billion Ctrl-Cs — not a
 /// realistic concern). Used by the streaming SSH executor to detect
 /// "a new SIGINT arrived since my last poll" without losing the trip
@@ -47,9 +47,9 @@ pub fn signal_count() -> u32 {
 
 /// Manually trip the cancel flag (and bump the counter).
 ///
-/// Originally (v0.1.3 pre-L13) gated to `#[cfg(test)]` with the
+/// Originally (v0.1.3 earlier) gated to `#[cfg(test)]` with the
 /// rationale "production code never calls this; the SIGINT/SIGTERM
-/// handler does the same work via the `extern "C"` path". L13
+/// handler does the same work via the `extern "C"` path".
 /// invalidates that — `inspect run --steps` with a step's
 /// `parallel: true` AND `on_failure: stop` now trips the flag
 /// internally when a parallel target completes with a failure so
@@ -63,7 +63,7 @@ pub fn cancel() {
     SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// F16-followup (v0.1.3): clear the cancellation flag without resetting
+/// Clear the cancellation flag without resetting
 /// the signal counter. Used by the streaming SSH executor after it has
 /// successfully forwarded a first Ctrl-C through the remote PTY — the
 /// remote process is now responsible for terminating, and the local
@@ -160,7 +160,7 @@ extern "C" fn handler(_sig: libc::c_int) {
     // Async-signal-safe: relaxed atomic ops on primitive integers are
     // explicitly permitted from signal handlers. The counter feeds the
     // streaming executor's first-vs-second-Ctrl-C escalation
-    // (F16-followup v0.1.3); `CANCELLED` feeds the conventional
+    // (cancellation-followup); `CANCELLED` feeds the conventional
     // "have we been signaled at all" polling.
     SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
     CANCELLED.store(true, Ordering::Relaxed);
@@ -203,7 +203,7 @@ pub(crate) mod tests {
         reset();
     }
 
-    /// F16-followup (v0.1.3): the SIGINT counter increments on every
+    /// The SIGINT counter increments on every
     /// trip — distinguishes "first Ctrl-C" from "second Ctrl-C" so the
     /// streaming executor can escalate from PTY-forwarded SIGINT to
     /// channel-close SIGHUP on the second hit.

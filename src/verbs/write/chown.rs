@@ -66,7 +66,7 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
     let mut bad = 0usize;
     let mut renderer = Renderer::new();
     for (s, path) in &planned {
-        // F11 (v0.1.3): capture prior owner for the inverse.
+        // Capture prior owner for the inverse.
         let stat_inner = format!("stat -c %u:%g -- {}", shquote(path));
         let stat_cmd = match s.container() {
             Some(container) => format!(
@@ -99,7 +99,7 @@ pub fn run(args: ChownArgs) -> Result<ExitKind> {
         );
         let revert = match prev_owner.as_deref() {
             Some(o) => {
-                // F11 capture-site authoritative: see chmod.rs.
+                // See chmod.rs.
                 let inner_revert = format!("chown {} -- {}", shquote(o), shquote(path));
                 let payload = match s.container() {
                     Some(container) => format!(

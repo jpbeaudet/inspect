@@ -45,20 +45,21 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         key_path,
         key_passphrase_env,
         key_inline,
-        // F12 (v0.1.3): env-overlay overrides via env vars are out of
+        // Env-overlay overrides via env vars are out of
         // scope for v0.1.3 (would conflict with the existing
         // `INSPECT_<NS>_*` suffix-matching scheme used by
         // `enumerate_env_namespaces`). The overlay is config-file only.
         env: None,
-        // F13 (v0.1.3): auto_reauth has no env-var override path; it is
+        // Auto_reauth has no env-var override path; it is
         // a per-namespace policy that lives in `servers.toml`.
         auto_reauth: None,
-        // F18 (v0.1.3): per-namespace transcript override is
+        // Per-namespace transcript override is
         // config-file only (the policy is rarely set per-invocation;
-        // the file pattern matches F13 and F12).
+        // the file pattern matches the auto-reauth + env-overlay design).
         history: None,
-        // L4 (v0.1.3): auth / password_env / session_ttl are
-        // config-file only — same rationale as F12/F13/F18 (the
+        // Auth / password_env / session_ttl are
+        // config-file only — same rationale as the env-overlay /
+        // auto-reauth / transcript designs (the
         // policy rarely changes per invocation, and password
         // material in env vars is what `password_env` itself names,
         // so the env-override path is not where that value belongs).

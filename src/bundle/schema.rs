@@ -100,7 +100,7 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchStep>,
 
-    /// L8 (v0.1.3): compose-aware step. Mutually exclusive with
+    /// Compose-aware step. Mutually exclusive with
     /// `exec` / `run` / `watch`. The `target:` (or bundle `host:`)
     /// supplies the namespace; the spec carries the project, action,
     /// optional service, and optional flag set. Validated at plan
@@ -332,7 +332,7 @@ pub enum StepBodyKind {
     Exec,
     Run,
     Watch,
-    /// L8 (v0.1.3): structured compose action. Renders to a
+    /// Structured compose action. Renders to a
     /// `cd <wd> && docker compose -p <p> <action> [flags] [<svc>]`
     /// shell command at execution time, plus an audit entry with
     /// `verb=compose.<action>` and `[project=…] [service=…]
@@ -379,7 +379,7 @@ impl Step {
     }
 }
 
-/// L8 (v0.1.3): structured compose-step spec. Mirrors the standalone
+/// Structured compose-step spec. Mirrors the standalone
 /// `inspect compose <action>` verbs so a bundle's compose step
 /// inherits the same audit shape (`verb=compose.<action>`,
 /// `[project=…] [service=…] [compose_file_hash=…]`) and the same
@@ -412,7 +412,7 @@ pub struct ComposeStepSpec {
     pub flags: BTreeMap<String, serde_yaml::Value>,
 }
 
-/// L8 (v0.1.3): closed enum of compose actions a bundle step can
+/// Closed enum of compose actions a bundle step can
 /// drive. Mirrors the sub-verb taxonomy. Serialized lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -435,7 +435,7 @@ impl ComposeAction {
         }
     }
 
-    /// L8 (v0.1.3): which boolean flags this action recognizes. Any
+    /// Which boolean flags this action recognizes. Any
     /// other key in the `flags:` map is a plan-time error.
     pub fn allowed_flags(self) -> &'static [&'static str] {
         match self {

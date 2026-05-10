@@ -1,11 +1,11 @@
 //! Pre-parse alias substitution.
 //!
 //! Aliases are referenced in queries via `@name` (parameterless,
-//! pre-L3) or `@name(k=v,...)` (parameterized, L3+). The reference is
+//! earlier) or `@name(k=v,...)` (parameterized). The reference is
 //! replaced with the literal alias body before the parser runs, so the
 //! parser never sees a raw `@name`. (Bible §6.7, §9.3.)
 //!
-//! Chaining is *allowed* in L3+ but is the resolver's responsibility:
+//! Chaining is *allowed* in parameterized form but is the resolver's responsibility:
 //! this module asks `resolve` for a fully-substituted body. The
 //! resolver must walk any nested `@other(...)` references and surface
 //! cycle / depth-cap errors. (`alias::expand_recursive` is the

@@ -1,4 +1,4 @@
-//! L10 (v0.1.3): parse the `Ports` column from `docker ps --format
+//! Parse the `Ports` column from `docker ps --format
 //! '{{.Ports}}'` into structured `Port` records.
 //!
 //! The column shape is documented but not formally specified. Tokens

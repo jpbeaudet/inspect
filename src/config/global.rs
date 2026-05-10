@@ -1,4 +1,4 @@
-//! L5 (v0.1.3): global behavior config at `~/.inspect/config.toml`.
+//! Global behavior config at `~/.inspect/config.toml`.
 //!
 //! Distinct from `servers.toml` (per-namespace runtime config); this
 //! file holds cross-cutting policy that is *not* keyed on a server —
@@ -43,7 +43,7 @@ pub struct AuditConfig {
     pub retention: Option<String>,
 }
 
-/// `[history]` table — F18 (v0.1.3) transcript retention policy.
+/// `[history]` table — transcript retention policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HistoryConfig {
     /// Days of transcripts to keep. Older files are deleted on every

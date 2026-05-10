@@ -70,7 +70,7 @@ pub fn snapshots_dir() -> PathBuf {
     audit_dir().join("snapshots")
 }
 
-/// F14 (v0.1.3): content-addressed store of script bodies forwarded
+/// Content-addressed store of script bodies forwarded
 /// via `inspect run --file` / `--stdin-script`. Each unique sha256
 /// is written once as `<sha256>.sh` (mode 0600) so audit entries can
 /// reference the body by hash without inflating the JSONL.
@@ -78,7 +78,7 @@ pub fn scripts_dir() -> PathBuf {
     inspect_home().join("scripts")
 }
 
-/// P10 (v0.1.1): root for `--since-last` cursors. One small file per
+/// Root for `--since-last` cursors. One small file per
 /// (namespace, service) pair, mode 0600 inside a 0700 directory.
 pub fn cursors_dir() -> PathBuf {
     inspect_home().join("cursors")

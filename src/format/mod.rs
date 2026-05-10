@@ -93,14 +93,14 @@ pub struct FormatArgs {
     /// Suppress ANSI color codes in human / table output.
     #[arg(long)]
     pub no_color: bool,
-    /// F7.4 (v0.1.3): suppress the trailing `SUMMARY:` and `NEXT:`
+    /// Suppress the trailing `SUMMARY:` and `NEXT:`
     /// lines so output is safe to pipe into `tail` / `head` /
     /// `grep -A` without trailer corruption. Mutually exclusive with
     /// `--json` / `--jsonl` (those formats are already trailer-free).
     #[arg(long, conflicts_with_all = ["json", "jsonl"])]
     pub quiet: bool,
 
-    /// F19 (v0.1.3): apply a jq-language filter to the JSON output
+    /// Apply a jq-language filter to the JSON output
     /// before emission. Requires `--json` or `--jsonl`. The filter
     /// language is the same one `jq` (and `jaq`) implement; see
     /// `inspect help select` for the full reference.
@@ -112,7 +112,7 @@ pub struct FormatArgs {
     #[arg(long, value_name = "FILTER")]
     pub select: Option<String>,
 
-    /// F19 (v0.1.3): emit string yields unquoted (the `jq -r` shape)
+    /// Emit string yields unquoted (the `jq -r` shape)
     /// instead of compact JSON. Errors with exit code 1 if any yield
     /// is not a string — the alternative (silently quoting non-strings
     /// as JSON) would let literal `"` characters reach `xargs` /
@@ -121,7 +121,7 @@ pub struct FormatArgs {
     #[arg(long, requires = "select")]
     pub select_raw: bool,
 
-    /// F19 (v0.1.3): collect every NDJSON value from the stream into a
+    /// Collect every NDJSON value from the stream into a
     /// single array before evaluating the filter (the `jq -s` shape).
     /// Lets `length` / `map(.x) | unique` / `reduce .[] as $x (…)`
     /// work over the whole stream. Memory is O(stream); use sparingly
@@ -180,7 +180,7 @@ impl FormatArgs {
         } else {
             OutputFormat::Human
         };
-        // F19 (v0.1.3): `--select` is a JSON-only filter. Reject it
+        // `--select` is a JSON-only filter. Reject it
         // against any non-JSON-class format with the same anyhow →
         // exit 2 path the format-mutex check uses. The `--quiet`
         // mutex is enforced transitively: `--quiet` is already
@@ -201,7 +201,7 @@ impl FormatArgs {
         self.json || self.jsonl
     }
 
-    /// F19 (v0.1.3): build a streaming `query::ndjson::Filter` from the
+    /// Build a streaming `query::ndjson::Filter` from the
     /// `--select` / `--select-raw` / `--select-slurp` triple. Returns
     /// `Ok(None)` when no filter was requested, `Ok(Some(filter))` on
     /// successful compile, and an anyhow error keyed with the
@@ -222,7 +222,7 @@ impl FormatArgs {
             .map_err(|e| anyhow!("filter parse: {}", e.message))
     }
 
-    /// F19 (v0.1.3): single-shot variant for envelope verbs that emit
+    /// Single-shot variant for envelope verbs that emit
     /// one `OutputDoc` per invocation. Returns the (filter, raw,
     /// slurp) triple as plain references so the envelope chokepoint
     /// in [`crate::verbs::output::OutputDoc::print_json`] can call
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(a.resolve().unwrap(), OutputFormat::Raw);
     }
 
-    // --- F19: --select validation + helpers --------------------------------
+    // --- `--select` validation + helpers ----------------------------------
 
     #[test]
     fn select_with_json_resolves() {
