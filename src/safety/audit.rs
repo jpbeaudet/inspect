@@ -58,18 +58,17 @@ pub struct AuditEntry {
     /// see which YAML step produced this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_step: Option<String>,
-    /// L6 (v0.1.3): which matrix branch this entry corresponds to,
-    /// stamped only on per-branch entries from a `parallel: true` +
-    /// `matrix:` step. Format is `<matrix-key>=<value>` (e.g.
-    /// `volume=atlas_milvus`). `None` for non-matrix steps and
-    /// pre-L6 entries — they elide the field via
-    /// `skip_serializing_if`. `inspect audit ls --bundle <id>`
-    /// groups by `bundle_step` and inspects this field to lay out
-    /// per-branch outcomes; `inspect bundle status <id>` consumes
-    /// it the same way.
+    /// Which matrix branch this entry corresponds to, stamped only
+    /// on per-branch entries from a `parallel: true` + `matrix:`
+    /// step. Format is `<matrix-key>=<value>` (e.g.
+    /// `volume=atlas_milvus`). `None` for non-matrix steps and for
+    /// older audit entries that predate the field.
+    /// `inspect audit ls --bundle <id>` groups by `bundle_step` and
+    /// inspects this field to lay out per-branch outcomes;
+    /// `inspect bundle status <id>` consumes it the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_branch: Option<String>,
-    /// L6 (v0.1.3): final outcome of this matrix branch. Set in
+    /// Final outcome of this matrix branch. Set in
     /// lockstep with `bundle_branch` only on per-branch entries.
     /// Values: `"ok"` | `"failed"` | `"skipped"`. `None` for
     /// non-matrix steps. Lets `inspect bundle status` render the
@@ -79,182 +78,180 @@ pub struct AuditEntry {
     /// stop-on-first-error matrix policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_branch_status: Option<String>,
-    /// F9 (v0.1.3): byte count of local stdin forwarded to the remote
-    /// command. `0` (or absent on read) means stdin was not forwarded
-    /// (tty input, `--no-stdin`, or no piped input). Recorded so a
-    /// post-hoc audit can answer "what input did this command consume?"
-    /// by size.
+    /// Byte count of local stdin forwarded to the remote command.
+    /// `0` (or absent on read) means stdin was not forwarded (tty
+    /// input, `--no-stdin`, or no piped input). Recorded so a
+    /// post-hoc audit can answer "what input did this command
+    /// consume?" by size.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub stdin_bytes: u64,
-    /// F9 (v0.1.3): SHA-256 of forwarded stdin, present only when the
-    /// caller passed `--audit-stdin-hash`. Off by default for perf;
-    /// opt-in for security-sensitive runs (auditable byte-for-byte
+    /// SHA-256 of forwarded stdin, present only when the caller
+    /// passed `--audit-stdin-hash`. Off by default for perf; opt-in
+    /// for security-sensitive runs (auditable byte-for-byte
     /// reconstruction without storing the bytes themselves).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin_sha256: Option<String>,
-    /// F11 (v0.1.3): captured inverse of this audit entry. Populated
-    /// at capture-before-apply time by every write verb. `None` on
-    /// pre-F11 (v0.1.2 or earlier) entries — those are treated as
+    /// Captured inverse of this audit entry. Populated at
+    /// capture-before-apply time by every write verb. `None` on
+    /// older audit entries (predating the universal-revert
+    /// contract) — those are treated as
     /// `revert.kind = "unsupported"` on read. `inspect revert <id>`
     /// consults this field; legacy entries still revert through the
     /// `previous_hash` + `snapshot` path for backward compat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<Revert>,
-    /// F11 (v0.1.3): `true` when the mutation actually ran on the
-    /// remote, `false` when capture succeeded but dispatch failed (or
-    /// the verb is still in-flight). `None` on legacy entries. Lets
+    /// `true` when the mutation actually ran on the remote, `false`
+    /// when capture succeeded but dispatch failed (or the verb is
+    /// still in-flight). `None` on legacy entries. Lets
     /// `inspect revert` no-op cleanly on entries that never applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied: Option<bool>,
-    /// F11 (v0.1.3): set when the operator explicitly passed
-    /// `--no-revert` on a verb whose inverse is fundamentally
-    /// undefined (e.g. `inspect exec` of a free-form script).
-    /// `inspect revert <id>` on such entries surfaces a chained hint
-    /// rather than silently no-opping.
+    /// Set when the operator explicitly passed `--no-revert` on a
+    /// verb whose inverse is fundamentally undefined (e.g.
+    /// `inspect exec` of a free-form script). `inspect revert <id>`
+    /// on such entries surfaces a chained hint rather than silently
+    /// no-opping.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_revert_acknowledged: bool,
-    /// F11 (v0.1.3): when this entry was the auto-revert of a failed
-    /// apply (`--revert-on-failure` triggered), this links back to the
+    /// When this entry was the auto-revert of a failed apply
+    /// (`--revert-on-failure` triggered), this links back to the
     /// original entry so audit readers can see the relationship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_revert_of: Option<String>,
-    /// F12 (v0.1.3): per-namespace remote env overlay applied to this
-    /// invocation, merged with any per-invocation `--env` flags. `None`
-    /// (or absent) means no overlay was applied. The map is recorded
-    /// structurally so `inspect audit show <id>` can render it without
-    /// re-parsing the rendered command line; legacy entries (pre-F12)
-    /// elide the field via `skip_serializing_if`.
+    /// Per-namespace remote env overlay applied to this invocation,
+    /// merged with any per-invocation `--env` flags. `None` (or
+    /// absent) means no overlay was applied. The map is recorded
+    /// structurally so `inspect audit show <id>` can render it
+    /// without re-parsing the rendered command line; older audit
+    /// entries elide the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_overlay: Option<std::collections::BTreeMap<String, String>>,
-    /// F12 (v0.1.3): the final remote command line that was dispatched
-    /// (including the `env KEY="VAL" ... -- ` overlay prefix when one
-    /// was applied, and any `docker exec <ctr> sh -c ...` wrapping).
-    /// Recorded for byte-for-byte replay by `inspect revert` /
-    /// future audit-driven re-run tooling. Distinct from `args`,
-    /// which records the operator-typed intent.
+    /// The final remote command line that was dispatched (including
+    /// the `env KEY="VAL" ... -- ` overlay prefix when one was
+    /// applied, and any `docker exec <ctr> sh -c ...` wrapping).
+    /// Recorded for byte-for-byte replay by `inspect revert` and
+    /// audit-driven re-run tooling. Distinct from `args`, which
+    /// records the operator-typed intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rendered_cmd: Option<String>,
-    /// F13 (v0.1.3): when this entry is the retry of a verb that hit
-    /// a transport-stale failure, links to the original (failed)
-    /// invocation's audit id. Lets `inspect audit show <id>` display
-    /// the full retry chain.
+    /// When this entry is the retry of a verb that hit a
+    /// transport-stale failure, links to the original (failed)
+    /// invocation's audit id. Lets `inspect audit show <id>`
+    /// display the full retry chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_of: Option<String>,
-    /// F13 (v0.1.3): when the auto-reauth path fired between this
-    /// entry's dispatch and a previous failed attempt, links to the
+    /// When the auto-reauth path fired between this entry's
+    /// dispatch and a previous failed attempt, links to the
     /// `connect.reauth` entry that re-established the master socket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reauth_id: Option<String>,
-    /// F13 (v0.1.3): SSH transport classification on this entry.
-    /// `None` for ordinary command runs; `Some("transport_stale")` /
-    /// etc. when the verb terminated with a transport failure.
+    /// SSH transport classification on this entry. `None` for
+    /// ordinary command runs; `Some("transport_stale")` etc. when
+    /// the verb terminated with a transport failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
-    /// F14 (v0.1.3): when this verb invocation was script-mode
-    /// (`inspect run --file <path>`), the absolute local path the
-    /// script was read from. `None` for `--stdin-script` and for
+    /// When this verb invocation was script-mode (`inspect run
+    /// --file <path>`), the absolute local path the script was
+    /// read from. `None` for `--stdin-script` and for
     /// non-script-mode invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_path: Option<String>,
-    /// F14 (v0.1.3): SHA-256 (hex) of the script body shipped to the
-    /// remote via `bash -s`. Always present for script-mode
-    /// invocations (both `--file` and `--stdin-script`); never
-    /// present for non-script-mode runs. Lets `inspect audit show`
-    /// retrieve the byte-exact script from `~/.inspect/scripts/`
-    /// even if the operator's local file has been deleted.
+    /// SHA-256 (hex) of the script body shipped to the remote via
+    /// `bash -s`. Always present for script-mode invocations (both
+    /// `--file` and `--stdin-script`); never present for
+    /// non-script-mode runs. Lets `inspect audit show` retrieve the
+    /// byte-exact script from `~/.inspect/scripts/` even if the
+    /// operator's local file has been deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_sha256: Option<String>,
-    /// F14 (v0.1.3): byte length of the script body. Always present
-    /// for script-mode invocations.
+    /// Byte length of the script body. Always present for
+    /// script-mode invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_bytes: Option<u64>,
-    /// F14 (v0.1.3): the full script body, recorded inline in the
-    /// audit entry only when the operator passed
-    /// `--audit-script-body`. Off by default to keep the JSONL
-    /// readable; the body is otherwise dedup-stored in
-    /// `~/.inspect/scripts/<sha256>.sh`.
+    /// The full script body, recorded inline in the audit entry
+    /// only when the operator passed `--audit-script-body`. Off by
+    /// default to keep the JSONL readable; the body is otherwise
+    /// dedup-stored in `~/.inspect/scripts/<sha256>.sh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_body: Option<String>,
-    /// F14 (v0.1.3): remote interpreter dispatched for the script
-    /// body (`bash`, `sh`, `python3`, ...). Recorded so audit
-    /// readers can reproduce the exact dispatch shape without
-    /// re-parsing the rendered command. `None` for non-script-mode
-    /// invocations.
+    /// Remote interpreter dispatched for the script body (`bash`,
+    /// `sh`, `python3`, ...). Recorded so audit readers can
+    /// reproduce the exact dispatch shape without re-parsing the
+    /// rendered command. `None` for non-script-mode invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_interp: Option<String>,
-    /// L7 (v0.1.3): which redaction maskers fired during this verb's
-    /// streamed output. Canonical order:
-    /// `["pem", "header", "url", "env"]` (subset). `None` (or absent)
-    /// when no masker fired or when the verb does not stream remote
-    /// stdout. Pre-L7 entries elide the field via
-    /// `skip_serializing_if`.
+    /// Which redaction maskers fired during this verb's streamed
+    /// output. Canonical order:
+    /// `["pem", "header", "url", "env"]` (subset). `None` (or
+    /// absent) when no masker fired or when the verb does not
+    /// stream remote stdout. Older audit entries elide the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets_masked_kinds: Option<Vec<String>>,
-    /// F15 (v0.1.3): direction of a file-transfer verb (`inspect put`
-    /// / `inspect get` / `inspect cp`). `Some("up")` for uploads
+    /// Direction of a file-transfer verb (`inspect put` /
+    /// `inspect get` / `inspect cp`). `Some("up")` for uploads
     /// (local → remote), `Some("down")` for downloads (remote →
-    /// local). `None` for every non-transfer verb. Pre-F15 cp
-    /// entries elide the field via `skip_serializing_if`.
+    /// local). `None` for every non-transfer verb. Older `cp`
+    /// entries elide the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_direction: Option<String>,
-    /// F15 (v0.1.3): absolute local path of a file-transfer verb's
-    /// local-side endpoint. The same field carries the source path
-    /// (uploads) or the destination path (downloads); the
+    /// Absolute local path of a file-transfer verb's local-side
+    /// endpoint. The same field carries the source path (uploads)
+    /// or the destination path (downloads); the
     /// `transfer_direction` discriminator disambiguates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_local: Option<String>,
-    /// F15 (v0.1.3): remote-side path of a file-transfer verb. May
-    /// be a host-filesystem path or, for container-fs transfers, a
-    /// path inside the target container; the `selector` field still
+    /// Remote-side path of a file-transfer verb. May be a
+    /// host-filesystem path or, for container-fs transfers, a path
+    /// inside the target container; the `selector` field still
     /// names which container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_remote: Option<String>,
-    /// F15 (v0.1.3): byte length of the transferred payload. Always
-    /// present for completed transfers (matches the count fed into
-    /// the SHA-256 tee).
+    /// Byte length of the transferred payload. Always present for
+    /// completed transfers (matches the count fed into the SHA-256
+    /// tee).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_bytes: Option<u64>,
-    /// F15 (v0.1.3): SHA-256 (hex) of the transferred payload,
-    /// computed during the transfer via a streaming tee on both
-    /// sides so a `put` followed by a `get` of the same file can be
-    /// verified byte-for-byte from the audit log.
+    /// SHA-256 (hex) of the transferred payload, computed during
+    /// the transfer via a streaming tee on both sides so a `put`
+    /// followed by a `get` of the same file can be verified
+    /// byte-for-byte from the audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_sha256: Option<String>,
-    /// F16 (v0.1.3): `true` when this `inspect run` invocation used
-    /// `--stream` / `--follow`, i.e. the remote command was
-    /// dispatched with a forced PTY (`ssh -tt`) for line-buffered
-    /// streaming and SIGINT propagation. `None` (or absent on read)
-    /// for non-streaming runs. Recorded so post-hoc audit can tell
+    /// `true` when this `inspect run` invocation used `--stream` /
+    /// `--follow`, i.e. the remote command was dispatched with a
+    /// forced PTY (`ssh -tt`) for line-buffered streaming and
+    /// SIGINT propagation. `false` (or absent on read) for
+    /// non-streaming runs. Recorded so post-hoc audit can tell
     /// `tail -f`-shaped invocations apart from short-lived commands
     /// in the same audit log without parsing the args text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub streamed: bool,
-    /// L11 (v0.1.3): `true` when this `inspect run` invocation
-    /// composed `--stream` with `--stdin-script` (or `--file`)
-    /// and took the L11 two-phase dispatch path — phase 1 cats
-    /// the script body into a remote temp file (no PTY), phase 2
-    /// runs `bash <tempfile>` with PTY for streaming. The remote
-    /// temp path is per-(SHA, pid) so concurrent runs don't
-    /// collide. `false` (or absent on read) on every other run,
-    /// including non-streaming script invocations and bare
-    /// `--stream` runs without a script source.
+    /// `true` when this `inspect run` invocation composed `--stream`
+    /// with `--stdin-script` (or `--file`) and took the two-phase
+    /// dispatch path — phase 1 cats the script body into a remote
+    /// temp file (no PTY), phase 2 runs `bash <tempfile>` with PTY
+    /// for streaming. The remote temp path is per-(SHA, pid) so
+    /// concurrent runs don't collide. `false` (or absent on read)
+    /// on every other run, including non-streaming script
+    /// invocations and bare `--stream` runs without a script
+    /// source.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bidirectional: bool,
-    /// L13 (v0.1.3): manifest-target-list index for per-(step,
-    /// target) audit entries produced by `inspect run --steps`
-    /// when the step's `parallel: true` was set. `None` (and
-    /// elided on serialize) for every other entry, including
-    /// sequential per-target entries. Recorded so a post-mortem
-    /// query can reconstruct manifest order regardless of the
-    /// audit log's natural completion-order ordering — agents
-    /// reading the log in time order can sort by `target_idx`
-    /// to recover the manifest's target list.
+    /// Manifest-target-list index for per-(step, target) audit
+    /// entries produced by `inspect run --steps` when the step's
+    /// `parallel: true` was set. `None` (and elided on serialize)
+    /// for every other entry, including sequential per-target
+    /// entries. Recorded so a post-mortem query can reconstruct
+    /// manifest order regardless of the audit log's natural
+    /// completion-order ordering — agents reading the log in time
+    /// order can sort by `target_idx` to recover the manifest's
+    /// target list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_idx: Option<usize>,
-    /// F17 (v0.1.3): UUID-shaped identifier linking a parent
-    /// `run --steps` invocation to the per-step audit entries it
-    /// produced. Stamped on the parent entry and on every per-step
-    /// entry — same value on all of them — so a post-hoc query like
+    /// UUID-shaped identifier linking a parent `run --steps`
+    /// invocation to the per-step audit entries it produced.
+    /// Stamped on the parent entry and on every per-step entry —
+    /// same value on all of them — so a post-hoc query like
     /// `inspect audit show <steps_run_id>` can fan out to the full
     /// step table, and `inspect revert <parent-id>` can walk the
     /// per-step inverses in reverse order via the parent's
@@ -262,28 +259,28 @@ pub struct AuditEntry {
     /// non-steps invocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps_run_id: Option<String>,
-    /// F17 (v0.1.3): name of the step within the manifest. Stamped
-    /// on per-step audit entries only (the parent entry leaves it
-    /// `None` and instead stamps `manifest_steps` with the full
-    /// ordered list). Lets `inspect audit show <step-id>` zoom into
-    /// one step's record without re-parsing the parent payload.
+    /// Name of the step within the manifest. Stamped on per-step
+    /// audit entries only (the parent entry leaves it `None` and
+    /// instead stamps `manifest_steps` with the full ordered list).
+    /// Lets `inspect audit show <step-id>` zoom into one step's
+    /// record without re-parsing the parent payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
-    /// F17 (v0.1.3): SHA-256 (hex) of the canonical JSON manifest
-    /// the parent `run --steps` invocation dispatched. Stamped on
-    /// the parent entry only. Lets a post-hoc audit reproduce the
-    /// exact step list that ran (the audit entry plus the manifest
-    /// hash uniquely identify the dispatched pipeline) without
-    /// requiring the operator's local manifest file to still exist.
+    /// SHA-256 (hex) of the canonical JSON manifest the parent
+    /// `run --steps` invocation dispatched. Stamped on the parent
+    /// entry only. Lets a post-hoc audit reproduce the exact step
+    /// list that ran (the audit entry plus the manifest hash
+    /// uniquely identify the dispatched pipeline) without requiring
+    /// the operator's local manifest file to still exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
-    /// F17 (v0.1.3): ordered list of step names from the parent
-    /// `run --steps` manifest. Stamped on the parent entry only,
-    /// alongside `manifest_sha256`. Lets `inspect audit show
-    /// <parent-id>` render the step table in the correct order
-    /// (the per-step audit entries are appended in the order they
-    /// ran, but on `--revert-on-failure` they are interleaved with
-    /// the auto-revert entries, so the parent's ordered list is the
+    /// Ordered list of step names from the parent `run --steps`
+    /// manifest. Stamped on the parent entry only, alongside
+    /// `manifest_sha256`. Lets `inspect audit show <parent-id>`
+    /// render the step table in the correct order (the per-step
+    /// audit entries are appended in the order they ran, but on
+    /// `--revert-on-failure` they are interleaved with the
+    /// auto-revert entries, so the parent's ordered list is the
     /// canonical source of truth for the manifest shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_steps: Option<Vec<String>>,
@@ -297,12 +294,12 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// F11 (v0.1.3): inverse-capture taxonomy. Every write verb declares
-/// one of these at capture time. `Unsupported` is reserved for verbs
-/// whose effect is intrinsically non-reversible (free-form `exec`,
-/// SIGHUP `reload`, side-effecting commands with no clean inverse);
-/// applying such verbs requires the operator to opt in via
-/// `--no-revert` so the contract is never silently undermined.
+/// Inverse-capture taxonomy. Every write verb declares one of these
+/// at capture time. `Unsupported` is reserved for verbs whose effect
+/// is intrinsically non-reversible (free-form `exec`, SIGHUP
+/// `reload`, side-effecting commands with no clean inverse); applying
+/// such verbs requires the operator to opt in via `--no-revert` so
+/// the contract is never silently undermined.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RevertKind {
@@ -334,7 +331,7 @@ impl RevertKind {
     }
 }
 
-/// F11 (v0.1.3): captured inverse for a single write-verb invocation.
+/// Captured inverse for a single write-verb invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Revert {
     pub kind: RevertKind,
@@ -377,12 +374,12 @@ impl Revert {
             preview: preview.into(),
         }
     }
-    /// F17 (v0.1.3): composite inverse — `payload` is a
-    /// JSON-encoded ordered list of `{kind, payload, preview}`
-    /// records that should be executed in **reverse** order. Used
-    /// by the parent `run --steps` audit entry so
-    /// `inspect revert <parent-id>` walks the per-step inverses
-    /// without consulting each child entry individually.
+    /// Composite inverse — `payload` is a JSON-encoded ordered
+    /// list of `{kind, payload, preview}` records that should be
+    /// executed in **reverse** order. Used by the parent
+    /// `run --steps` audit entry so `inspect revert <parent-id>`
+    /// walks the per-step inverses without consulting each child
+    /// entry individually.
     pub fn composite(payload_json: impl Into<String>, preview: impl Into<String>) -> Self {
         Self {
             kind: RevertKind::Composite,
@@ -505,32 +502,31 @@ impl AuditStore {
 
     pub fn append(&self, entry: &AuditEntry) -> Result<()> {
         self.append_inner(entry)?;
-        // F18 (v0.1.3): cross-link from transcript → audit. First
-        // audit append wins; on multi-audit verbs (F17 `--steps`)
-        // the parent entry is appended first so the transcript
-        // footer points at the umbrella id.
+        // Cross-link from transcript → audit. First audit append
+        // wins; on multi-audit verbs (e.g. `run --steps`) the
+        // parent entry is appended first so the transcript footer
+        // points at the umbrella id.
         crate::transcript::set_audit_id(&entry.id);
         Ok(())
     }
 
-    /// P8-C fix (v0.1.3): persist an audit entry without linking it
-    /// to the active transcript block.
+    /// Persist an audit entry without linking it to the active
+    /// transcript block.
     ///
-    /// Used exclusively by side-effect audits whose IDs would otherwise
-    /// clobber the primary verb's `audit_id` in the F18 transcript
-    /// footer (`set_audit_id` is first-write-wins by design — that
-    /// rule is correct for F17 `--steps` parent/child ordering, but
-    /// would be wrong for F13 `connect.reauth`, which is appended
-    /// **before** the verb's own primary audit on the
-    /// reauth-then-retry path. Linking the reauth id into the footer
-    /// would make `inspect history show --audit-id <verb_id>` return
-    /// 0 blocks even though a block exists for that invocation —
-    /// exactly the silent-correlation gap surfaced as P8-C in the
-    /// release smoke).
+    /// Used exclusively by side-effect audits whose IDs would
+    /// otherwise clobber the primary verb's `audit_id` in the
+    /// transcript footer (`set_audit_id` is first-write-wins by
+    /// design — that rule is correct for `run --steps` parent/child
+    /// ordering, but would be wrong for `connect.reauth`, which is
+    /// appended **before** the verb's own primary audit on the
+    /// reauth-then-retry path. Linking the reauth id into the
+    /// footer would make `inspect history show --audit-id
+    /// <verb_id>` return 0 blocks even though a block exists for
+    /// that invocation).
     ///
     /// The reauth entry is still findable via `audit show`,
     /// `audit grep`, `audit ls`, and remains forensically connected
-    /// to the verb via the F13 `retry_of` field on the verb's primary
+    /// to the verb via the `retry_of` field on the verb's primary
     /// audit (set during dispatch retry). The contract this method
     /// breaks is solely the transcript footer link.
     pub fn append_without_transcript_link(&self, entry: &AuditEntry) -> Result<()> {
@@ -542,10 +538,10 @@ impl AuditStore {
         let line = serde_json::to_string(entry)?;
         append_locked(&path, &line)?;
         let _ = set_file_mode_0600(&path);
-        // L5 (v0.1.3): cheap-path lazy retention check. Best-effort —
-        // GC failure must never break the just-appended audit record,
-        // and the marker-file guard inside `maybe_run_lazy_gc` ensures
-        // the FS scan only fires once per minute even if every write
+        // Cheap-path lazy retention check. Best-effort — GC failure
+        // must never break the just-appended audit record, and the
+        // marker-file guard inside `maybe_run_lazy_gc` ensures the
+        // FS scan only fires once per minute even if every write
         // verb in a long pipeline ends up here.
         let _ = crate::safety::gc::maybe_run_lazy_gc();
         Ok(())
@@ -742,11 +738,11 @@ mod tests {
         assert_eq!(all[0].selector, "arte/atlas:/etc/atlas.conf");
     }
 
-    /// P8-C contract (v0.1.3): `append_without_transcript_link`
-    /// persists the entry the same way `append` does, but skips the
-    /// `transcript::set_audit_id` cross-link. Used by F13 `connect.reauth`
-    /// so the side-effect reauth audit doesn't clobber the verb's
-    /// own primary audit in the F18 transcript footer.
+    /// `append_without_transcript_link` persists the entry the same
+    /// way `append` does, but skips the `transcript::set_audit_id`
+    /// cross-link. Used by `connect.reauth` so the side-effect
+    /// reauth audit doesn't clobber the verb's own primary audit
+    /// in the transcript footer.
     #[test]
     fn p8c_append_without_transcript_link_persists_but_does_not_link() {
         let _guard = crate::paths::TEST_ENV_LOCK
@@ -778,7 +774,8 @@ mod tests {
         // Then, the verb's own primary audit. Persists AND links —
         // the footer now points at this id, NOT the reauth id, even
         // though the reauth was appended first in time. This is the
-        // exact ordering that breaks pre-fix on F13 reauth-then-retry.
+        // exact ordering that breaks if the reauth-then-retry path
+        // uses the linking variant.
         let mut primary = AuditEntry::new("run", "arte");
         primary.args = "cmd=echo".into();
         let primary_id = primary.id.clone();
@@ -786,7 +783,7 @@ mod tests {
         assert_eq!(
             crate::transcript::audit_id_for_test(),
             Some(primary_id),
-            "append must call set_audit_id so the verb's audit_id wins the F18 footer"
+            "append must call set_audit_id so the verb's audit_id wins the transcript footer"
         );
 
         // Both entries are on disk via the regular query path —
