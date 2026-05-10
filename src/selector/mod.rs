@@ -6,7 +6,7 @@
 //! ```
 //!
 //! Phase 3 ships:
-//! - parsing (`parse_selector`) into an [`AST`]
+//! - parsing (`parse_selector`) into an `AST`
 //! - alias-aware pre-parse expansion (`expand_aliases`)
 //! - resolution against the configured namespaces and their cached profiles
 //!   (`resolve`)

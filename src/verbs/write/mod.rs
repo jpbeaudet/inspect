@@ -8,7 +8,6 @@
 
 pub mod chmod;
 pub mod chown;
-pub mod cp;
 pub mod edit;
 pub mod exec;
 pub mod lifecycle; // restart / stop / start / reload

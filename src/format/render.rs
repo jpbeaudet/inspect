@@ -19,6 +19,7 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 use unicode_width::UnicodeWidthStr;
 
+use crate::error::ExitKind;
 use crate::format::template::Template;
 use crate::format::OutputFormat;
 use crate::verbs::output::{NextStep, OutputDoc};
@@ -31,23 +32,31 @@ use crate::verbs::output::{NextStep, OutputDoc};
 /// are the pre-rendered DATA lines used in default human output; the
 /// renderer falls back to a generic projection of `doc.data` for
 /// table/csv/etc.
-pub fn render_doc(doc: &OutputDoc, fmt: &OutputFormat, human_lines: &[String]) -> Result<()> {
+///
+/// `select` is the `--select` triple (filter source, raw
+/// flag, slurp flag). It is meaningful only on the JSON branch; the
+/// non-JSON branches return `Ok(Success)` because `FormatArgs::resolve`
+/// already rejects `--select` against any non-JSON-class format with
+/// a usage-class error before reaching this point.
+pub fn render_doc(
+    doc: &OutputDoc,
+    fmt: &OutputFormat,
+    human_lines: &[String],
+    select: Option<(&str, bool, bool)>,
+) -> Result<ExitKind> {
     match fmt {
         OutputFormat::Human => {
             doc.print_human(human_lines);
-            Ok(())
+            Ok(ExitKind::Success)
         }
-        OutputFormat::Json => {
-            doc.print_json();
-            Ok(())
-        }
-        OutputFormat::Yaml => render_doc_yaml(doc),
-        OutputFormat::Table => render_doc_table(doc, human_lines, false),
-        OutputFormat::Md => render_doc_markdown(doc, human_lines),
-        OutputFormat::Csv => render_doc_rows_delimited(doc, ","),
-        OutputFormat::Tsv => render_doc_rows_delimited(doc, "\t"),
-        OutputFormat::Format(tpl) => render_doc_template(doc, tpl),
-        OutputFormat::Raw => render_doc_raw(doc, human_lines),
+        OutputFormat::Json => doc.print_json(select),
+        OutputFormat::Yaml => render_doc_yaml(doc).map(|_| ExitKind::Success),
+        OutputFormat::Table => render_doc_table(doc, human_lines, false).map(|_| ExitKind::Success),
+        OutputFormat::Md => render_doc_markdown(doc, human_lines).map(|_| ExitKind::Success),
+        OutputFormat::Csv => render_doc_rows_delimited(doc, ",").map(|_| ExitKind::Success),
+        OutputFormat::Tsv => render_doc_rows_delimited(doc, "\t").map(|_| ExitKind::Success),
+        OutputFormat::Format(tpl) => render_doc_template(doc, tpl).map(|_| ExitKind::Success),
+        OutputFormat::Raw => render_doc_raw(doc, human_lines).map(|_| ExitKind::Success),
     }
 }
 
@@ -64,12 +73,12 @@ pub fn render_rows(
         OutputFormat::Human | OutputFormat::Table => {
             print_envelope_summary(summary);
             if rows.is_empty() {
-                println!("DATA:    (none)");
+                crate::tee_println!("DATA:    (none)");
             } else {
-                println!("DATA:");
+                crate::tee_println!("DATA:");
                 let (headers, table_rows) = collect_table(rows);
                 for line in render_ascii_table(&headers, &table_rows) {
-                    println!("  {line}");
+                    crate::tee_println!("  {line}");
                 }
             }
             print_envelope_next(next);
@@ -79,19 +88,19 @@ pub fn render_rows(
             print_envelope_summary(summary);
             let (headers, table_rows) = collect_table(rows);
             if !rows.is_empty() {
-                println!("DATA:");
+                crate::tee_println!("DATA:");
                 for line in render_markdown_table(&headers, &table_rows) {
-                    println!("  {line}");
+                    crate::tee_println!("  {line}");
                 }
             } else {
-                println!("DATA:    (none)");
+                crate::tee_println!("DATA:    (none)");
             }
             print_envelope_next(next);
             Ok(())
         }
         OutputFormat::Json => {
             for r in rows {
-                println!("{}", serde_json::to_string(r)?);
+                crate::tee_println!("{}", serde_json::to_string(r)?);
             }
             Ok(())
         }
@@ -109,11 +118,11 @@ pub fn render_rows(
 
 fn render_doc_yaml(doc: &OutputDoc) -> Result<()> {
     // Comments retain envelope context per §10.3.
-    println!("# summary: {}", doc.summary);
+    crate::tee_println!("# summary: {}", doc.summary);
     if !doc.next.is_empty() {
-        println!("# next:");
+        crate::tee_println!("# next:");
         for n in &doc.next {
-            println!("#   - {}  -- {}", n.cmd, n.rationale);
+            crate::tee_println!("#   - {}  -- {}", n.cmd, n.rationale);
         }
     }
     let yaml = serde_yaml::to_string(&doc.data)?;
@@ -124,19 +133,19 @@ fn render_doc_yaml(doc: &OutputDoc) -> Result<()> {
 fn render_doc_raw(doc: &OutputDoc, human_lines: &[String]) -> Result<()> {
     if !human_lines.is_empty() {
         for l in human_lines {
-            println!("{l}");
+            crate::tee_println!("{l}");
         }
         return Ok(());
     }
     // Fallback: stringify the data field minimally.
     match &doc.data {
-        Value::String(s) => println!("{s}"),
+        Value::String(s) => crate::tee_println!("{s}"),
         Value::Array(arr) => {
             for item in arr {
-                println!("{}", value_scalar(item));
+                crate::tee_println!("{}", value_scalar(item));
             }
         }
-        other => println!("{}", serde_json::to_string(other)?),
+        other => crate::tee_println!("{}", serde_json::to_string(other)?),
     }
     Ok(())
 }
@@ -144,19 +153,19 @@ fn render_doc_raw(doc: &OutputDoc, human_lines: &[String]) -> Result<()> {
 fn render_doc_table(doc: &OutputDoc, human_lines: &[String], _md: bool) -> Result<()> {
     // For OutputDoc, the simplest correct table is the human DATA
     // lines wrapped with envelope context. Plain ASCII; no color.
-    println!("SUMMARY: {}", doc.summary);
+    crate::tee_println!("SUMMARY: {}", doc.summary);
     if let Some(rows) = extract_doc_rows(&doc.data) {
         let (headers, table_rows) = collect_table(&rows);
-        println!("DATA:");
+        crate::tee_println!("DATA:");
         for line in render_ascii_table(&headers, &table_rows) {
-            println!("  {line}");
+            crate::tee_println!("  {line}");
         }
     } else if human_lines.is_empty() {
-        println!("DATA:    (none)");
+        crate::tee_println!("DATA:    (none)");
     } else {
-        println!("DATA:");
+        crate::tee_println!("DATA:");
         for l in human_lines {
-            println!("  {l}");
+            crate::tee_println!("  {l}");
         }
     }
     print_envelope_next(&doc.next);
@@ -164,19 +173,19 @@ fn render_doc_table(doc: &OutputDoc, human_lines: &[String], _md: bool) -> Resul
 }
 
 fn render_doc_markdown(doc: &OutputDoc, human_lines: &[String]) -> Result<()> {
-    println!("SUMMARY: {}", doc.summary);
+    crate::tee_println!("SUMMARY: {}", doc.summary);
     if let Some(rows) = extract_doc_rows(&doc.data) {
         let (headers, table_rows) = collect_table(&rows);
-        println!("DATA:");
+        crate::tee_println!("DATA:");
         for line in render_markdown_table(&headers, &table_rows) {
-            println!("  {line}");
+            crate::tee_println!("  {line}");
         }
     } else if human_lines.is_empty() {
-        println!("DATA:    (none)");
+        crate::tee_println!("DATA:    (none)");
     } else {
-        println!("DATA:");
+        crate::tee_println!("DATA:");
         for l in human_lines {
-            println!("  {l}");
+            crate::tee_println!("  {l}");
         }
     }
     print_envelope_next(&doc.next);
@@ -192,7 +201,7 @@ fn render_doc_template(doc: &OutputDoc, tpl: &str) -> Result<()> {
     let template = Template::parse(tpl)?;
     if let Some(rows) = extract_doc_rows(&doc.data) {
         for r in &rows {
-            println!("{}", template.render(r)?);
+            crate::tee_println!("{}", template.render(r)?);
         }
     } else {
         // Apply against the data value itself (or empty object).
@@ -201,7 +210,7 @@ fn render_doc_template(doc: &OutputDoc, tpl: &str) -> Result<()> {
         } else {
             Value::Object(Map::new())
         };
-        println!("{}", template.render(&v)?);
+        crate::tee_println!("{}", template.render(&v)?);
     }
     Ok(())
 }
@@ -233,11 +242,11 @@ fn extract_doc_rows(data: &Value) -> Option<Vec<Value>> {
 // -----------------------------------------------------------------------------
 
 fn render_rows_yaml(rows: &[Value], summary: &str, next: &[NextStep]) -> Result<()> {
-    println!("# summary: {summary}");
+    crate::tee_println!("# summary: {summary}");
     if !next.is_empty() {
-        println!("# next:");
+        crate::tee_println!("# next:");
         for n in next {
-            println!("#   - {}  -- {}", n.cmd, n.rationale);
+            crate::tee_println!("#   - {}  -- {}", n.cmd, n.rationale);
         }
     }
     let yaml = serde_yaml::to_string(&rows)?;
@@ -257,7 +266,7 @@ fn render_rows_delimited(rows: &[Value], sep: &str) -> Result<()> {
             tsv_escape(s)
         }
     };
-    println!(
+    crate::tee_println!(
         "{}",
         headers
             .iter()
@@ -267,7 +276,7 @@ fn render_rows_delimited(rows: &[Value], sep: &str) -> Result<()> {
     );
     for row in &table_rows {
         let line = row.iter().map(|c| escape(c)).collect::<Vec<_>>().join(sep);
-        println!("{line}");
+        crate::tee_println!("{line}");
     }
     Ok(())
 }
@@ -275,7 +284,7 @@ fn render_rows_delimited(rows: &[Value], sep: &str) -> Result<()> {
 fn render_rows_template(rows: &[Value], tpl: &str) -> Result<()> {
     let template = Template::parse(tpl)?;
     for r in rows {
-        println!("{}", template.render(r)?);
+        crate::tee_println!("{}", template.render(r)?);
     }
     Ok(())
 }
@@ -283,7 +292,7 @@ fn render_rows_template(rows: &[Value], tpl: &str) -> Result<()> {
 fn render_rows_raw(rows: &[Value]) -> Result<()> {
     for r in rows {
         match r {
-            Value::String(s) => println!("{s}"),
+            Value::String(s) => crate::tee_println!("{s}"),
             Value::Object(map) => {
                 // Pick the most meaningful scalar: prefer `name`,
                 // `id`, `value`, then first scalar key.
@@ -292,11 +301,11 @@ fn render_rows_raw(rows: &[Value]) -> Result<()> {
                     .find_map(|k| map.get(*k))
                     .or_else(|| map.values().find(|v| !v.is_object() && !v.is_array()));
                 match pick {
-                    Some(v) => println!("{}", value_scalar(v)),
-                    None => println!("{}", serde_json::to_string(r)?),
+                    Some(v) => crate::tee_println!("{}", value_scalar(v)),
+                    None => crate::tee_println!("{}", serde_json::to_string(r)?),
                 }
             }
-            other => println!("{}", value_scalar(other)),
+            other => crate::tee_println!("{}", value_scalar(other)),
         }
     }
     Ok(())
@@ -488,16 +497,16 @@ fn md_escape(s: &str) -> String {
 }
 
 fn print_envelope_summary(summary: &str) {
-    println!("SUMMARY: {summary}");
+    crate::tee_println!("SUMMARY: {summary}");
 }
 
 fn print_envelope_next(next: &[NextStep]) {
     if next.is_empty() {
-        println!("NEXT:    (none)");
+        crate::tee_println!("NEXT:    (none)");
     } else {
-        println!("NEXT:");
+        crate::tee_println!("NEXT:");
         for n in next {
-            println!("  {}  -- {}", n.cmd, n.rationale);
+            crate::tee_println!("  {}  -- {}", n.cmd, n.rationale);
         }
     }
 }

@@ -65,11 +65,13 @@ fn walk(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, &str)) {
 
 #[test]
 fn unknown_help_topic_links_to_examples() {
+    // F3 (v0.1.3): exit 2 + wording aligned with the verb-synonym
+    // path (`inspect help <foo>` covers both verbs and topics).
     inspect()
         .args(["help", "definitely-not-a-topic"])
         .assert()
-        .code(1)
-        .stderr(str::contains("error: unknown help topic"))
+        .code(2)
+        .stderr(str::contains("error: unknown command or topic"))
         .stderr(str::contains("see: inspect help examples"));
 }
 

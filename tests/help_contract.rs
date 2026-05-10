@@ -93,27 +93,33 @@ fn every_topic_id_resolves() {
     }
 }
 
-// G0e: unknown topic exits 1 (NoMatches), with a "did you mean" hint
+// G0e: unknown topic exits 2 (Error), with a "did you mean" hint
 // on stderr when the typo is close to a real topic.
+//
+// F3 (v0.1.3): exit code changed from 1 → 2 and wording from
+// "unknown help topic" → "unknown command or topic" so
+// `inspect help <foo>` reflects both lookup paths (verb synonym +
+// editorial topic). Pre-F3 the v0.1.2 behavior was 1 + the old
+// wording. See INSPECT_v0.1.3_BACKLOG.md §F3.
 #[test]
-fn unknown_topic_returns_nomatches_with_suggestion() {
+fn unknown_topic_returns_error_with_suggestion() {
     inspect()
         .args(["help", "quickstrt"])
         .assert()
-        .code(1)
-        .stderr(str::contains("unknown help topic"))
+        .code(2)
+        .stderr(str::contains("unknown command or topic"))
         .stderr(str::contains("did you mean: quickstart?"));
 }
 
-// G0f: unknown topic with no close match still exits 1 but does not
+// G0f: unknown topic with no close match still exits 2 but does not
 // fabricate a suggestion (must NOT contain "did you mean").
 #[test]
 fn unknown_topic_far_from_any_topic_omits_suggestion() {
     inspect()
         .args(["help", "zzzzzzzz"])
         .assert()
-        .code(1)
-        .stderr(str::contains("unknown help topic"))
+        .code(2)
+        .stderr(str::contains("unknown command or topic"))
         .stderr(str::contains("did you mean").not());
 }
 
@@ -249,19 +255,22 @@ fn help_all_dumps_every_topic() {
         "DISCOVERY",
         "SSH",
         "EXAMPLES",
+        "SELECT",
     ] {
         assert!(
             text.contains(id),
             "`inspect help all` missing topic title {id:?}"
         );
     }
-    // Deterministic separator between topics (13 separators for 14 topics
-    // after v0.1.2 added `bundle` and `watch`).
+    // Deterministic separator between topics. Count = topic_count - 1.
+    // 14 topics through v0.1.2 → 13 separators; F6 (v0.1.3) added the
+    // `compose` topic, taking us to 15 topics → 14 separators; F19
+    // (v0.1.3) added the `select` topic, taking us to 16 → 15.
     let bar = "=".repeat(72);
     assert_eq!(
         text.matches(bar.as_str()).count(),
-        13,
-        "expected 13 topic separators in `inspect help all`"
+        15,
+        "expected 15 topic separators in `inspect help all` (F19 added the select topic)"
     );
 }
 
@@ -283,6 +292,9 @@ fn every_topic_has_at_least_three_examples() {
         "discovery",
         "ssh",
         "examples",
+        // F6 (v0.1.3): compose topic must satisfy the ≥3-examples
+        // contract just like the rest.
+        "compose",
     ] {
         let out = inspect()
             .args(["help", id])
@@ -322,6 +334,10 @@ fn every_see_also_reference_resolves() {
         "discovery",
         "ssh",
         "examples",
+        // F6 (v0.1.3): compose joins the editorial topic registry.
+        "compose",
+        // F19 (v0.1.3): select / --select / inspect query topic.
+        "select",
     ]
     .iter()
     .copied()
@@ -843,10 +859,11 @@ fn p8_help_every_top_level_verb_resolves() {
 fn p8_unknown_verb_typo_suggests_real_verb() {
     // "serch" is 1 edit from "search": the suggester must consider
     // verbs (not just editorial topic ids) so the user gets a hint.
+    // F3 (v0.1.3): exit 2 + new wording (was exit 1 in v0.1.2).
     inspect()
         .args(["help", "serch"])
         .assert()
-        .code(1)
-        .stderr(str::contains("unknown help topic"))
+        .code(2)
+        .stderr(str::contains("unknown command or topic"))
         .stderr(str::contains("did you mean: search?"));
 }

@@ -1,11 +1,11 @@
-//! Server-side line filter (P3, v0.1.1).
+//! Server-side line filter.
 //!
 //! Both `inspect logs` and `inspect grep` accept `--match <regex>` and
 //! `--exclude <regex>` (each repeatable). We push the filter down to the
 //! remote host as a `grep -E` pipeline suffix so the SSH transport never
 //! has to ferry log lines we are about to drop on the client side.
 //!
-//! Field-pitfall driver: P3 in [INSPECT_v0.1.1_PATCH_SPEC.md]. Operators
+//! Field-pitfall driver: line filtering. Operators
 //! repeatedly piped `inspect logs ... | grep error | grep -v healthcheck`
 //! locally; this folds that idiom into the verb itself.
 //!

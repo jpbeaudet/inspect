@@ -14,7 +14,7 @@
 //!
 //! Each group has a `members` list whose entries are namespace names or
 //! shell-style globs (`*`, `?`, `[...]`). Resolution against the live set
-//! of configured namespaces happens in [`expand_group`].
+//! of configured namespaces happens in `expand_group`.
 
 use std::collections::BTreeMap;
 use std::path::Path;

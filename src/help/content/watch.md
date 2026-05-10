@@ -88,6 +88,32 @@ Each watch invocation writes one audit entry: `verb=watch`, `args=<predicate-lab
 context. Inside an `inspect bundle apply`, watch entries are tagged
 with the bundle's `bundle_id` for easy filtering.
 
+## Known limitation — point-in-time predicate (G7)
+
+`watch` checks its predicate **at one polling instant per
+iteration**: the value/exit/HTTP status sampled at the moment the
+probe returns. There is no built-in `--min-consecutive` knob to
+require N successive passes before exiting, and no built-in
+`--for <duration>` to require the predicate to hold continuously
+for some window. As a consequence, a flapping condition (replica
+lag bouncing across a threshold, an HTTP endpoint serving 200/503
+intermittently) can satisfy a single poll and exit before the
+underlying state has actually settled.
+
+If you need sustained-state semantics, either:
+
+* wrap `watch` in an outer shell loop that re-runs it N times and
+  treats partial failure as not-yet-settled; or
+* use `--stable-for <duration>` (the dedicated comparator for
+  *this* known limitation): it requires the captured value to be
+  byte-identical for the full window before exit, which is a
+  stricter condition than `--min-consecutive` and is already
+  supported. See the deploy-settle example above.
+
+A first-class `--min-consecutive <N>` and `--for <duration>` are
+on the v0.1.4 backlog; until they ship, the two patterns above
+cover the same operational need.
+
 ## See also
 
 * `inspect help selectors` — how the target is resolved.

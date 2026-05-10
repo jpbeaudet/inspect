@@ -100,6 +100,15 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchStep>,
 
+    /// Compose-aware step. Mutually exclusive with
+    /// `exec` / `run` / `watch`. The `target:` (or bundle `host:`)
+    /// supplies the namespace; the spec carries the project, action,
+    /// optional service, and optional flag set. Validated at plan
+    /// time against the namespace's cached profile (project must
+    /// exist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ComposeStepSpec>,
+
     /// Steps that must complete (and pass) before this one starts.
     /// Validated up-front; cycles and forward refs fail plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -323,6 +332,12 @@ pub enum StepBodyKind {
     Exec,
     Run,
     Watch,
+    /// Structured compose action. Renders to a
+    /// `cd <wd> && docker compose -p <p> <action> [flags] [<svc>]`
+    /// shell command at execution time, plus an audit entry with
+    /// `verb=compose.<action>` and `[project=…] [service=…]
+    /// [compose_file_hash=…]` arg tags.
+    Compose,
 }
 
 impl Step {
@@ -344,16 +359,91 @@ impl Step {
             count += 1;
             kind = Some(StepBodyKind::Watch);
         }
+        if self.compose.is_some() {
+            count += 1;
+            kind = Some(StepBodyKind::Compose);
+        }
         match (count, kind) {
             (1, Some(k)) => Ok(k),
             (0, _) => Err(format!(
-                "step '{}' has no body — set exactly one of `exec:`, `run:`, or `watch:`",
+                "step '{}' has no body — set exactly one of \
+                 `exec:`, `run:`, `watch:`, or `compose:`",
                 self.id
             )),
             _ => Err(format!(
-                "step '{}' has multiple bodies — set exactly one of `exec:`, `run:`, or `watch:`",
+                "step '{}' has multiple bodies — set exactly one of \
+                 `exec:`, `run:`, `watch:`, or `compose:`",
                 self.id
             )),
+        }
+    }
+}
+
+/// Structured compose-step spec. Mirrors the standalone
+/// `inspect compose <action>` verbs so a bundle's compose step
+/// inherits the same audit shape (`verb=compose.<action>`,
+/// `[project=…] [service=…] [compose_file_hash=…]`) and the same
+/// revert taxonomy (command_pair for up/down/restart, unsupported
+/// for pull, command_pair `down --rmi local` for build).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposeStepSpec {
+    /// Compose project name. Plan-time validation requires this
+    /// project to exist in the target namespace's cached profile.
+    pub project: String,
+    /// One of `up`, `down`, `pull`, `build`, `restart`.
+    pub action: ComposeAction,
+    /// Optional service narrowing. When set, the action runs against
+    /// only that service (project's other services unaffected).
+    /// Per-service `down` rejects `flags.volumes` / `flags.rmi` —
+    /// both are project-scoped operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Per-action passthrough flags. Recognized keys depend on
+    /// `action`:
+    ///   up    : force_recreate (bool), no_detach (bool)
+    ///   down  : volumes (bool), rmi (bool)
+    ///   pull  : ignore_pull_failures (bool)
+    ///   build : no_cache (bool), pull (bool)
+    ///   restart : (none currently)
+    /// Unknown keys are rejected at plan time so a typo doesn't
+    /// silently no-op.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flags: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// Closed enum of compose actions a bundle step can
+/// drive. Mirrors the sub-verb taxonomy. Serialized lowercase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComposeAction {
+    Up,
+    Down,
+    Pull,
+    Build,
+    Restart,
+}
+
+impl ComposeAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ComposeAction::Up => "up",
+            ComposeAction::Down => "down",
+            ComposeAction::Pull => "pull",
+            ComposeAction::Build => "build",
+            ComposeAction::Restart => "restart",
+        }
+    }
+
+    /// Which boolean flags this action recognizes. Any
+    /// other key in the `flags:` map is a plan-time error.
+    pub fn allowed_flags(self) -> &'static [&'static str] {
+        match self {
+            ComposeAction::Up => &["force_recreate", "no_detach"],
+            ComposeAction::Down => &["volumes", "rmi"],
+            ComposeAction::Pull => &["ignore_pull_failures"],
+            ComposeAction::Build => &["no_cache", "pull"],
+            ComposeAction::Restart => &[],
         }
     }
 }

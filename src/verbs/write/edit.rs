@@ -22,7 +22,7 @@ use crate::safety::gate::ConfirmResult;
 use crate::safety::{
     diff::{diff_summary, unified_diff},
     snapshot::sha256_hex,
-    AuditEntry, AuditStore, Confirm, SafetyGate, SnapshotStore,
+    AuditEntry, AuditStore, Confirm, Revert, SafetyGate, SnapshotStore,
 };
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan};
@@ -132,6 +132,24 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let new_hash = sha256_hex(w.new_text.as_bytes());
         let b64 = base64::engine::general_purpose::STANDARD.encode(w.new_text.as_bytes());
 
+        // Pre-stage the inverse before dispatching.
+        let revert = Revert::state_snapshot(
+            format!("sha256:{prev_hash}"),
+            format!(
+                "restore {} from snapshot sha256:{}",
+                w.label,
+                &prev_hash[..12]
+            ),
+        );
+        if args.revert_preview {
+            eprintln!(
+                "[inspect] revert preview {}: {} -- {}",
+                w.label,
+                revert.kind.as_str(),
+                revert.preview,
+            );
+        }
+
         let tmp = format!("{}.inspect.{}.tmp", w.path, &new_hash[..8]);
         // Preserve mode/uid/gid of the original file across the
         // rename (audit §4.2). See `verbs::write::atomic`.
@@ -149,7 +167,10 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let dur = started.elapsed().as_millis() as u64;
 
         let mut entry = AuditEntry::new("edit", &w.label);
-        entry.args = args.expr.clone();
+        // G2 (post-v0.1.3 audit hardening): a sed expression can
+        // legitimately carry secrets (e.g. rotating an API key in a
+        // config file). Redact embedded secrets before recording.
+        entry.args = crate::redact::redact_for_audit(&args.expr).into_owned();
         entry.previous_hash = Some(format!("sha256:{prev_hash}"));
         entry.new_hash = Some(format!("sha256:{new_hash}"));
         entry.snapshot = Some(snaps.path_for(&prev_hash).display().to_string());
@@ -157,6 +178,8 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         entry.exit = out.exit_code;
         entry.duration_ms = dur;
         entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+        entry.revert = Some(revert);
+        entry.applied = Some(out.ok());
         store.append(&entry)?;
 
         if out.ok() {

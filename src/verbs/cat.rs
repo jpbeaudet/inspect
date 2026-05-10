@@ -1,6 +1,6 @@
 //! `inspect cat <sel>:<path>` — read a file.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::cli::CatArgs;
 use crate::error::ExitKind;
@@ -9,22 +9,120 @@ use crate::verbs::dispatch::{iter_steps, plan};
 use crate::verbs::output::{Envelope, JsonOut, Renderer};
 use crate::verbs::quote::shquote;
 
+/// Inclusive 1-based line slice. `None` means "no
+/// slice — print the whole file" (today's behavior).
+#[derive(Clone, Copy, Debug)]
+struct LineSlice {
+    start: usize,
+    end: Option<usize>,
+}
+
+impl LineSlice {
+    fn contains(&self, n: usize) -> bool {
+        n >= self.start && self.end.map_or(true, |e| n <= e)
+    }
+}
+
+/// Parse `--lines L-R` (inclusive). Accepts `5-10`, `5-`, or just
+/// `5` (single line). Returns an error so clap surface a clear
+/// message rather than a panic.
+fn parse_lines_spec(s: &str) -> Result<LineSlice> {
+    let s = s.trim();
+    if let Some((l, r)) = s.split_once('-') {
+        let start: usize = l
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("invalid --lines spec '{s}': start must be a positive integer"))?;
+        if start == 0 {
+            return Err(anyhow!("invalid --lines spec '{s}': lines are 1-based"));
+        }
+        let end = if r.trim().is_empty() {
+            None
+        } else {
+            let e: usize = r.trim().parse().map_err(|_| {
+                anyhow!("invalid --lines spec '{s}': end must be a positive integer")
+            })?;
+            if e < start {
+                return Err(anyhow!(
+                    "invalid --lines spec '{s}': end ({e}) must be >= start ({start})"
+                ));
+            }
+            Some(e)
+        };
+        Ok(LineSlice { start, end })
+    } else {
+        let n: usize = s
+            .parse()
+            .map_err(|_| anyhow!("invalid --lines spec '{s}': expected 'L-R' or single integer"))?;
+        if n == 0 {
+            return Err(anyhow!("invalid --lines spec '{s}': lines are 1-based"));
+        }
+        Ok(LineSlice {
+            start: n,
+            end: Some(n),
+        })
+    }
+}
+
+fn resolve_slice(args: &CatArgs) -> Result<Option<LineSlice>> {
+    if let Some(spec) = args.lines.as_deref() {
+        return Ok(Some(parse_lines_spec(spec)?));
+    }
+    if args.start.is_some() || args.end.is_some() {
+        let start = args.start.unwrap_or(1);
+        if start == 0 {
+            return Err(anyhow!("invalid --start 0: lines are 1-based"));
+        }
+        if let Some(e) = args.end {
+            if e < start {
+                return Err(anyhow!(
+                    "invalid range: --end ({e}) must be >= --start ({start})"
+                ));
+            }
+        }
+        return Ok(Some(LineSlice {
+            start,
+            end: args.end,
+        }));
+    }
+    Ok(None)
+}
+
 pub fn run(args: CatArgs) -> Result<ExitKind> {
+    // Activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let (runner, nses, targets) = plan(&args.target)?;
+    let slice = resolve_slice(&args)?;
+
+    // Construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
 
     let mut printed_any = false;
     let mut errored_any = false;
 
     for step in iter_steps(&nses, &targets) {
+        // Per-target redactor. `inspect cat` is the
+        // single highest-risk verb for accidentally printing a PEM
+        // private key (it will literally cat any file the operator
+        // points at), which is why the default behavior collapses
+        // private-key blocks to `[REDACTED PEM KEY]` before they
+        // reach stdout. `--show-secrets` opts out for vetted files.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
         let Some(path) = step.path.as_deref() else {
-            eprintln!(
+            crate::tee_eprintln!(
                 "warning: '{}' has no :path; cat requires a file path (e.g. arte/atlas:/etc/atlas.conf)",
                 step.ns.namespace
             );
             errored_any = true;
             continue;
         };
-        let cmd = build_cat(step.service(), path);
+        // Docker exec must receive the
+        // container_name (e.g. `luminary-api`), not the canonical
+        // service name (`api`). See `Step::container()` doc.
+        let cmd = build_cat(step.container(), path);
         let out = runner.run(
             &step.ns.namespace,
             &step.ns.target,
@@ -40,9 +138,10 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
                         .put("path", path)
                         .put("error", out.stderr.trim())
                         .put("exit", out.exit_code),
-                );
+                    select.as_mut(),
+                )?;
             } else {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: cat failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -52,24 +151,64 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
             continue;
         }
         printed_any = true;
+        // Always iterate lines (even on the
+        // previously-fast `print!("{}", out.stdout)` path) so the PEM
+        // masker can collapse multi-line key blocks into a single
+        // `[REDACTED PEM KEY]` marker. The trailing-newline behavior
+        // is preserved: every emitted line gets `\n` (matching the
+        // earlier "print verbatim, append newline if missing" rule).
         if args.format.is_json() {
-            for line in out.stdout.lines() {
+            for (idx, line) in out.stdout.lines().enumerate() {
+                let n = idx + 1;
+                if let Some(sl) = slice {
+                    if !sl.contains(n) {
+                        // PEM block detection still needs to see the
+                        // line so its in-block state stays accurate;
+                        // but the slice filter says "not in range",
+                        // so we only feed the masker, never emit.
+                        let _ = redactor.mask_line(line);
+                        continue;
+                    }
+                }
+                let masked = match redactor.mask_line(line) {
+                    Some(m) => m,
+                    None => continue,
+                };
                 JsonOut::write(
                     &Envelope::new(&step.ns.namespace, "file", format!("file:{path}"))
                         .with_service(step.service().unwrap_or("_"))
                         .put("path", path)
-                        .put("line", line),
-                );
+                        .put("n", n as u64)
+                        .put("line", masked.as_ref()),
+                    select.as_mut(),
+                )?;
+            }
+        } else if let Some(sl) = slice {
+            for (idx, line) in out.stdout.lines().enumerate() {
+                let n = idx + 1;
+                if !sl.contains(n) {
+                    let _ = redactor.mask_line(line);
+                    continue;
+                }
+                let masked = match redactor.mask_line(line) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                crate::tee_println!("{masked}");
             }
         } else {
-            print!("{}", out.stdout);
-            if !out.stdout.ends_with('\n') {
-                println!();
+            for line in out.stdout.lines() {
+                let masked = match redactor.mask_line(line) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                crate::tee_println!("{masked}");
             }
         }
     }
 
     if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
         return Ok(if printed_any {
             ExitKind::Success
         } else {

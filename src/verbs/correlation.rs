@@ -12,7 +12,7 @@
 //!   * [`status_rules`] — operates on per-service status rows.
 //!   * [`why_rules`]    — operates on the dependency walk + root cause.
 //!   * [`search_rules`] — operates on the post-pipeline record stream.
-//!   * [`drift_rules`]  — appended whenever the meta carries a non-null
+//!   * `drift_rules`  — appended whenever the meta carries a non-null
 //!     `drift_warning` field.
 //!
 //! Confidence is encoded by ordering: rules append in priority order

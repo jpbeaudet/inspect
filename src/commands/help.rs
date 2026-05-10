@@ -1,9 +1,11 @@
 //! `inspect help` command dispatcher.
 //!
 //! Bible §2: three entry points (index / topic / search), one renderer.
-//! HP-0 implements index + topic + "did you mean" suggester. The
-//! `--search` and `--json` arms are scaffolded as `Unimplemented`
-//! placeholders so the CLI surface is stable; HP-3 and HP-4 fill them.
+//! All four arms ship: `index` (HP-0), `topic` (HP-0) + `--did-you-mean`
+//! suggester (HP-0), `--search <KEYWORD>` (HP-3), and `--json` (HP-4).
+//! The HP-* phases are complete; `crate::help::index`, `crate::help::topic`,
+//! `crate::help::search`, and `crate::help::all_topics` are the dispatch
+//! targets used by `run`.
 
 use anyhow::Result;
 
@@ -41,6 +43,11 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     if args.json {
         // HP-4: full surface envelope, or single-topic envelope when a
         // topic is named alongside `--json`.
+        // When `--select` is set, route the rendered
+        // envelope through the same `print_json_value` chokepoint
+        // every other JSON verb uses — so `inspect help all --json
+        // --select '.topics[].id'` works for topic discovery without
+        // parsing the full registry.
         let pretty = help::json::pretty_default();
         let body = match args.topic.as_deref() {
             None | Some("all") => help::json::render_full(pretty),
@@ -49,6 +56,14 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
                 None => return unknown_topic(name),
             },
         };
+        if let Some(filter) = args.select.as_deref() {
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| anyhow::anyhow!("internal: help json reparse: {e}"))?;
+            return crate::verbs::output::print_json_value(
+                &value,
+                Some((filter, args.select_raw, args.select_slurp)),
+            );
+        }
         return render(&body);
     }
 
@@ -80,7 +95,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
                 };
                 render(&body)
             }
-            // P8 (v0.1.1): no editorial topic, but it might be a verb.
+            // No editorial topic, but it might be a verb.
             // Fall back to clap's long-help renderer so users can type
             // either `inspect help logs` or `inspect logs --help`.
             None if help::is_verb(name) => render_clap_long_help(name),
@@ -89,7 +104,7 @@ pub fn run(args: HelpArgs) -> Result<ExitKind> {
     }
 }
 
-/// P8 fallback: render clap's long help for a top-level subcommand.
+/// Render clap's long help for a top-level subcommand.
 /// Returns `Success` when the subcommand exists (always, since we
 /// gate the call with [`help::is_verb`]); the only failure surface is
 /// the writer, which we route through the same handler as topic
@@ -139,16 +154,19 @@ fn render_no_pager(text: &str) -> Result<ExitKind> {
 
 fn unknown_topic(name: &str) -> Result<ExitKind> {
     let suggestion = help::suggest(name);
-    // HP-5: emit() already appends `see: inspect help examples` for
-    // the "unknown help topic" fragment via the central catalog. We
-    // keep the "did you mean" hint but drop the redundant trailing
-    // see-line that the HP-0 baseline used.
-    crate::error::emit(format!("unknown help topic '{}'", name));
+    // `Inspect help <unknown>` now exits 2 (Error) with
+    // the canonical `error: unknown command or topic: <name>` line
+    // and a chained hint pointing at the top-level catalog. earlier
+    // wording was "unknown help topic" + exit 1 — that drift was
+    // surprising for operators coming from `git`/`cargo`/`kubectl`,
+    // all of which exit non-zero on `help <unknown>`. The
+    // ERROR_CATALOG fragment was updated in lockstep so the
+    // `see: inspect help …` line still attaches automatically.
+    crate::error::emit(format!("unknown command or topic: '{}'", name));
     if let Some(s) = suggestion {
         eprintln!("  did you mean: {s}?");
     }
-    // Exit code 1 = "no match" per bible §6 contract for `inspect help`.
-    Ok(ExitKind::NoMatches)
+    Ok(ExitKind::Error)
 }
 
 #[cfg(test)]
@@ -161,6 +179,9 @@ mod tests {
             search: None,
             json: false,
             verbose: false,
+            select: None,
+            select_raw: false,
+            select_slurp: false,
         }
     }
 
@@ -181,8 +202,11 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_topic_returns_nomatches() {
+        // Unknown topic / unknown command now exits with
+        // ExitKind::Error (code 2). earlier it was NoMatches (code 1)
+        // — see CHANGELOG for the full topic list.
         let r = run(args(Some("definitely-not-a-topic"))).unwrap();
-        assert!(matches!(r, ExitKind::NoMatches));
+        assert!(matches!(r, ExitKind::Error));
     }
 
     #[test]

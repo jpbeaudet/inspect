@@ -174,9 +174,11 @@ fn output_formats_pinned() {
 #[test]
 fn jq_pipeline_from_acceptance_script_works() {
     // Plan §11 step 5: the acceptance demo runs this exact predicate.
+    // Topic count: 14 through v0.1.2 + 1 for F6's `compose` + 1 for
+    // F19's `select` (v0.1.3) = 16.
     let v = run(&["help", "--json"]);
     assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["topics"].as_array().unwrap().len(), 14);
+    assert_eq!(v["topics"].as_array().unwrap().len(), 16);
     assert!(v["commands"].as_object().unwrap().len() >= 30);
 }
 
@@ -197,12 +199,15 @@ fn topic_envelope_for_quickstart() {
 }
 
 #[test]
-fn unknown_topic_with_json_still_exits_one() {
+fn unknown_topic_with_json_still_exits_two() {
+    // F3 (v0.1.3): unknown command/topic now exits 2 (Error) on
+    // every help path, including `--json`. Pre-F3 it was 1
+    // (NoMatches).
     Command::cargo_bin("inspect")
         .unwrap()
         .args(["help", "definitely-not-a-topic", "--json"])
         .assert()
-        .code(1);
+        .code(2);
 }
 
 #[test]

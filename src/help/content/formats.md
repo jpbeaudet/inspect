@@ -43,6 +43,15 @@ ENVELOPE BEHAVIOR
   --raw:      content only (no decoration)
   default:    summary above, data as table, next below
 
+JSON PROJECTION (F19, v0.1.3)
+  Every JSON-emitting verb accepts `--select '<jq filter>'` for
+  in-binary projection — no external `jq` install required. Add
+  `--select-raw` to strip JSON quotes from string yields (the
+  `jq -r` shape) or `--select-slurp` to collect NDJSON frames into
+  one array first (the `jq -s` shape). External `jq` still works
+  on every `--json` / `--jsonl` output; pre-F19 recipes that pipe
+  to `jq` are unchanged. See `inspect help select`.
+
 COLOR
   Respects the standard NO_COLOR env var. The --no-color flag is
   equivalent. Non-TTY output (pipes, redirection) auto-disables
@@ -51,3 +60,4 @@ COLOR
 SEE ALSO
   inspect help examples      format usage in real workflows
   inspect help search        --json envelope shape for search
+  inspect help select        --select / --select-raw / --select-slurp

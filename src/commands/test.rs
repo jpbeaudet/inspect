@@ -8,7 +8,7 @@
 //!    safe permissions (0600 or 0400) on unix.
 //! 4. Verify TCP reachability of `host:port` (default 22) with a short timeout.
 //!
-//! Real SSH authentication is deferred to Phase 1 (`connect`). This command
+//! Real SSH authentication is the job of `inspect connect`. This command
 //! intentionally does not attempt cryptographic auth so it remains side-effect
 //! free and runnable from CI without secrets.
 
@@ -269,7 +269,7 @@ fn emit_json(name: &str, checks: &[Check], overall: CheckStatus) {
 
 fn expand_tilde(path: &str) -> String {
     if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::paths::home_dir() {
             return home.join(stripped).display().to_string();
         }
     }

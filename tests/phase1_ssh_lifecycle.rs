@@ -62,7 +62,7 @@ fn connections_empty_json() {
         .args(["connections", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"connections\":[]"));
+        .stdout(predicate::str::contains("\"data\":{\"connections\":[]}"));
 }
 
 #[test]

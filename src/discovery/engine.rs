@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::probes::{
-    probe_clock_offset, probe_docker_containers, probe_docker_inventory, probe_host_listeners,
-    probe_remote_tooling, probe_systemd_units,
+    probe_clock_offset, probe_compose_projects, probe_docker_containers, probe_docker_inventory,
+    probe_host_listeners, probe_remote_tooling, probe_systemd_units,
 };
 use crate::profile::cache::{ensure_profiles_dir, save_profile};
 use crate::profile::schema::{Profile, RemoteTooling, ServiceKind};
@@ -39,6 +39,15 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
     // 2) Docker container inventory (only if docker is present).
     if tooling.docker {
         let r = probe_docker_containers(namespace, target);
+        // The docker probe escalates a probe-level fatal
+        // (e.g. daemon down, every per-container fallback failed) to
+        // an `Err` here so setup exits non-zero with a chained hint
+        // instead of folding the line into the warnings list. The
+        // user-visible warning channel is reserved for actionable,
+        // non-fatal noise.
+        if let Some(fatal) = r.fatal {
+            return Err(anyhow::anyhow!(fatal));
+        }
         profile.services.extend(r.services);
         profile.warnings.extend(r.warnings);
 
@@ -47,6 +56,13 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
         profile.networks.extend(inv.networks);
         profile.images.extend(inv.images);
         profile.warnings.extend(inv.warnings);
+
+        // Compose projects. Best-effort; silent when
+        // `docker compose` is not installed (the absence of compose
+        // is normal on plain container hosts).
+        let cp = probe_compose_projects(namespace, target);
+        profile.compose_projects.extend(cp.compose_projects);
+        profile.warnings.extend(cp.warnings);
     } else {
         profile
             .warnings
@@ -61,11 +77,15 @@ pub fn discover(namespace: &str, target: &SshTarget, opts: DiscoverOptions) -> R
             // the profile carries something useful even on hosts that don't
             // run docker. Container listeners would be redundant here, so we
             // only keep ports that aren't already mapped through a known
-            // container port mapping.
-            let already_mapped = profile
-                .services
-                .iter()
-                .any(|s| s.ports.iter().any(|p| p.host == hl.port));
+            // container port mapping. : match on (host_port,
+            // proto) so a TCP service on :53 doesn't suppress a host UDP
+            // listener on :53 — they're distinct sockets and operators
+            // chasing DNS issues need both surfaced.
+            let already_mapped = profile.services.iter().any(|s| {
+                s.ports
+                    .iter()
+                    .any(|p| p.host == hl.port && p.proto == hl.proto)
+            });
             if already_mapped {
                 continue;
             }

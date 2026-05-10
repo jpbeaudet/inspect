@@ -58,7 +58,7 @@ fn build_logs_cmd(step: &ReadStep<'_>, opts: &ReadOpts) -> String {
             s
         }
         (Some(name), _) => {
-            // P2: use real container name (Service.container_name) for docker logs,
+            // Use real container name (Service.container_name) for docker logs,
             // not the user-facing service token.
             let container = step
                 .service_def

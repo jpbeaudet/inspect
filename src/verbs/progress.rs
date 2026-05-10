@@ -1,4 +1,4 @@
-//! Hand-rolled progress spinner (P9, v0.1.1).
+//! Hand-rolled progress spinner.
 //!
 //! Used to give live feedback during slow log/grep/search fetches when
 //! the operator runs in a TTY. We deliberately avoid `indicatif` to

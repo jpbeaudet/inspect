@@ -5,12 +5,14 @@ EXAMPLES
   $ inspect restart arte/pulse --apply                    # execute
   $ inspect edit arte/atlas:/etc/foo 's/old/new/'         # show diff (dry-run)
   $ inspect edit arte/atlas:/etc/foo 's/old/new/' --apply
-  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf
-  $ inspect cp ./fix.conf arte/pulse:/etc/pulse.conf --apply
+  $ inspect put ./fix.conf arte:/etc/pulse.conf --apply   # F15 upload
+  $ inspect get arte:/etc/pulse.conf ./pulse.conf         # F15 download
 
 WRITE VERBS
   restart / stop / start / reload    container lifecycle
-  cp <local> <sel>:<path>            push file (or pull: cp <sel>:<path> <local>)
+  put <local> <sel>:<path>           upload file (F15, atomic, F11-revertible)
+  get <sel>:<path> <local>           download file (F15; `-` writes to stdout)
+  cp <src> <dst>                     bidirectional alias for put / get
   edit <sel>:<path> '<sed-expr>'     in-place content edit (atomic)
   rm / mkdir / touch                 file operations
   chmod / chown                      permission changes
@@ -23,15 +25,37 @@ RUN vs EXEC
          lands in the audit log with a --reason. Use when the command
          mutates state OR when you need a forensic record.
 
-SECRET MASKING (P4)
-  By default, `run` and `exec` mask secret-shaped KEY=VALUE pairs in
-  the output (head4****tail2). Recognized keys include the standard
-  *_KEY/*_SECRET/*_TOKEN/*_PASSWORD/*_PASS suffixes plus DATABASE_URL,
-  REDIS_URL, MONGO_URL and friends.
-    --show-secrets    print verbatim (audit args is stamped
+SECRET MASKING (P4 + L7)
+  By default, every line emitted by `run` and `exec` (and the read
+  verbs `logs`, `cat`, `grep`, `find`, `search`, `why`) runs through
+  a four-masker pipeline before reaching local stdout:
+    1. PEM       (L7) -----BEGIN ... PRIVATE KEY----- through the
+                      matching END line collapses to a single
+                      `[REDACTED PEM KEY]` marker. Recognized:
+                      PKCS#8, PKCS#1, RSA, EC, DSA, OPENSSH, PGP.
+                      Public certificates and public keys pass
+                      through unchanged.
+    2. header    (L7) Case-insensitive `Authorization`, `X-API-Key`,
+                      `Cookie`, `Set-Cookie` — value portion becomes
+                      `<redacted>`. Catches `curl -v` traces and
+                      reverse-proxy logs.
+    3. URL       (L7) `scheme://user:pass@host` patterns mask the
+                      password to `user:****@host`. Covers postgres,
+                      mysql, redis, mongodb, amqp, http, https.
+    4. env       (P4) `KEY=VALUE` lines with secret-shaped keys
+                      (*_KEY/*_SECRET/*_TOKEN/*_PASSWORD/*_PASS,
+                      DATABASE_URL, REDIS_URL, MONGO_URL, etc.) get
+                      the value masked to `head4****tail2`.
+
+  Inside an active PEM block the other three maskers do not fire —
+  the entire block body is replaced with the single marker. The
+  audit JSONL records which masker(s) fired in
+  `secrets_masked_kinds` (canonical order pem/header/url/env).
+
+    --show-secrets    bypass ALL FOUR maskers (audit args is stamped
                       [secrets_exposed=true] on `exec`).
-    --redact-all      mask every KEY=VALUE pair, not just recognized
-                      keys.
+    --redact-all      mask every KEY=VALUE pair (env masker only),
+                      not just recognized keys.
 
 INNER EXIT CODE (P11)
   `run` and `exec` propagate the remote command's exit code to your

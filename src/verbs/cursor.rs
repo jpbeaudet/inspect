@@ -1,4 +1,4 @@
-//! `--since-last` cursor (P10, v0.1.1).
+//! `--since-last` cursor.
 //!
 //! Each `inspect logs --since-last` / `inspect grep --since-last` invocation
 //! reads a tiny per-(namespace, service) state file under
@@ -6,7 +6,7 @@
 //! unix timestamp as the effective `--since`, and rewrites the file with
 //! the start time of the current run.
 //!
-//! Field-pitfall driver: P10 in [INSPECT_v0.1.1_PATCH_SPEC.md]. Operators
+//! Field-pitfall driver: cursor pagination. Operators
 //! iterating on a service typed `--since 5m` over and over and lost the
 //! exact resume point between calls (especially across long debug
 //! sessions where 5 minutes was sometimes too much, sometimes not enough).
@@ -32,7 +32,7 @@ pub struct Cursor {
     pub last_call: u64,
     /// Unix timestamp of the most recent log line we observed (0 when
     /// unknown — we currently rely on `last_call` for `--since`, but
-    /// keep this field so future P10 iterations can switch to true
+    /// keep this field so future iterations can switch to true
     /// line-timestamp tracking without a format break).
     pub last_ts: u64,
 }

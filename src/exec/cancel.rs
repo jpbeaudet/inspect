@@ -17,9 +17,17 @@
 //! `wait`/`read` on child SSH processes) to return `EINTR` so the
 //! polling loops notice the cancel quickly and reap children.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+/// Monotonically increasing count of SIGINT /
+/// SIGTERM signals received. The streaming SSH executor uses this to
+/// distinguish "first Ctrl-C" (forward through PTY → SIGINT to remote
+/// process group) from "second Ctrl-C within 1s" (escalate to SSH
+/// channel close → SIGHUP on remote process group). Plain
+/// `is_cancelled()` is a one-way trip and cannot answer "did a NEW
+/// signal arrive since I last checked" — the counter does.
+static SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Has the user asked us to stop?
 #[inline]
@@ -27,16 +35,55 @@ pub fn is_cancelled() -> bool {
     CANCELLED.load(Ordering::Relaxed)
 }
 
-/// Manually trip the cancel flag. Test-only.
-#[cfg(test)]
-pub fn cancel() {
-    CANCELLED.store(true, Ordering::Relaxed);
+/// Monotonically increasing count of cancel
+/// signals received. Wraps at `u32::MAX` (~ 4 billion Ctrl-Cs — not a
+/// realistic concern). Used by the streaming SSH executor to detect
+/// "a new SIGINT arrived since my last poll" without losing the trip
+/// to `is_cancelled()` race conditions.
+#[inline]
+pub fn signal_count() -> u32 {
+    SIGNAL_COUNT.load(Ordering::Relaxed)
 }
 
-/// Reset the flag. Test-only.
+/// Manually trip the cancel flag (and bump the counter).
+///
+/// Originally (v0.1.3 earlier) gated to `#[cfg(test)]` with the
+/// rationale "production code never calls this; the SIGINT/SIGTERM
+/// handler does the same work via the `extern "C"` path".
+/// invalidates that — `inspect run --steps` with a step's
+/// `parallel: true` AND `on_failure: stop` now trips the flag
+/// internally when a parallel target completes with a failure so
+/// peers in the next batch see `is_cancelled()` and skip without
+/// dispatch. This is the same observable end-state the SIGINT
+/// handler produces; sharing the cancel surface keeps the
+/// streaming-dispatch's pre-flight check (`if is_cancelled() { … }`)
+/// as the single chokepoint.
+pub fn cancel() {
+    CANCELLED.store(true, Ordering::Relaxed);
+    SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Clear the cancellation flag without resetting
+/// the signal counter. Used by the streaming SSH executor after it has
+/// successfully forwarded a first Ctrl-C through the remote PTY — the
+/// remote process is now responsible for terminating, and the local
+/// `inspect` should resume reading the stream until either the remote
+/// exits cleanly (in which case we want to surface the remote's exit
+/// code, NOT exit 130 from the cancellation flag) or a second Ctrl-C
+/// arrives (which the counter still detects via the unchanged
+/// SIGNAL_COUNT). Test code uses this too via `reset_for_test`.
+pub fn reset_cancel_flag() {
+    CANCELLED.store(false, Ordering::Relaxed);
+}
+
+/// Reset both the flag AND the counter. Test-only — production code
+/// must not zero the counter mid-run because doing so would lose the
+/// "I've already forwarded one Ctrl-C, the next one escalates"
+/// progress in the streaming executor.
 #[cfg(test)]
 pub fn reset() {
     CANCELLED.store(false, Ordering::Relaxed);
+    SIGNAL_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// Convenience: return `Err(anyhow!("cancelled by signal"))` if the
@@ -53,6 +100,35 @@ pub fn check() -> anyhow::Result<()> {
 /// first call wins. On non-Unix platforms this is a no-op.
 pub fn install_handlers() {
     install_unix();
+    install_sigpipe_default();
+}
+
+/// Reset SIGPIPE to its Unix default disposition (`SIG_DFL`).
+///
+/// Rust's standard library installs an *ignore* handler for SIGPIPE at
+/// program startup so writes to a closed pipe surface as `EPIPE` from
+/// `write(2)` — which Rust's `println!` / `writeln!` macros then turn
+/// into a *panic* ("failed printing to stdout: Broken pipe"). For an
+/// agent-facing CLI that is constantly piped through `head`, `grep
+/// -m1`, `jq` etc. this is wrong: every short-circuited pipeline ends
+/// in a backtrace + nonzero exit instead of the conventional silent
+/// 141 = 128 + SIGPIPE. Surfaced live during the v0.1.3 release smoke
+/// when `inspect compose logs … | head -20` panicked mid-stream.
+///
+/// Restoring the OS default is the canonical fix and matches every
+/// other Unix CLI's behavior. Safe even when downstream is a regular
+/// file (no SIGPIPE is delivered there). On non-Unix platforms this
+/// is a no-op.
+fn install_sigpipe_default() {
+    #[cfg(unix)]
+    {
+        // SAFETY: `signal(SIGPIPE, SIG_DFL)` is the documented one-shot
+        // way to reset a default disposition. No handler memory is
+        // exposed to the OS — `SIG_DFL` is a sentinel.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -81,7 +157,12 @@ fn install_unix() {}
 
 #[cfg(unix)]
 extern "C" fn handler(_sig: libc::c_int) {
-    // Async-signal-safe: a relaxed atomic store on a primitive integer.
+    // Async-signal-safe: relaxed atomic ops on primitive integers are
+    // explicitly permitted from signal handlers. The counter feeds the
+    // streaming executor's first-vs-second-Ctrl-C escalation
+    // (cancellation-followup); `CANCELLED` feeds the conventional
+    // "have we been signaled at all" polling.
+    SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
     CANCELLED.store(true, Ordering::Relaxed);
 }
 
@@ -119,6 +200,47 @@ pub(crate) mod tests {
         assert!(check().is_ok());
         cancel();
         assert!(check().is_err());
+        reset();
+    }
+
+    /// The SIGINT counter increments on every
+    /// trip — distinguishes "first Ctrl-C" from "second Ctrl-C" so the
+    /// streaming executor can escalate from PTY-forwarded SIGINT to
+    /// channel-close SIGHUP on the second hit.
+    #[test]
+    fn signal_count_increments_per_cancel() {
+        let _g = test_lock();
+        reset();
+        let baseline = signal_count();
+        assert_eq!(baseline, 0);
+        cancel();
+        assert_eq!(signal_count(), 1);
+        cancel();
+        assert_eq!(signal_count(), 2);
+        // reset_cancel_flag() must NOT zero the counter — the
+        // streaming executor relies on `signal_count() > prev` to
+        // detect a *new* signal between polls.
+        reset_cancel_flag();
+        assert_eq!(signal_count(), 2);
+        assert!(!is_cancelled());
+        cancel();
+        assert_eq!(signal_count(), 3);
+        assert!(is_cancelled());
+        reset();
+    }
+
+    #[test]
+    fn reset_cancel_flag_clears_only_the_flag() {
+        let _g = test_lock();
+        reset();
+        cancel();
+        assert!(is_cancelled());
+        let count_before = signal_count();
+        assert_eq!(count_before, 1);
+        reset_cancel_flag();
+        // Flag cleared, counter preserved.
+        assert!(!is_cancelled());
+        assert_eq!(signal_count(), count_before);
         reset();
     }
 }

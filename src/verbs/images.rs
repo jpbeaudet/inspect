@@ -21,7 +21,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
         )?;
         if !out.ok() {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: docker images failed (exit {}): {}",
                     ns.namespace,
                     out.exit_code,
@@ -47,7 +47,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
         }
     }
     renderer.summary(format!("{count} image(s)"));
-    let __fmt = args.format.resolve()?;
-    renderer.dispatch(&__fmt)?;
-    Ok(ExitKind::Success)
+    let fmt = args.format.resolve()?;
+    let select = args.format.select_filter()?;
+    renderer.dispatch(&fmt, select)
 }

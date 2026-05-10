@@ -206,7 +206,15 @@ fn p2_exec_uses_real_container_name() {
     write_profile(sb.home(), "arte", &[("api", "luminary-api")]);
 
     sb.cmd()
-        .args(["exec", "arte/api", "--apply", "--yes", "--", "id"])
+        .args([
+            "exec",
+            "arte/api",
+            "--apply",
+            "--yes",
+            "--no-revert",
+            "--",
+            "id",
+        ])
         .assert()
         .success()
         .stdout(contains("uid=0"));

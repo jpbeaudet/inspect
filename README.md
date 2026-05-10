@@ -25,8 +25,10 @@ multi-step migrations with rollback.
   `--apply` is the only way to enact a change. Every apply is audited
   and reversible with `inspect revert <audit-id>`.
 - **Stable JSON envelope.** Every command can emit a versioned
-  `summary | data | next` envelope (`--json`) suitable for piping into
-  `jq`, scripts, or another tool.
+  `summary | data | next` envelope (`--json`); the in-binary
+  `--select '<jq>'` flag projects or reshapes it without an external
+  `jq` install (F19), and the envelope still pipes cleanly into `jq`,
+  scripts, or another tool.
 - **LogQL-style search.** A familiar Loki-like query language to
   grep, parse, and aggregate across logs, files, and host state.
 - **Bundle orchestration.** Declarative YAML migrations with
@@ -39,13 +41,20 @@ multi-step migrations with rollback.
   `inspect help search <query>` work offline — no man pages, no
   network.
 
-> **Current release:** `v0.1.2` — bundle orchestration, watch verb,
-> field-feedback patches B1–B10, defensive hardening pass.
-> **In progress:** `v0.1.3` — password auth + extended session TTL +
-> `ssh add-key` helper, optional OS keychain, audit log retention,
-> extended secret redaction (headers / PEM / URL credentials),
-> parameterized aliases, per-branch rollback in matrix steps, TUI
-> mode. See [INSPECT_v0.1.3_BACKLOG.md](INSPECT_v0.1.3_BACKLOG.md).
+> **Current release:** `v0.1.3` — password auth + extended session
+> TTL + `ssh add-key` helper, optional OS keychain, audit log
+> retention, header / PEM / URL credential redaction,
+> parameterized aliases, per-branch matrix rollback,
+> per-namespace env overlay, stale-session auto-reauth,
+> universal `--revert`, file-transfer (`put` / `get` / `cp`),
+> session transcript, multi-step runner, first-class compose
+> verbs, jaq-powered `--select` projection on every JSON-emitting
+> verb. See [archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md](archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md)
+> for the closed scope.
+>
+> **Next:** `v0.1.4` — Kubernetes support (mixed Docker + k8s
+> fleets). `v0.1.5` — stabilization sweep before the v0.2.0
+> contract freeze.
 
 ---
 
@@ -82,7 +91,7 @@ Pin a version, change the install root, or skip cosign verification:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jpbeaudet/inspect/main/scripts/install.sh \
-  | sh -s -- --version v0.1.2 --prefix /usr/local
+  | sh -s -- --version v0.1.3 --prefix /usr/local
 ```
 
 The installer:
@@ -292,8 +301,7 @@ timeout).
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | maintainers / on-call | Release rollout, incident response, hotfix flow, support matrix, current limitations. |
 | [docs/RELEASING.md](docs/RELEASING.md) | maintainers | How to cut a tag, what the release workflow does, how to update the Homebrew tap. |
 | [CHANGELOG.md](CHANGELOG.md) | everyone | Per-release changes (Keep a Changelog format). |
-| [INSPECT_ROADMAP_TO_v01.3.md](INSPECT_ROADMAP_TO_v01.3.md) | everyone | Roadmap to v0.2.0 stability contract (Kubernetes, locked CLI surface). |
-| [INSPECT_v0.1.3_BACKLOG.md](INSPECT_v0.1.3_BACKLOG.md) | everyone | Active backlog for the next release. |
+| [archives/](archives/) | everyone | Closed planning + smoke + audit artifacts from prior releases (v0.1.2, v0.1.3). |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | contributors | Dev setup, lint/test gates, PR rules. |
 | [SECURITY.md](SECURITY.md) | reporters | How to report a vulnerability. |
 | `inspect help <topic>` | end users | The same manual content, embedded in the binary, no network. |
@@ -322,7 +330,7 @@ docker run --rm -it -v ~/.ssh:/home/inspect/.ssh:ro inspect:dev help
 ```
 
 CI gates: `cargo fmt --all -- --check`, `cargo clippy --all-targets
--- -D warnings`, full test suite (27 suites, 555+ tests at v0.1.2),
+-- -D warnings`, full test suite (28 suites, 1350+ tests at v0.1.3),
 no module-wide lint suppressions.
 
 ---
@@ -338,9 +346,10 @@ any release. The current shape:
 | v0.1.0 | First public release: 12 read verbs, 12 write verbs, LogQL parser, selectors, aliases, discovery, audit, snapshots, revert, 10 output formats, fleet, recipes, why, connectivity, help. |
 | v0.1.1 | `run` verb, `--follow`, `--merged`, `--match` / `--exclude`, `--since-last`, secret masking, `--reason`, progress, exit-code surfacing, phantom-service fix. |
 | v0.1.2 | Bundle orchestration (B9), `watch` verb (B10), field-feedback patches B1–B8, defensive hardening pass (audit fsync, http timeouts, panic-safe matrix). |
-| v0.1.3 (in progress) | Password auth + session TTL + `ssh add-key` helper, opt-in OS keychain, audit log retention, header / PEM / URL redaction, parameterized aliases, per-branch matrix rollback, TUI mode. |
-| v0.1.4 | Pre-stabilization sweep: CLI surface audit, config / JSON schema freeze, help audit, README rewrite, dead-code + dependency audit, security audit. **No new features.** |
-| v0.2.0 | Stability contract begins. Kubernetes support lands additively (mixed Docker + k8s fleets). |
+| v0.1.3 | Password auth + session TTL + `ssh add-key`, OS keychain, audit retention + GC, header / PEM / URL / env redaction, parameterized aliases, per-branch matrix rollback, per-namespace env overlay, stale-session auto-reauth, universal `--revert`, `put` / `get` / `cp`, session transcript, multi-step runner, first-class `compose` verbs, jaq-powered `--select` projection. |
+| v0.1.4 | Kubernetes support: mixed Docker + k8s fleets, k8s-aware selectors, scoped write verbs (`scale`, `restart`, `delete pod` with audit), bundle-engine integration. |
+| v0.1.5 | Pre-stabilization sweep: CLI surface audit, config / JSON schema freeze, help audit, README rewrite, dead-code + dependency audit, security audit. **No new features.** |
+| v0.2.0 | Stability contract begins. |
 
 After v0.2.0: CLI verb names, flag names, selector grammar, LogQL
 syntax, `--json` schema (versioned), config formats, bundle YAML,
@@ -348,7 +357,7 @@ recipe YAML, audit log schema, exit codes, and help topic names are
 **stable**. Internal APIs, error wording, performance characteristics,
 discovery heuristics, and TUI keybindings remain unstable.
 
-See [INSPECT_ROADMAP_TO_v01.3.md](INSPECT_ROADMAP_TO_v01.3.md) for the
+See [archives/v0.1.3/INSPECT_ROADMAP_TO_v01.3.md](archives/v0.1.3/INSPECT_ROADMAP_TO_v01.3.md) for the
 full plan and [docs/RUNBOOK.md](docs/RUNBOOK.md) §6 for the
 always-current list of known limitations.
 

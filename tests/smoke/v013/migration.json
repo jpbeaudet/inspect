@@ -1,0 +1,42 @@
+{
+  "_comment_purpose": "v0.1.3 smoke-test F17 manifest. Drives against a sandbox container only; step 3 deliberately fails (exit 7) so --revert-on-failure exercises the F11 composite-revert path walking step 2 then step 1 inverses in reverse manifest order. Step 4+5 must end up in 'skipped' status because step 3 has on_failure: stop (the default). Reuse for v0.1.4+ smokes as new write-surface contracts land.",
+  "_comment_invocation": "inspect run arte --steps ./tests/smoke/v013/migration.json --revert-on-failure -- inspect-smoke-<rand>",
+  "_comment_arg_passing": "Steps reference $1 to receive the sandbox container name. The runner POSIX-quotes positional args after `--` so the script body never sees a re-quoted form.",
+
+  "steps": [
+    {
+      "name": "create-marker",
+      "cmd": "docker exec \"$1\" sh -c 'echo step-1-applied > /tmp/inspect-smoke-marker'",
+      "revert_cmd": "docker exec \"$1\" sh -c 'rm -f /tmp/inspect-smoke-marker'",
+      "on_failure": "stop",
+      "timeout_s": 30
+    },
+    {
+      "name": "set-env-marker",
+      "cmd": "docker exec \"$1\" sh -c 'echo step-2-applied > /tmp/inspect-smoke-env'",
+      "revert_cmd": "docker exec \"$1\" sh -c 'rm -f /tmp/inspect-smoke-env'",
+      "on_failure": "stop",
+      "timeout_s": 30
+    },
+    {
+      "name": "deliberate-failure",
+      "cmd": "sh -c 'echo step-3-failing-by-design >&2; exit 7'",
+      "on_failure": "stop",
+      "timeout_s": 30
+    },
+    {
+      "name": "should-be-skipped-1",
+      "cmd": "docker exec \"$1\" sh -c 'echo step-4-should-not-run > /tmp/inspect-smoke-skip-1'",
+      "revert_cmd": "docker exec \"$1\" sh -c 'rm -f /tmp/inspect-smoke-skip-1'",
+      "on_failure": "stop",
+      "timeout_s": 30
+    },
+    {
+      "name": "should-be-skipped-2",
+      "cmd": "docker exec \"$1\" sh -c 'echo step-5-should-not-run > /tmp/inspect-smoke-skip-2'",
+      "revert_cmd": "docker exec \"$1\" sh -c 'rm -f /tmp/inspect-smoke-skip-2'",
+      "on_failure": "stop",
+      "timeout_s": 30
+    }
+  ]
+}

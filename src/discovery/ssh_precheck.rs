@@ -11,6 +11,7 @@
 
 use std::process::Command;
 
+use crate::ssh::master::{check_socket, socket_path, MasterStatus};
 use crate::ssh::SshTarget;
 
 /// Reason a precheck failed. Drives which chained hint we emit.
@@ -35,8 +36,30 @@ pub enum PrecheckOutcome {
 /// `ConnectTimeout=10` matches the rest of the codebase. We set a small
 /// process-level timeout via `wait_timeout`-style polling? No — ssh's
 /// own `ConnectTimeout` is enough; if ssh itself wedges (very rare), we
-/// give it a hard `Duration` budget below.
-pub fn run(target: &SshTarget) -> PrecheckOutcome {
+///
+/// Smoke-caught (v0.1.3): when an inspect-managed master socket is
+/// already alive for `namespace`, the precheck must reuse it. Without
+/// this short-circuit, an encrypted-key namespace (`inspect connect`
+/// already opened the master, passphrase already entered) fails the
+/// precheck because `BatchMode=yes` cannot prompt for the passphrase
+/// on the fresh probe-time `ssh` invocation, and the failure is
+/// misclassified as `AuthFailed` even though every dispatch verb
+/// (run, exec, logs, ...) reuses the master correctly. The fix:
+/// before spawning the BatchMode probe, ask `check_socket` whether
+/// the namespace's master is alive; if so, short-circuit to
+/// `PrecheckOutcome::Ok`. The semantics are identical (ssh would
+/// have succeeded over the master anyway) and avoid the spurious
+/// re-auth attempt.
+/// Build the precheck `ssh BatchMode=yes ... true` command without
+/// spawning it. Extracted so unit tests can assert on the argument
+/// list — notably that `StrictHostKeyChecking=accept-new` is present
+/// so the precheck does not misclassify a *first*-time connect to an
+/// unknown host as `HostKeyChanged` (which surfaces an MITM warning
+/// in [`host_key_changed_hint`]). Under accept-new the unknown host
+/// is auto-added to `~/.ssh/known_hosts`; subsequent runs with a
+/// *changed* key still fail with `Host key verification failed.`,
+/// which the classifier catches.
+fn build_precheck_command(target: &SshTarget) -> Command {
     let connect_timeout = std::env::var("INSPECT_SSH_CONNECT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -46,6 +69,7 @@ pub fn run(target: &SshTarget) -> PrecheckOutcome {
     cmd.arg("-o").arg("BatchMode=yes");
     cmd.arg("-o")
         .arg(format!("ConnectTimeout={connect_timeout}"));
+    cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
     cmd.args(target.base_args());
     // Honor operator-supplied raw ssh args (ProxyJump, UserKnownHostsFile,
     // ...). Same env var the master/exec layers use.
@@ -56,6 +80,16 @@ pub fn run(target: &SshTarget) -> PrecheckOutcome {
     }
     cmd.arg(&target.host);
     cmd.arg("true");
+    cmd
+}
+
+pub fn run(namespace: &str, target: &SshTarget) -> PrecheckOutcome {
+    let socket = socket_path(namespace);
+    if matches!(check_socket(&socket, target), MasterStatus::Alive) {
+        return PrecheckOutcome::Ok;
+    }
+
+    let mut cmd = build_precheck_command(target);
 
     // Inherit stdin from null implicitly; capture stdout/stderr.
     let output = match cmd.output() {
@@ -268,5 +302,50 @@ mod tests {
         let h = unreachable_hint("arte", &t());
         assert!(h.contains("h:22"));
         assert!(h.contains("ping h"));
+    }
+
+    /// Smoke-caught (v0.1.3): the precheck must accept a namespace and
+    /// short-circuit when the inspect-managed master socket is alive.
+    /// This is a compile-level guard on the API shape — the live
+    /// short-circuit path is exercised by the v0.1.3 release smoke
+    /// (the smoke runbook covers this case) where an encrypted-key namespace
+    /// with an already-open master must succeed `setup --force`
+    /// without re-prompting for the passphrase.
+    #[test]
+    fn run_takes_namespace_argument() {
+        // No assertion needed — this is a compile-time guard. If the
+        // signature regresses to `run(target)` we want a build break,
+        // not a runtime surprise.
+        fn _shape_check(ns: &str, t: &SshTarget) -> PrecheckOutcome {
+            run(ns, t)
+        }
+    }
+
+    /// Smoke-caught regression (paired with
+    /// `master::accept_new_tests::*`): the precheck must also pass
+    /// `StrictHostKeyChecking=accept-new` so a first-time connect to
+    /// an unknown host is not misclassified as `HostKeyChanged`
+    /// (which surfaces the MITM warning in
+    /// [`host_key_changed_hint`]). Under accept-new the unknown host
+    /// is auto-added to known_hosts; subsequent runs against a
+    /// *changed* key still fail with `Host key verification failed.`,
+    /// which the classifier catches.
+    #[test]
+    fn precheck_command_includes_accept_new() {
+        let cmd = build_precheck_command(&t());
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "precheck must include StrictHostKeyChecking=accept-new so \
+             first-connect to an unknown host does not misroute through \
+             HostKeyChanged; args={args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "BatchMode=yes"),
+            "precheck must still keep BatchMode=yes; args={args:?}"
+        );
     }
 }

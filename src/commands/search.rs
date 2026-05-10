@@ -7,7 +7,6 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::alias;
 use crate::cli::SearchArgs;
 use crate::error::ExitKind;
 use crate::exec::{self, ExecOutput};
@@ -21,10 +20,16 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
-    // Parse-only first so we can emit precise diagnostics with carets.
-    if let Err(e) = logql::parse_with_aliases(query, |name| {
-        alias::get(name).ok().flatten().map(|e| e.selector)
-    }) {
+    // Validate the format/--select combination up front
+    // so a `--select` without `--json` lands the canonical exit-2
+    // usage error before we touch the network or the LogQL parser.
+    args.format.resolve()?;
+
+    // The resolver delegates to `alias::expand_recursive` so a
+    // parameterized `@svc-logs(svc=pulse)` call site, including
+    // multi-level chains, expands once before the LogQL parser sees
+    // the result.
+    if let Err(e) = logql::parse_with_aliases(query, logql::default_alias_resolver) {
         if args.format.is_json() {
             let env = json!({
                 "schema_version": 1,
@@ -39,7 +44,13 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                 "next": [],
                 "meta": {}
             });
-            println!("{env}");
+            // A search-parse error is itself an envelope
+            // emission; route through `print_json_value` so `--select`
+            // applies even on the error path. Filter parse-errors here
+            // bubble as exit 2 (handled by main); runtime errors and
+            // zero-yield filters still return Error so the operator's
+            // original parse-failure exit code stands.
+            crate::verbs::output::print_json_value(&env, args.format.select_spec())?;
         } else {
             eprint!("{}", e.render(query));
         }
@@ -80,7 +91,7 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
                     "next": [],
                     "meta": { "query": args.query, "cancelled": cancelled }
                 });
-                println!("{env}");
+                crate::verbs::output::print_json_value(&env, args.format.select_spec())?;
             } else if cancelled {
                 println!("SUMMARY: cancelled by signal");
                 println!("DATA:");
@@ -101,27 +112,39 @@ pub fn run(args: SearchArgs) -> Result<ExitKind> {
     match result {
         ExecOutput::Log(r) => {
             if args.format.is_json() {
-                emit_log_json(&args, &r.records);
+                // `--select` can swallow every record into
+                // an empty result set; the helper returns `NoMatches`
+                // for that case, which is the right exit code regardless
+                // of whether the underlying record list was empty.
+                let kind = emit_log_json(&args, &r.records)?;
+                Ok(match kind {
+                    ExitKind::Success if r.records.is_empty() => ExitKind::NoMatches,
+                    other => other,
+                })
             } else {
                 emit_log_human(&args, &r.records);
+                Ok(if r.records.is_empty() {
+                    ExitKind::NoMatches
+                } else {
+                    ExitKind::Success
+                })
             }
-            Ok(if r.records.is_empty() {
-                ExitKind::NoMatches
-            } else {
-                ExitKind::Success
-            })
         }
         ExecOutput::Metric(samples) => {
             if args.format.is_json() {
-                emit_metric_json(&args, &samples);
+                let kind = emit_metric_json(&args, &samples)?;
+                Ok(match kind {
+                    ExitKind::Success if samples.is_empty() => ExitKind::NoMatches,
+                    other => other,
+                })
             } else {
                 emit_metric_human(&args, &samples);
+                Ok(if samples.is_empty() {
+                    ExitKind::NoMatches
+                } else {
+                    ExitKind::Success
+                })
             }
-            Ok(if samples.is_empty() {
-                ExitKind::NoMatches
-            } else {
-                ExitKind::Success
-            })
         }
     }
 }
@@ -136,12 +159,22 @@ fn emit_log_human(args: &SearchArgs, records: &[exec::Record]) {
         truncate(&args.query, 80)
     );
     println!("DATA:");
+    // Redact lines before printing. PEM tracking is
+    // per-search-invocation; records are k-way merged across servers
+    // by the upstream pipeline, so a multi-line PEM body that crosses
+    // server boundaries is rare — but if a single server's records
+    // contain one, the BEGIN/body/END lines arrive contiguously
+    // because they came from the same source verb (logs / file).
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
     for r in records {
         let server = r.label("server").unwrap_or("?");
         let service = r.label("service").unwrap_or("_");
         let source = r.label("source").unwrap_or("?");
         match &r.line {
-            Some(l) => println!("  {server}/{service} [{source}] {l}"),
+            Some(l) => match redactor.mask_line(l) {
+                Some(masked) => println!("  {server}/{service} [{source}] {masked}"),
+                None => continue,
+            },
             None => println!("  {server}/{service} [{source}]"),
         }
     }
@@ -174,20 +207,34 @@ fn default_record_limit() -> usize {
     }
 }
 
-fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
+fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) -> Result<ExitKind> {
+    // Redact lines on the JSON path too, so consumers
+    // (LLM agents, jq pipelines, log shippers) never see verbatim
+    // secrets. PEM-block lines are dropped from the record stream
+    // entirely (the BEGIN-line marker stays).
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
     let data: Vec<Value> = records
         .iter()
-        .map(|r| {
+        .filter_map(|r| {
+            // `None` outer Option means "drop record" (PEM-interior
+            // line — emitting an empty `line: ""` would silently
+            // discard the contract). `Some(None)` means the
+            // record had no line to begin with — emit it as-is.
+            let masked_line: Option<Option<String>> = match &r.line {
+                None => Some(None),
+                Some(l) => redactor.mask_line(l).map(|m| Some(m.into_owned())),
+            };
+            let masked_line = masked_line?;
             let source = r.label("source").unwrap_or("");
             let medium = source.split(':').next().unwrap_or("");
-            json!({
+            Some(json!({
                 "_source": source,
                 "_medium": medium,
                 "labels": r.labels,
                 "fields": r.fields,
-                "line": r.line,
+                "line": masked_line,
                 "ts_ms": r.ts_ms,
-            })
+            }))
         })
         .collect();
     // Phase 10 — correlation: dominant-service hint.
@@ -217,7 +264,7 @@ fn emit_log_json(args: &SearchArgs, records: &[exec::Record]) {
             "phase": 10
         }
     });
-    println!("{env}");
+    crate::verbs::output::print_json_value(&env, args.format.select_spec())
 }
 
 fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
@@ -243,7 +290,7 @@ fn emit_metric_human(args: &SearchArgs, samples: &[exec::metric::MetricSample]) 
     );
 }
 
-fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
+fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) -> Result<ExitKind> {
     let env = json!({
         "schema_version": 1,
         "summary": format!("{} series", samples.len()),
@@ -251,7 +298,7 @@ fn emit_metric_json(args: &SearchArgs, samples: &[exec::metric::MetricSample]) {
         "next": [],
         "meta": { "query": args.query, "phase": 7 }
     });
-    println!("{env}");
+    crate::verbs::output::print_json_value(&env, args.format.select_spec())
 }
 
 fn truncate(s: &str, n: usize) -> String {

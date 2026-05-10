@@ -17,7 +17,27 @@ use crate::error::ConfigError;
 use crate::paths;
 
 const ENV_INTERACTIVE_PASSPHRASE: &str = "INSPECT_INTERACTIVE_PASSPHRASE";
+const ENV_INTERACTIVE_PASSWORD: &str = "INSPECT_INTERACTIVE_PASSWORD";
 const SSH_BIN: &str = "ssh";
+
+/// How many wrong passwords we tolerate during a single
+/// `inspect connect` invocation before aborting with a chained hint
+/// to `inspect help ssh`. Each wrong password costs one ssh master
+/// invocation; the cap exists so a noisy keyboard or stale
+/// muscle-memory does not lock the operator out repeatedly.
+pub const PASSWORD_MAX_ATTEMPTS: usize = 3;
+
+/// Smoke-caught: how many wrong key passphrases we tolerate
+/// during a single `inspect connect` (or auto-reauth) interactive
+/// flow before aborting. Pinned to the same cap as
+/// [`PASSWORD_MAX_ATTEMPTS`] so the key-auth and password-auth paths
+/// have indistinguishable retry UX — typo on the auto-reauth prompt
+/// used to abort the entire verb (`auto-reauth for 'arte' failed`)
+/// after a single wrong attempt, while password auth gave the
+/// operator three tries. The shared
+/// [`run_interactive_master_with_retries`] helper enforces both caps
+/// off the same loop body so the two paths cannot drift apart again.
+pub const PASSPHRASE_MAX_ATTEMPTS: usize = 3;
 
 /// How `inspect connect` ultimately authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +50,20 @@ pub enum AuthMode {
     EnvPassphrase,
     /// inspect started a master; passphrase came from interactive prompt.
     InteractivePrompt,
+    /// Inspect started a master; password came from a
+    /// configured `password_env`.
+    EnvPassword,
+    /// Inspect started a master; password came from an
+    /// interactive prompt (one-shot per attempt; up to 3 attempts).
+    InteractivePassword,
+    /// Inspect started a master; key passphrase came
+    /// from the OS keychain (previously saved with
+    /// `--save-passphrase`).
+    KeychainPassphrase,
+    /// Inspect started a master; password came from
+    /// the OS keychain (previously saved with `--save-passphrase`
+    /// against a `auth = "password"` namespace).
+    KeychainPassword,
     /// We didn't open a master because one was already running for this ns.
     AlreadyOpen,
 }
@@ -41,6 +75,10 @@ impl AuthMode {
             AuthMode::Agent => "agent",
             AuthMode::EnvPassphrase => "env-passphrase",
             AuthMode::InteractivePrompt => "interactive",
+            AuthMode::EnvPassword => "env-password",
+            AuthMode::InteractivePassword => "interactive-password",
+            AuthMode::KeychainPassphrase => "keychain-passphrase",
+            AuthMode::KeychainPassword => "keychain-password",
             AuthMode::AlreadyOpen => "already-open",
         }
     }
@@ -75,6 +113,36 @@ impl MasterStatus {
 /// Compute the inspect-managed control-socket path for a namespace.
 pub fn socket_path(namespace: &str) -> PathBuf {
     paths::sockets_dir().join(format!("{namespace}.sock"))
+}
+
+/// G5 (v0.1.3): the kernel `sun_path` field (the C-string a
+/// `bind(AF_UNIX)` accepts) is capped at 108 bytes on Linux and 104
+/// on macOS. ssh exits with `unix_listener: path "..." too long for
+/// Unix domain socket` when ControlPath exceeds the cap; the message
+/// surfaces from a child process and is hard to correlate with the
+/// `inspect connect` invocation that triggered it. We pre-validate
+/// at master-start time using the conservative 104-byte cap, point
+/// the operator at `INSPECT_HOME` to relocate the sockets directory,
+/// and chain to `inspect help ssh` for the broader troubleshooting
+/// topic.
+const SOCKET_PATH_MAX: usize = 104;
+
+/// Verify that `socket` fits within the kernel's `sun_path` cap. See
+/// [`SOCKET_PATH_MAX`] for the rationale.
+pub fn validate_socket_path(socket: &Path) -> Result<()> {
+    let len = socket.as_os_str().len();
+    if len > SOCKET_PATH_MAX {
+        return Err(anyhow::anyhow!(
+            "control socket path is {len} bytes, exceeding the {SOCKET_PATH_MAX}-byte \
+             kernel sun_path cap: {}\n\
+             hint: relocate the sockets directory by exporting \
+             INSPECT_HOME=/tmp/i (or any short path) and re-run; or rename the \
+             namespace to something shorter.\n\
+             see: inspect help ssh",
+            socket.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Ensure `~/.inspect/sockets/` exists with mode 0700.
@@ -196,6 +264,22 @@ pub struct AuthSelection<'a> {
     pub allow_interactive: bool,
     /// Skip the "is there already a user mux?" probe.
     pub skip_existing_mux_check: bool,
+    /// When `true`, take the password-auth branch instead
+    /// of the key-auth branch (skip agent attempt, send
+    /// `PreferredAuthentications=password`, use `password_env` or
+    /// prompt). Set by `inspect connect` when the resolved namespace
+    /// has `auth = "password"`.
+    pub password_auth: bool,
+    /// Name of the env var holding the SSH password.
+    /// Falls back to interactive prompt when `None` (and
+    /// `allow_interactive` is true).
+    pub password_env: Option<&'a str>,
+    /// When `true`, save the prompted credential to
+    /// the OS keychain after a successful master start so future
+    /// connects in fresh shell sessions don't re-prompt. Set by
+    /// `inspect connect --save-passphrase`. Backend unavailable →
+    /// warns once and continues without saving.
+    pub save_to_keychain: bool,
 }
 
 /// Start (or reuse) a ControlMaster for `target`.
@@ -216,6 +300,11 @@ pub fn start_master(
 ) -> Result<ConnectOutcome> {
     ensure_sockets_dir().map_err(anyhow::Error::from)?;
     let socket = socket_path(namespace);
+    // G5 (v0.1.3): fail fast and forensically if the socket path
+    // would exceed the kernel `sun_path` cap. ssh would otherwise
+    // emit a confusing 'unix_listener: path "…" too long' error from
+    // a child process; this check chains to a recovery hint.
+    validate_socket_path(&socket)?;
 
     // (1) Our socket alive?
     if matches!(check_socket(&socket, target), MasterStatus::Alive) {
@@ -239,6 +328,16 @@ pub fn start_master(
         });
     }
 
+    // Password-auth branch — skip the agent/key attempt
+    // entirely (key auth is disabled at the ssh level via
+    // `PubkeyAuthentication=no` so a configured agent key cannot
+    // bypass the operator's intent to authenticate by password) and
+    // run up to PASSWORD_MAX_ATTEMPTS attempts against `password_env`
+    // or the interactive prompt.
+    if auth.password_auth {
+        return start_master_password(namespace, target, ttl, &socket, &auth);
+    }
+
     // (3) Try with BatchMode=yes (agent / keys without passphrase).
     let agent_attempt = run_master(target, ttl, &socket, &[], /*batch=*/ true);
     if agent_attempt.is_ok() {
@@ -250,50 +349,56 @@ pub fn start_master(
     }
 
     // (4) Env-var passphrase.
+    //
+    // When `key_passphrase_env` is
+    // configured but the variable is unset or empty in the current
+    // environment (operator returned to a fresh shell after a
+    // codespace restart, forgot to re-export, etc.), do NOT hard-
+    // fail. Fall through to the keychain (4.5) and interactive
+    // prompt (5) paths so the auto-reauth flow can recover with one
+    // passphrase entry — the same UX as a first-time `inspect
+    // connect`. The previous `Err(...)` here was the failure mode
+    // surfaced during smoke: auto-reauth fired but always lost
+    // because the agent shell didn't have the env var exported.
     if let Some(var) = auth.passphrase_env {
-        let value = std::env::var(var).map_err(|_| {
-            anyhow!(
-                "passphrase env var '{var}' is not set in the current environment; \
-                 either export it or unset 'key_passphrase_env' for namespace '{ns}'",
-                ns = namespace
-            )
-        })?;
-        if value.is_empty() {
-            return Err(anyhow!("passphrase env var '{var}' is empty"));
+        match std::env::var(var) {
+            Ok(value) if !value.is_empty() => {
+                let askpass = AskpassScript::new(var)?;
+                run_master(
+                    target,
+                    ttl,
+                    &socket,
+                    &askpass.env_vars(),
+                    /*batch=*/ false,
+                )
+                .with_context(|| format!("ssh master failed using env var '{var}'"))?;
+                // Best-effort: nothing to zeroize — the secret stays
+                // in the user's environment until they unset it. We
+                // never copy it.
+                let _ = value;
+                return Ok(ConnectOutcome {
+                    auth_mode: AuthMode::EnvPassphrase,
+                    socket: Some(socket),
+                    ttl: ttl.to_string(),
+                });
+            }
+            _ => {
+                // Unset or empty — fall through to keychain +
+                // interactive prompt below. The interactive prompt
+                // mentions the env var name in its hint so the
+                // operator knows they could also export it for
+                // unattended runs.
+            }
         }
-        let askpass = AskpassScript::new(var)?;
-        run_master(
-            target,
-            ttl,
-            &socket,
-            &askpass.env_vars(),
-            /*batch=*/ false,
-        )
-        .with_context(|| format!("ssh master failed using env var '{var}'"))?;
-        // Best-effort: nothing to zeroize — the secret stays in the user's
-        // environment until they unset it. We never copy it.
-        let _ = value;
-        return Ok(ConnectOutcome {
-            auth_mode: AuthMode::EnvPassphrase,
-            socket: Some(socket),
-            ttl: ttl.to_string(),
-        });
     }
 
-    // (5) Interactive.
-    if auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let prompt = format!(
-            "Enter passphrase for SSH key (namespace '{namespace}', host {host}): ",
-            host = target.host
-        );
-        let mut secret = rpassword::prompt_password(&prompt)?;
-        if secret.is_empty() {
-            return Err(anyhow!("empty passphrase; aborting"));
-        }
-        // Place the secret into a private env var that the askpass helper
-        // reads, then immediately wipe our local copy.
-        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &secret);
-        zeroize_string(&mut secret);
+    // (4.5) : consult the OS keychain. This step fires only
+    // when an entry was previously saved for `namespace`; missing
+    // entries (or backend errors) silently fall through to the
+    // interactive prompt below — we never spam stderr on every connect
+    // because the keychain is uninitialized.
+    if let Ok(Some(stored)) = crate::keychain::get(namespace) {
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, &stored);
         let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE)?;
         let result = run_master(
             target,
@@ -302,19 +407,49 @@ pub fn start_master(
             &askpass.env_vars(),
             /*batch=*/ false,
         );
-        // Always remove the env var afterward, success or failure.
         std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
-        result.context("ssh master failed using interactive passphrase")?;
+        // Wipe the local copy regardless of success.
+        let mut wipe = stored;
+        zeroize_string(&mut wipe);
+        result.with_context(|| {
+            format!(
+                "ssh master failed using stored keychain entry for '{namespace}'. \
+             hint: if the credential rotated, run 'inspect keychain remove {namespace}' \
+             and reconnect to re-save"
+            )
+        })?;
         return Ok(ConnectOutcome {
-            auth_mode: AuthMode::InteractivePrompt,
+            auth_mode: AuthMode::KeychainPassphrase,
             socket: Some(socket),
             ttl: ttl.to_string(),
         });
     }
 
+    // (5) Interactive — N-attempt retry loop shared with the
+    // password-auth path so wrong passphrase / wrong password have
+    // identical UX. auto-reauth rides this loop too because
+    // `reauth_namespace` calls `start_master`.
+    if auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return run_interactive_master_with_retries(
+            namespace,
+            target,
+            ttl,
+            &socket,
+            auth.save_to_keychain,
+            InteractiveAuthConfig::key_passphrase(),
+        );
+    }
+
+    let env_hint = match auth.passphrase_env {
+        Some(var) => format!(
+            "key_passphrase_env='{var}' configured but the variable is \
+             not set in the current environment"
+        ),
+        None => "no key_passphrase_env configured".to_string(),
+    };
     Err(anyhow!(
         "could not authenticate to '{}@{}:{}': no agent identity, \
-         no key_passphrase_env configured, and stdin is not a TTY",
+         {env_hint}, no keychain entry, and stdin is not a TTY",
         target.user,
         target.host,
         target.port
@@ -328,6 +463,35 @@ fn run_master(
     extra_env: &[(OsString, OsString)],
     batch: bool,
 ) -> Result<()> {
+    run_master_with_opts(target, ttl, socket, extra_env, batch, &[])
+}
+
+/// Build the `ssh -fN` master-start command without spawning it.
+/// Extracted from [`run_master_with_opts`] so unit tests can assert on
+/// the argument list (notably the `StrictHostKeyChecking=accept-new`
+/// flag that prevents the first-connect-to-unknown-host askpass loop —
+/// see the field-validated invariants in `CLAUDE.md`).
+///
+/// `StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6) auto-adds an
+/// unknown host's key to `~/.ssh/known_hosts` on first connect. If the
+/// host's key later changes, ssh refuses to connect with
+/// `Host key verification failed.`, which `ssh_precheck::classify`
+/// catches and surfaces as a security-sensitive HostKeyChanged error.
+/// Without this flag, OpenSSH defaults to `StrictHostKeyChecking=ask`,
+/// which under `SSH_ASKPASS_REQUIRE=force` invokes our askpass for the
+/// host-key confirmation prompt — but the askpass returns the
+/// passphrase value (it's a passphrase helper, not a yes/no helper),
+/// so ssh sees garbage, reprompts, and we burn turns in a tight loop
+/// until the operator ^C's. (Smoke-caught: arte's known_hosts entry
+/// was wiped on codespace restart, the auto-reauth path hung 41+
+/// askpass invocations into the host-key prompt loop.)
+fn build_master_command(
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    batch: bool,
+    extra_ssh_opts: &[&str],
+) -> Command {
     let mut cmd = Command::new(SSH_BIN);
     cmd.arg("-fN") // background master, no remote command
         .arg("-o")
@@ -341,16 +505,51 @@ fn run_master(
         .arg("-o")
         .arg("ServerAliveCountMax=3")
         .arg("-o")
-        .arg(format!("ConnectTimeout={}", connect_timeout_secs()));
+        .arg(format!("ConnectTimeout={}", connect_timeout_secs()))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new");
     apply_extra_opts(&mut cmd);
+    for opt in extra_ssh_opts {
+        cmd.arg("-o").arg(opt);
+    }
     if batch {
         cmd.arg("-o").arg("BatchMode=yes");
     }
     cmd.args(target.base_args()).arg(&target.host);
+    cmd
+}
+
+/// Like `run_master` but with caller-supplied ssh `-o`
+/// options appended (e.g. `PreferredAuthentications=password` for
+/// the password-auth branch). Each entry is a single `KEY=VALUE`
+/// string, applied as `-o KEY=VALUE`.
+fn run_master_with_opts(
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    extra_env: &[(OsString, OsString)],
+    batch: bool,
+    extra_ssh_opts: &[&str],
+) -> Result<()> {
+    let mut cmd = build_master_command(target, ttl, socket, batch, extra_ssh_opts);
 
     cmd.stdin(Stdio::null());
-    // Surface stderr so users can see ssh's diagnostics directly.
-    cmd.stderr(Stdio::inherit());
+    // Surface stderr so operators can see ssh's diagnostics directly
+    // — EXCEPT when this is a BatchMode probe. The probe is the
+    // first step of the fallthrough ladder (agent / passphrase-less
+    // key) and is *expected* to fail when the only available
+    // identity is an encrypted key with no agent. Printing
+    // "Permission denied (publickey)" before the interactive
+    // passphrase prompt makes operators think auth failed and
+    // their entered passphrase was wrong, when in fact the prompt
+    // itself is the recovery path. Capture and discard probe
+    // stderr; the real attempt that follows runs with stderr
+    // inherited so any genuine failure surfaces.
+    if batch {
+        cmd.stderr(Stdio::null());
+    } else {
+        cmd.stderr(Stdio::inherit());
+    }
     cmd.stdout(Stdio::null());
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -417,4 +616,811 @@ fn apply_extra_opts(cmd: &mut Command) {
 /// none right now (no askpass needed for `-O exit`) but keep the seam.
 fn extra_env_pairs() -> Vec<(OsString, OsString)> {
     Vec::new()
+}
+
+/// Ssh `-o` options that switch a master attempt to
+/// password authentication only. `PubkeyAuthentication=no` ensures
+/// an agent-loaded key cannot pre-empt the operator's intent;
+/// `NumberOfPasswordPrompts=1` makes one ssh invocation = one
+/// password attempt so the per-call retry loop in
+/// `start_master_password` controls the total attempt count.
+const PASSWORD_AUTH_SSH_OPTS: &[&str] = &[
+    "PreferredAuthentications=password",
+    "PubkeyAuthentication=no",
+    "NumberOfPasswordPrompts=1",
+];
+
+/// Password-auth branch of `start_master`. Tries
+/// `password_env` first when set; otherwise prompts on the
+/// controlling tty (when `allow_interactive`); retries up to
+/// `PASSWORD_MAX_ATTEMPTS` times on auth failure.
+fn start_master_password(
+    namespace: &str,
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    auth: &AuthSelection<'_>,
+) -> Result<ConnectOutcome> {
+    // Path A: env-var password.
+    if let Some(var) = auth.password_env {
+        let value = std::env::var(var).map_err(|_| {
+            anyhow!(
+                "password env var '{var}' is not set in the current environment; \
+                 either export it or unset 'password_env' for namespace '{ns}'",
+                ns = namespace
+            )
+        })?;
+        if value.is_empty() {
+            return Err(anyhow!("password env var '{var}' is empty"));
+        }
+        let askpass = AskpassScript::new(var)?;
+        run_master_with_opts(
+            target,
+            ttl,
+            socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+            PASSWORD_AUTH_SSH_OPTS,
+        )
+        .with_context(|| format!("ssh master failed using password env var '{var}'"))?;
+        let _ = value;
+        maybe_warn_password_auth(namespace);
+        return Ok(ConnectOutcome {
+            auth_mode: AuthMode::EnvPassword,
+            socket: Some(socket.to_path_buf()),
+            ttl: ttl.to_string(),
+        });
+    }
+
+    // Consult the OS keychain before prompting. Mirrors
+    // the key-auth path; missing entry / backend error → silent fall
+    // through to the prompt loop. A keychain hit costs no attempts
+    // against the PASSWORD_MAX_ATTEMPTS counter (the operator's stored
+    // credential is presumed correct; if it isn't we surface a
+    // pointed error rather than burning all 3 prompts on it).
+    if let Ok(Some(stored)) = crate::keychain::get(namespace) {
+        std::env::set_var(ENV_INTERACTIVE_PASSWORD, &stored);
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSWORD)?;
+        let result = run_master_with_opts(
+            target,
+            ttl,
+            socket,
+            &askpass.env_vars(),
+            /*batch=*/ false,
+            PASSWORD_AUTH_SSH_OPTS,
+        );
+        std::env::remove_var(ENV_INTERACTIVE_PASSWORD);
+        let mut wipe = stored;
+        zeroize_string(&mut wipe);
+        match result {
+            Ok(()) => {
+                maybe_warn_password_auth(namespace);
+                return Ok(ConnectOutcome {
+                    auth_mode: AuthMode::KeychainPassword,
+                    socket: Some(socket.to_path_buf()),
+                    ttl: ttl.to_string(),
+                });
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "ssh master failed using stored keychain password for '{namespace}': {e}. \
+                     hint: if the password rotated, run \
+                     'inspect keychain remove {namespace}' and reconnect to re-save"
+                ));
+            }
+        }
+    }
+
+    // Path B: interactive prompt — N-attempt retry loop shared with
+    // the key-auth path so wrong-password and wrong-passphrase have
+    // identical UX.
+    if !(auth.allow_interactive && std::io::IsTerminal::is_terminal(&std::io::stdin())) {
+        return Err(anyhow!(
+            "namespace '{namespace}' uses password auth but no \
+             password_env is set, no keychain entry exists, and stdin is not a TTY \
+             (no way to prompt). \
+             hint: export the password into an env var and add \
+             `password_env = \"VAR_NAME\"` to ~/.inspect/servers.toml, or \
+             rerun interactively. see: inspect help ssh"
+        ));
+    }
+
+    run_interactive_master_with_retries(
+        namespace,
+        target,
+        ttl,
+        socket,
+        auth.save_to_keychain,
+        InteractiveAuthConfig::password(),
+    )
+}
+
+/// Configuration for [`run_interactive_master_with_retries`]: the
+/// per-flavor knobs (env-var name, prompt label, auth-mode result,
+/// ssh `-o` opts, success/failure hint text) that differ between the
+/// key-passphrase and password code paths. Everything else — the loop
+/// shape, attempt counter, eprintln warning format, env-var
+/// set/remove, askpass setup, secret zeroize, keychain save — is
+/// shared.
+struct InteractiveAuthConfig {
+    /// `PASSPHRASE_MAX_ATTEMPTS` for key auth, `PASSWORD_MAX_ATTEMPTS`
+    /// for password auth.
+    max_attempts: usize,
+    /// `ENV_INTERACTIVE_PASSPHRASE` for key auth,
+    /// `ENV_INTERACTIVE_PASSWORD` for password auth.
+    env_var: &'static str,
+    /// Inserted into the rpassword prompt:
+    /// `"Enter <prompt_label> (namespace 'arte', host ..., attempt 1/3): "`.
+    /// Key auth: `"passphrase for SSH key"`. Password auth: `"SSH password"`.
+    prompt_label: &'static str,
+    /// `"passphrase"` / `"password"` — singular noun used for the
+    /// `"empty <kind>; aborting"` error and the
+    /// `"warning: ssh <kind> attempt N/3 failed"` line.
+    kind: &'static str,
+    /// `"key passphrase"` / `"SSH password"` — passed to
+    /// [`save_credential_to_keychain`] so the operator notice on
+    /// successful save names the credential type clearly.
+    save_kind: &'static str,
+    /// `AuthMode::InteractivePrompt` / `AuthMode::InteractivePassword`
+    /// — populates the [`ConnectOutcome::auth_mode`] of the success
+    /// path so JSON callers and the SUMMARY trailer can branch.
+    auth_mode: AuthMode,
+    /// Empty `&[]` for key auth; [`PASSWORD_AUTH_SSH_OPTS`] for
+    /// password auth (forces `PreferredAuthentications=password`,
+    /// `PubkeyAuthentication=no`, `NumberOfPasswordPrompts=1`).
+    ssh_opts: &'static [&'static str],
+    /// Hook called once after a successful master start. None for
+    /// key auth; `Some(maybe_warn_password_auth)` for password auth
+    /// (one-time "password auth is less secure" warning).
+    on_success: Option<fn(&str)>,
+    /// Tail of the "all attempts exhausted" error message:
+    /// `"ssh <kind> auth for '<ns>' failed after N attempt(s); aborting. hint: <hint>"`.
+    final_hint: &'static str,
+    /// First-connect UX: when `true` and `target.key_path` is `Some`,
+    /// run a local `ssh-keygen -y -f <key>` pre-flight against the
+    /// entered secret BEFORE spawning the full ssh master. A wrong
+    /// passphrase fails locally in ~10ms (just key-file decryption);
+    /// the alternative is a full SSH handshake against the remote
+    /// host (TCP + KEX + auth) which is ~1-3s on a typical
+    /// internet-RTT host. ssh-add gets ~10ms retries for the same
+    /// reason — local-only verification. Only meaningful for key
+    /// auth (a password is the *server's* secret; nothing local
+    /// to validate against). Password auth sets this `false`.
+    pre_validate_locally: bool,
+}
+
+impl InteractiveAuthConfig {
+    fn key_passphrase() -> Self {
+        Self {
+            max_attempts: PASSPHRASE_MAX_ATTEMPTS,
+            env_var: ENV_INTERACTIVE_PASSPHRASE,
+            prompt_label: "passphrase for SSH key",
+            kind: "passphrase",
+            save_kind: "key passphrase",
+            auth_mode: AuthMode::InteractivePrompt,
+            ssh_opts: &[],
+            on_success: None,
+            final_hint: "verify the passphrase against the key directly \
+                         (e.g. `ssh-keygen -y -f <key_path>`), then retry. \
+                         see: inspect help ssh",
+            pre_validate_locally: true,
+        }
+    }
+
+    fn password() -> Self {
+        Self {
+            max_attempts: PASSWORD_MAX_ATTEMPTS,
+            env_var: ENV_INTERACTIVE_PASSWORD,
+            prompt_label: "SSH password",
+            kind: "password",
+            save_kind: "SSH password",
+            auth_mode: AuthMode::InteractivePassword,
+            ssh_opts: PASSWORD_AUTH_SSH_OPTS,
+            on_success: Some(maybe_warn_password_auth),
+            final_hint: "verify the password against the host directly, then retry. \
+                         see: inspect help ssh",
+            // Password auth has nothing local to validate against —
+            // the secret is the remote sshd's, not a local key file.
+            pre_validate_locally: false,
+        }
+    }
+}
+
+/// First-connect UX optimization: validate that `secret` (already
+/// placed in the env var named `env_var`) decrypts the local key
+/// file at `key_path`, BEFORE spawning the full ssh master. A
+/// wrong passphrase fails here in ~10ms (just local key-file
+/// decryption — no network); without this, every wrong-passphrase
+/// retry costs a full ssh handshake (TCP + KEX + auth + close)
+/// against the remote host, which on internet RTT is ~1-3s.
+///
+/// Mechanism: `ssh-keygen -y -f <key_path>` reads the private key,
+/// asks for the passphrase, and writes the public key on success.
+/// We set `SSH_ASKPASS_REQUIRE=force` so ssh-keygen invokes our
+/// askpass helper (which echoes the env-var value) instead of
+/// prompting on the TTY. stdout/stderr are swallowed — we only
+/// care about the exit code.
+///
+/// Returns `Ok(())` if the passphrase decrypts the key (local
+/// fast-path: the network attempt that follows is now reasonably
+/// likely to succeed). Returns `Err(...)` with a parsed
+/// "wrong passphrase" hint when ssh-keygen rejects, so the
+/// per-attempt warning surfaces a meaningful root cause instead
+/// of a network-side `Permission denied (publickey)` that
+/// arrived ~2 seconds later.
+///
+/// Defensive against environments where ssh-keygen is missing
+/// (the binary is shipped with every OpenSSH client and is on
+/// PATH everywhere we run today, but if it's somehow absent the
+/// returned error chains to "install openssh-client" rather than
+/// silently false-positive).
+fn validate_key_passphrase_locally(key_path: &Path, askpass: &AskpassScript) -> Result<()> {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.arg("-y").arg("-f").arg(key_path);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+    for (k, v) in askpass.env_vars() {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().with_context(|| {
+        "failed to invoke 'ssh-keygen' for local passphrase validation \
+         (is openssh-client installed and on PATH?)"
+            .to_string()
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_string();
+    if stderr.is_empty() {
+        Err(anyhow!(
+            "ssh-keygen rejected passphrase (exit {})",
+            output.status.code().unwrap_or(-1)
+        ))
+    } else {
+        Err(anyhow!("ssh-keygen rejected passphrase: {stderr}"))
+    }
+}
+
+/// Smoke-caught: the shared prompt-attempt-warn-retry loop
+/// for both interactive auth flavors. The key-auth path used to be a
+/// single-shot prompt — one wrong passphrase aborted the entire
+/// connect (and any auto-reauth) with `auto-reauth for '<ns>'
+/// failed`, while password auth had three attempts. The two paths
+/// now share this helper so the trap class — "two interactive auth
+/// flavors with divergent retry UX" — cannot reappear.
+///
+/// Per-attempt:
+/// 1. `rpassword::prompt_password` reads the secret. Empty input
+///    aborts the loop immediately (operator gave up).
+/// 2. The secret is placed into the configured env var; the askpass
+///    helper points at the env var; ssh runs with
+///    `SSH_ASKPASS_REQUIRE=force` and resolves the passphrase /
+///    password through the helper.
+/// 3. The env var is removed, the secret optionally persisted to
+///    the OS keychain (`--save-passphrase`), and the local copy
+///    zeroized — regardless of success or failure.
+/// 4. On `Ok`, return [`ConnectOutcome`] with the configured
+///    [`AuthMode`]; the caller-supplied `on_success` hook fires
+///    (e.g. `maybe_warn_password_auth`).
+/// 5. On `Err`, emit `warning: ssh <kind> attempt N/M failed` to
+///    stderr and continue.
+///
+/// After all attempts exhausted, emit a final error chaining to
+/// `inspect help ssh` and the auth-flavor-specific recovery hint.
+fn run_interactive_master_with_retries(
+    namespace: &str,
+    target: &SshTarget,
+    ttl: &str,
+    socket: &Path,
+    save_to_keychain: bool,
+    config: InteractiveAuthConfig,
+) -> Result<ConnectOutcome> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=config.max_attempts {
+        let prompt = format!(
+            "Enter {label} (namespace '{namespace}', host {host}, attempt {attempt}/{max}): ",
+            label = config.prompt_label,
+            host = target.host,
+            max = config.max_attempts,
+        );
+        let mut secret = rpassword::prompt_password(&prompt)?;
+        if secret.is_empty() {
+            // Empty input is equivalent to giving up; do not consume an attempt slot.
+            zeroize_string(&mut secret);
+            return Err(anyhow!(
+                "empty {kind}; aborting. see: inspect help ssh",
+                kind = config.kind
+            ));
+        }
+        std::env::set_var(config.env_var, &secret);
+        let askpass = AskpassScript::new(config.env_var)?;
+        // First-connect UX: when configured (key auth only), pre-
+        // validate the passphrase locally via `ssh-keygen -y -f`
+        // before spending an SSH handshake. A wrong passphrase
+        // fails here in milliseconds rather than ~1-3s for a full
+        // network attempt (matches ssh-add's retry feel).
+        let result: Result<()> = if config.pre_validate_locally {
+            match target.key_path.as_deref() {
+                Some(key_path) => match validate_key_passphrase_locally(key_path, &askpass) {
+                    Ok(()) => run_master_with_opts(
+                        target,
+                        ttl,
+                        socket,
+                        &askpass.env_vars(),
+                        /*batch=*/ false,
+                        config.ssh_opts,
+                    ),
+                    Err(e) => Err(e),
+                },
+                // No key_path on the target (shouldn't happen for
+                // key auth — the resolver enforces it — but stay
+                // defensive: skip pre-validation, fall back to the
+                // full network attempt.)
+                None => run_master_with_opts(
+                    target,
+                    ttl,
+                    socket,
+                    &askpass.env_vars(),
+                    /*batch=*/ false,
+                    config.ssh_opts,
+                ),
+            }
+        } else {
+            run_master_with_opts(
+                target,
+                ttl,
+                socket,
+                &askpass.env_vars(),
+                /*batch=*/ false,
+                config.ssh_opts,
+            )
+        };
+        std::env::remove_var(config.env_var);
+        // Save BEFORE wiping if requested AND the master
+        // came up. Backend errors are warnings, not hard failures.
+        if result.is_ok() && save_to_keychain {
+            save_credential_to_keychain(namespace, &secret, config.save_kind);
+        }
+        zeroize_string(&mut secret);
+        match result {
+            Ok(()) => {
+                if let Some(hook) = config.on_success {
+                    hook(namespace);
+                }
+                return Ok(ConnectOutcome {
+                    auth_mode: config.auth_mode,
+                    socket: Some(socket.to_path_buf()),
+                    ttl: ttl.to_string(),
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: ssh {kind} attempt {attempt}/{max} failed",
+                    kind = config.kind,
+                    max = config.max_attempts,
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(anyhow!(
+        "ssh {kind} auth for '{namespace}' failed after {n} attempt(s); \
+         aborting. hint: {hint}\nlast error: {last}",
+        kind = config.kind,
+        n = config.max_attempts,
+        hint = config.final_hint,
+        last = last_err
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+    ))
+}
+
+/// Per-namespace marker that records whether we have
+/// already shown the "password auth is less secure" warning for this
+/// namespace. `~/.inspect/.password_warned/<ns>` (touched on first
+/// successful password connect, deleted by `inspect ssh add-key`
+/// when the operator migrates off password auth so a re-onboarding
+/// re-warns).
+pub fn password_warned_path(namespace: &str) -> PathBuf {
+    paths::inspect_home()
+        .join(".password_warned")
+        .join(namespace)
+}
+
+/// Save a credential to the OS keychain after a
+/// successful interactive master start when the operator passed
+/// `--save-passphrase`. Backend errors are warnings, not hard
+/// failures — the master is already up, so the connect verb has
+/// succeeded; the operator just won't get cross-session reuse.
+fn save_credential_to_keychain(namespace: &str, secret: &str, kind: &str) {
+    match crate::keychain::save(namespace, secret) {
+        Ok(crate::keychain::SaveOutcome::Saved) => {
+            eprintln!(
+                "note: saved {kind} to OS keychain for '{namespace}' (cross-session reuse enabled). \
+                 Use 'inspect keychain remove {namespace}' to undo."
+            );
+        }
+        Ok(crate::keychain::SaveOutcome::AlreadyPresent) => {
+            // Idempotent re-save — silent. The operator passed
+            // --save-passphrase but the keychain already had this
+            // exact secret. No action needed.
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: keychain save for '{namespace}' failed: {e}. \
+                 hint: 'inspect keychain test' to diagnose backend reachability. \
+                 The master came up; subsequent connects will prompt again."
+            );
+        }
+    }
+}
+
+/// Emit the one-time warning on first successful
+/// password connect for `<ns>`, then create the marker so subsequent
+/// connects stay quiet.
+fn maybe_warn_password_auth(namespace: &str) {
+    let marker = password_warned_path(namespace);
+    if marker.exists() {
+        return;
+    }
+    eprintln!(
+        "warning: password auth is less secure than key-based. \
+         Run 'inspect ssh add-key {namespace}' to migrate."
+    );
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::File::create(&marker);
+}
+
+#[cfg(test)]
+mod g5_tests {
+    use super::{validate_socket_path, SOCKET_PATH_MAX};
+    use std::path::PathBuf;
+
+    #[test]
+    fn g5_short_path_passes() {
+        let p = PathBuf::from("/tmp/i/arte.sock");
+        assert!(validate_socket_path(&p).is_ok());
+    }
+
+    #[test]
+    fn g5_path_at_cap_passes() {
+        let mut s = String::from("/");
+        s.push_str(&"a".repeat(SOCKET_PATH_MAX - 1));
+        assert_eq!(s.len(), SOCKET_PATH_MAX);
+        assert!(validate_socket_path(&PathBuf::from(s)).is_ok());
+    }
+
+    #[test]
+    fn g5_path_over_cap_fails_with_hint() {
+        let mut s = String::from("/");
+        s.push_str(&"a".repeat(SOCKET_PATH_MAX));
+        assert_eq!(s.len(), SOCKET_PATH_MAX + 1);
+        let err = validate_socket_path(&PathBuf::from(s)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("control socket path"), "msg={msg}");
+        assert!(msg.contains("INSPECT_HOME"), "msg={msg}");
+        assert!(msg.contains("inspect help ssh"), "msg={msg}");
+    }
+}
+
+#[cfg(test)]
+mod accept_new_tests {
+    use super::{build_master_command, SshTarget};
+    use std::path::PathBuf;
+
+    fn target() -> SshTarget {
+        SshTarget {
+            host: "example".into(),
+            user: "ops".into(),
+            port: 22,
+            key_path: Some(PathBuf::from("/tmp/k")),
+        }
+    }
+
+    fn args_as_strings(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Smoke-caught regression: a first-time connect to a host not in
+    /// `~/.ssh/known_hosts` hung in a tight askpass loop because
+    /// OpenSSH's default `StrictHostKeyChecking=ask` invoked our
+    /// passphrase-only askpass for the host-key confirmation prompt,
+    /// which returned the passphrase as the answer (neither
+    /// `yes`/`no`/`fingerprint`), and ssh reprompted forever.
+    /// `accept-new` makes ssh auto-add the unknown host's key to
+    /// known_hosts on first connect; HostKeyChanged still surfaces
+    /// for changed keys via the precheck classifier.
+    #[test]
+    fn build_master_command_includes_accept_new() {
+        let socket = PathBuf::from("/tmp/inspect-test.sock");
+        let cmd = build_master_command(&target(), "4h", &socket, false, &[]);
+        let args = args_as_strings(&cmd);
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "build_master_command must include StrictHostKeyChecking=accept-new \
+             so first-connect to an unknown host does not loop in askpass; \
+             args={args:?}"
+        );
+    }
+
+    /// The same flag must be present in the BatchMode probe (the
+    /// agent / passphrase-less attempt that runs before the
+    /// interactive prompt). Without it, the probe against an unknown
+    /// host fails with `Host key verification failed.` instead of
+    /// the agent-related auth error, which would wedge the auth
+    /// ladder before the prompt path could fire.
+    #[test]
+    fn build_master_command_batch_probe_includes_accept_new() {
+        let socket = PathBuf::from("/tmp/inspect-test.sock");
+        let cmd = build_master_command(&target(), "4h", &socket, true, &[]);
+        let args = args_as_strings(&cmd);
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "BatchMode probe must also accept-new so first-connect doesn't \
+             misroute through HostKeyChanged; args={args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "BatchMode=yes"),
+            "batch=true must still pass BatchMode=yes; args={args:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod interactive_retry_parity_tests {
+    //! Smoke-caught: the key-auth interactive prompt was a
+    //! single-shot — one wrong passphrase aborted the whole connect
+    //! (and any auto-reauth) with `auto-reauth for '<ns>' failed`,
+    //! while password auth had 3 retries. The two paths now share
+    //! [`run_interactive_master_with_retries`] so the cap, prompt
+    //! shape, and warning format cannot drift apart again. These
+    //! structural tests pin the parity contract — if anyone changes
+    //! one of the [`InteractiveAuthConfig`] constructors without
+    //! considering the other, these break.
+    use super::*;
+
+    #[test]
+    fn key_and_password_share_max_attempts() {
+        let key = InteractiveAuthConfig::key_passphrase();
+        let pw = InteractiveAuthConfig::password();
+        assert_eq!(
+            key.max_attempts, pw.max_attempts,
+            "key and password auth must use the same retry cap so a typo \
+             on F13 auto-reauth has the same UX as a typo on password auth"
+        );
+        // Pin the actual cap too — the help text + MANUAL + warnings
+        // all say "3 attempts"; if we ever raise it we want a
+        // deliberate cross-surface sweep, not a silent change.
+        assert_eq!(key.max_attempts, 3);
+    }
+
+    #[test]
+    fn key_and_password_use_distinct_env_vars_and_modes() {
+        let key = InteractiveAuthConfig::key_passphrase();
+        let pw = InteractiveAuthConfig::password();
+        // Distinct env vars so a key-auth retry can't ever pick up a
+        // stale password value (or vice-versa) from a previous attempt.
+        assert_ne!(key.env_var, pw.env_var);
+        // Distinct AuthMode discriminators so JSON consumers /
+        // SUMMARY trailers can branch on which flavor authenticated.
+        assert_ne!(key.auth_mode, pw.auth_mode);
+        assert_eq!(key.auth_mode, AuthMode::InteractivePrompt);
+        assert_eq!(pw.auth_mode, AuthMode::InteractivePassword);
+    }
+
+    #[test]
+    fn each_config_has_non_empty_user_facing_strings() {
+        // Defensive: empty `kind` would render as
+        // `warning: ssh  attempt 1/3 failed` (double space) or
+        // `empty ; aborting` — caught here, not in the field.
+        for c in [
+            InteractiveAuthConfig::key_passphrase(),
+            InteractiveAuthConfig::password(),
+        ] {
+            assert!(!c.prompt_label.is_empty());
+            assert!(!c.kind.is_empty());
+            assert!(!c.save_kind.is_empty());
+            assert!(!c.final_hint.is_empty());
+            // Every final-hint must chain to `inspect help ssh` per
+            // CLAUDE.md "Error messages chain to recovery."
+            assert!(
+                c.final_hint.contains("inspect help ssh"),
+                "final_hint for {kind:?} must chain to `inspect help ssh`",
+                kind = c.kind
+            );
+        }
+    }
+
+    #[test]
+    fn password_config_carries_password_auth_ssh_opts() {
+        // Without these opts a wrong-password retry would silently
+        // fall through to key auth (PubkeyAuthentication=yes default)
+        // and burn the operator's PASSWORD_MAX_ATTEMPTS budget on a
+        // key path they never asked for.
+        let pw = InteractiveAuthConfig::password();
+        assert!(pw.ssh_opts.contains(&"PreferredAuthentications=password"));
+        assert!(pw.ssh_opts.contains(&"PubkeyAuthentication=no"));
+        assert!(pw.ssh_opts.contains(&"NumberOfPasswordPrompts=1"));
+    }
+
+    #[test]
+    fn key_config_does_not_force_password_auth_opts() {
+        // Symmetric guard: a key-auth retry must NOT pass
+        // password-auth ssh opts or it would defeat key-based auth
+        // entirely on the retry path.
+        let key = InteractiveAuthConfig::key_passphrase();
+        assert!(key.ssh_opts.is_empty());
+    }
+
+    #[test]
+    fn pre_validate_locally_only_set_for_key_auth() {
+        // Local pre-validation requires a local key file to
+        // decrypt against. Password auth has no local artifact —
+        // the secret is the remote sshd's, so pre-validation is
+        // impossible by definition. Pinning the asymmetry here so
+        // a future refactor can't silently flip the password flavor
+        // and start spawning ssh-keygen against nothing.
+        assert!(InteractiveAuthConfig::key_passphrase().pre_validate_locally);
+        assert!(!InteractiveAuthConfig::password().pre_validate_locally);
+    }
+}
+
+#[cfg(test)]
+mod local_passphrase_validation_tests {
+    //! End-to-end test of the `ssh-keygen -y -f` local pre-flight.
+    //! Generates a real ed25519 keypair with a known passphrase
+    //! into a tempdir, then exercises both the right-passphrase and
+    //! wrong-passphrase paths via the same `AskpassScript +
+    //! validate_key_passphrase_locally` pipeline that
+    //! `run_interactive_master_with_retries` uses in production.
+    //!
+    //! Skipped when ssh-keygen is not on PATH (CI hosts without
+    //! openssh-client installed). The CLAUDE.md pre-commit gate
+    //! runs on dev machines that have OpenSSH so this is the
+    //! authoritative behavior pin; environment-skipped CI is OK
+    //! because `pre_validate_locally_only_set_for_key_auth`
+    //! covers the structural contract regardless.
+    use super::*;
+
+    /// Serialize tests that mutate `INSPECT_INTERACTIVE_PASSPHRASE`.
+    /// Mirror of the pattern documented in CLAUDE.md "WSL `cargo`
+    /// PATH" / `cancel::tests::test_lock` — `std::env::set_var` is
+    /// process-global and unsafe across threads, so any test touching
+    /// the same key must take this mutex. Without it, parallel test
+    /// runs alternate values mid-flight and the askpass child reads
+    /// whichever value was set most recently.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn ssh_keygen_available() -> bool {
+        Command::new("ssh-keygen")
+            .arg("-?")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.code().is_some())
+            .unwrap_or(false)
+    }
+
+    fn generate_encrypted_ed25519(dir: &Path, passphrase: &str) -> PathBuf {
+        let key_path = dir.join("id_ed25519_test");
+        let status = Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&key_path)
+            .arg("-N")
+            .arg(passphrase)
+            .arg("-C")
+            .arg("inspect-test-key")
+            .arg("-q")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("ssh-keygen -t ed25519");
+        assert!(status.success(), "ssh-keygen keygen failed");
+        // Modern OpenSSH refuses to load private keys whose
+        // permissions are group- or world-readable. ssh-keygen
+        // honors the process umask when it writes the key, so on a
+        // host with umask 0022 (the default in many CI / codespace
+        // images) the file lands as 0644 and every subsequent ssh /
+        // ssh-keygen invocation that touches it fails with
+        // "Permissions 0644 ... are too open." Tighten to 0600
+        // explicitly so the fixture is portable across umask
+        // settings.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&key_path)
+                .expect("stat fixture key")
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&key_path, perms).expect("chmod 0600 fixture key");
+        }
+        key_path
+    }
+
+    #[test]
+    fn right_passphrase_validates_in_milliseconds() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let key = generate_encrypted_ed25519(tmp.path(), "correct-horse-battery-staple");
+        // Set the env var the askpass script reads through.
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "correct-horse-battery-staple");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let started = std::time::Instant::now();
+        let result = validate_key_passphrase_locally(&key, &askpass);
+        let elapsed = started.elapsed();
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(
+            result.is_ok(),
+            "right passphrase must validate; got {:?}",
+            result.err()
+        );
+        // Local validation should be ≪ 1s on any reasonable host —
+        // pin a generous ceiling that still catches a regression
+        // where someone accidentally re-introduces a network call.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "local validation took {elapsed:?}, expected <2s"
+        );
+    }
+
+    #[test]
+    fn wrong_passphrase_rejected_locally() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let key = generate_encrypted_ed25519(tmp.path(), "the-real-passphrase");
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "wrong-on-purpose");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let result = validate_key_passphrase_locally(&key, &askpass);
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(
+            result.is_err(),
+            "wrong passphrase must be rejected; got Ok unexpectedly"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("ssh-keygen rejected passphrase"),
+            "error must surface ssh-keygen rejection root cause; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_key_file_surfaces_clean_error() {
+        let _g = env_lock();
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = tmp.path().join("nope");
+        std::env::set_var(ENV_INTERACTIVE_PASSPHRASE, "anything");
+        let askpass = AskpassScript::new(ENV_INTERACTIVE_PASSPHRASE).expect("askpass");
+        let result = validate_key_passphrase_locally(&nonexistent, &askpass);
+        std::env::remove_var(ENV_INTERACTIVE_PASSPHRASE);
+        assert!(result.is_err());
+    }
 }

@@ -20,13 +20,16 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
+    // Activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
 
     let (runner, nses, targets) = plan(&args.selector)?;
 
-    // P10 (v0.1.1): --reset-cursor and --since-last mirror the logs verb.
+    // --reset-cursor and --since-last mirror the logs verb.
     if args.reset_cursor {
         let mut deleted = 0usize;
         for step in iter_steps(&nses, &targets) {
@@ -36,7 +39,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
             }
         }
         if !args.format.is_json() {
-            eprintln!("reset {deleted} cursor(s)");
+            crate::tee_eprintln!("reset {deleted} cursor(s)");
         }
         return Ok(ExitKind::Success);
     }
@@ -44,8 +47,18 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
     let case_insensitive = resolve_case(&args);
     let mut matches = 0usize;
 
+    // Construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted.
+    let mut select = args.format.select_filter()?;
+
     for step in iter_steps(&nses, &targets) {
         let svc_for_cursor = step.service().unwrap_or("_").to_string();
+        // One redactor per step. Grep emits matched lines
+        // verbatim from the remote pipeline — anything that would
+        // otherwise be a bare token in the operator's terminal goes
+        // through the four-masker chain first.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
         if args.since_last {
             let prev = crate::verbs::cursor::Cursor::load(&step.ns.namespace, &svc_for_cursor)?;
             let since = match &prev {
@@ -56,7 +69,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
             let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_for_cursor);
             if let Err(e) = now.save() {
                 if !args.format.is_json() {
-                    eprintln!("warn: failed to save cursor: {e}");
+                    crate::tee_eprintln!("warn: failed to save cursor: {e}");
                 }
             }
         }
@@ -74,7 +87,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         // grep exits 1 on no match; treat as non-error.
         if !out.ok() && out.exit_code != 1 {
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: grep failed (exit {}): {}",
                     step.ns.namespace,
                     out.exit_code,
@@ -101,14 +114,22 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                     &Envelope::new(&step.ns.namespace, medium, &source)
                         .with_service(&svc)
                         .put("count", n),
-                );
+                    select.as_mut(),
+                )?;
             } else {
-                println!("{}/{}: {n}", step.ns.namespace, svc);
+                crate::tee_println!("{}/{}: {n}", step.ns.namespace, svc);
             }
             continue;
         }
 
         for line in out.stdout.lines() {
+            // Redact before counting — a line that is
+            // entirely consumed by the PEM masker (interior block
+            // line) is not a real match for the operator either.
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => continue,
+            };
             matches += 1;
             if args.format.is_json() {
                 JsonOut::write(
@@ -116,17 +137,22 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
                         .with_service(&svc)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{}/{} | {safe}", step.ns.namespace, svc);
+                crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc);
             }
         }
+    }
+
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     Ok(if matches > 0 {
@@ -189,7 +215,10 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
 
     if let Some(path) = step.path.as_deref() {
         let inner = format!("{tool_bin}{flags} -- {pat} {}{suf}", shquote(path));
-        return match step.service() {
+        // Docker exec must receive the
+        // container_name, not the canonical service name. See
+        // `Step::container()` doc; same fix shipped for cat/ls/find.
+        return match step.container() {
             Some(svc) => format!("docker exec {} sh -c {}", shquote(svc), shquote(&inner)),
             None => inner,
         };
@@ -211,6 +240,10 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
             }
             s
         } else {
+            // `Docker logs` takes the
+            // container_name; only the systemd journalctl branch
+            // above keeps the canonical name (which IS the unit name).
+            let docker_name = step.container().unwrap_or(svc);
             let mut s = String::from("docker logs");
             if let Some(since) = &args.since {
                 s.push_str(" --since ");
@@ -220,7 +253,7 @@ fn build_grep_cmd(step: &Step<'_>, args: &GrepArgs, ci: bool, profile: Option<&P
                 s.push_str(&format!(" --tail {tail}"));
             }
             s.push(' ');
-            s.push_str(&shquote(svc));
+            s.push_str(&shquote(docker_name));
             s.push_str(" 2>&1");
             s
         };

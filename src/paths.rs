@@ -17,8 +17,33 @@ pub fn inspect_home() -> PathBuf {
             return PathBuf::from(custom);
         }
     }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".inspect")
+}
+
+/// Native replacement for `dirs::home_dir()` per the Dependency
+/// Policy in CLAUDE.md. Reads `$HOME` on unix, `%USERPROFILE%` on
+/// windows. Returns `None` if the env var is unset or empty (matches
+/// the `dirs` crate's behavior on these platforms — no Win SHGetKnownFolderPath
+/// fallback because `inspect` is unix-first and the Windows path is
+/// only there for `cargo test` on dev workstations).
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 pub fn servers_toml() -> PathBuf {
@@ -45,7 +70,15 @@ pub fn snapshots_dir() -> PathBuf {
     audit_dir().join("snapshots")
 }
 
-/// P10 (v0.1.1): root for `--since-last` cursors. One small file per
+/// Content-addressed store of script bodies forwarded
+/// via `inspect run --file` / `--stdin-script`. Each unique sha256
+/// is written once as `<sha256>.sh` (mode 0600) so audit entries can
+/// reference the body by hash without inflating the JSONL.
+pub fn scripts_dir() -> PathBuf {
+    inspect_home().join("scripts")
+}
+
+/// Root for `--since-last` cursors. One small file per
 /// (namespace, service) pair, mode 0600 inside a 0700 directory.
 pub fn cursors_dir() -> PathBuf {
     inspect_home().join("cursors")

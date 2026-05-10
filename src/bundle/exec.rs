@@ -56,6 +56,54 @@ use super::vars::{interpolate, InterpError};
 /// Default per-step timeout when the YAML doesn't override.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
 
+/// Per-branch execution outcome inside a `parallel:
+/// true` + `matrix:` step. Recorded once per matrix value at the
+/// time the branch finishes (whether ok, failed, or skipped under
+/// stop-on-first-error). Used by [`do_rollback`] to invert ONLY
+/// succeeded branches and by `inspect bundle status <id>` to render
+/// the per-branch table.
+#[derive(Debug, Clone)]
+pub(crate) struct BranchResult {
+    /// Display label for the branch — `<matrix-key>=<value>`. Stable
+    /// across reruns of the same bundle so post-mortem queries can
+    /// pivot on it.
+    pub branch_id: String,
+    /// Final status. `Ok` ⇒ inverse runs on rollback; `Failed` and
+    /// `Skipped` ⇒ no inverse fires.
+    pub status: BranchStatus,
+    /// The matrix value as the operator wrote it. Threaded into
+    /// rollback-block interpolation so `{{ matrix.<key> }}`
+    /// resolves to this branch's value (not the full matrix).
+    pub matrix_value: serde_yaml::Value,
+    /// The matrix key (the YAML map's only key, given the v0.1.2
+    /// validator caps `matrix:` at one entry). Same for every
+    /// branch in the same step; carried per-branch so the rollback
+    /// path doesn't need to thread the step pointer.
+    pub matrix_key: String,
+    // Note: the per-branch audit_id and duration_ms are recorded
+    // directly on the audit entry (see `bundle_branch` /
+    // `bundle_branch_status` in `AuditEntry`), so we don't need to
+    // mirror them here. `inspect bundle status` reads them straight
+    // from the audit log.
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchStatus {
+    Ok,
+    Failed,
+    Skipped,
+}
+
+impl BranchStatus {
+    fn as_audit_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 /// Knobs passed to [`apply`] from the CLI layer.
 pub struct ApplyOpts {
     /// Operator passed `--apply`. Without it, every `exec`/`watch`/
@@ -223,6 +271,12 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
     // Track which steps completed successfully, in declaration order,
     // so rollback can walk them in reverse.
     let mut completed: Vec<usize> = Vec::new();
+    // Per-step matrix branch ledger. Indexed by step
+    // declaration index. Populated only for `parallel: true` +
+    // `matrix:` steps (whether they completed cleanly or failed
+    // partway). [`do_rollback`] consults this map to invert ONLY the
+    // succeeded branches with per-branch matrix interpolation.
+    let mut step_branches: BTreeMap<usize, Vec<BranchResult>> = BTreeMap::new();
     let store = AuditStore::open().context("opening audit store")?;
 
     for (idx, step) in bundle.steps.iter().enumerate() {
@@ -234,6 +288,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                 &bundle_id,
                 &store,
                 &completed,
+                &step_branches,
                 None,
                 opts.no_prompt,
             );
@@ -258,7 +313,11 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
         let outcome = run_step(&*runner, bundle, step, &bundle_id, &store, &opts);
 
         match outcome {
-            Ok(()) => {
+            Ok(StepOutcome::Single) => {
+                completed.push(idx);
+            }
+            Ok(StepOutcome::Matrix(branches)) => {
+                step_branches.insert(idx, branches);
                 completed.push(idx);
             }
             Err(e) => {
@@ -266,6 +325,12 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                     "[inspect] step {step_label} `{id}` FAILED: {e}",
                     id = step.id
                 );
+                // If the failure came from a parallel
+                // matrix step, drain the per-branch ledger so
+                // do_rollback can target succeeded branches only.
+                if let Some(partial) = BranchFailureCarrier::drain() {
+                    step_branches.insert(idx, partial);
+                }
                 match &step.on_failure {
                     OnFailure::Abort => {
                         eprintln!(
@@ -285,6 +350,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                             &bundle_id,
                             &store,
                             &completed,
+                            &step_branches,
                             None,
                             opts.no_prompt,
                         );
@@ -297,6 +363,7 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                             &bundle_id,
                             &store,
                             &completed,
+                            &step_branches,
                             Some(target_id.as_str()),
                             opts.no_prompt,
                         );
@@ -327,6 +394,29 @@ pub fn apply(bundle: &Bundle, opts: ApplyOpts) -> Result<ExitKind> {
                 }
             }
         }
+    }
+
+    // Invalidate the runtime cache for every namespace any
+    // completed step touched. Bundles can run arbitrary `exec` /
+    // `run` bodies — we can't reliably classify them as mutating
+    // vs read-only at parse time, so we conservatively invalidate.
+    // Worst case: one extra `docker ps` on the next read verb.
+    // Best case: no operator ever sees stale data after a bundle
+    // run (the invariant must hold for `bundle apply` too, not
+    // just for the `restart` lifecycle verb).
+    let mut bundle_touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for &i in &completed {
+        let s = &bundle.steps[i];
+        if let Some(t) = s.target.as_deref().or(bundle.host.as_deref()) {
+            // Strip any `/service` suffix; cache is keyed by namespace.
+            let ns = t.split('/').next().unwrap_or(t).to_string();
+            if !ns.is_empty() && !ns.starts_with('@') && !ns.contains('*') {
+                bundle_touched.insert(ns);
+            }
+        }
+    }
+    for ns in &bundle_touched {
+        crate::verbs::cache::invalidate(ns);
     }
 
     let dur = started.elapsed().as_secs();
@@ -461,6 +551,28 @@ fn render_step_body(
                 .ok_or_else(|| anyhow!("step `{}`: watch body missing", step.id))?;
             return Ok(format_watch_body(w));
         }
+        // Compose: bodies render their own command at
+        // execution time via `run_compose_branch` so it can resolve
+        // the project's working_dir from the cached profile and
+        // capture compose_file_hash. Returning the YAML-shaped
+        // descriptor here keeps the body visible in dry-run / plan
+        // output without claiming to be the executable command.
+        StepBodyKind::Compose => {
+            let spec = step
+                .compose
+                .as_ref()
+                .ok_or_else(|| anyhow!("step `{}`: compose body missing", step.id))?;
+            let svc = spec
+                .service
+                .as_deref()
+                .map(|s| format!(" service={s}"))
+                .unwrap_or_default();
+            return Ok(format!(
+                "compose {action} project={proj}{svc}",
+                action = spec.action.as_str(),
+                proj = spec.project,
+            ));
+        }
     };
     interpolate(raw, vars, matrix).map_err(|e: InterpError| anyhow!("step `{}`: {e}", step.id))
 }
@@ -489,6 +601,16 @@ fn format_watch_body(w: &super::schema::WatchStep) -> String {
 }
 
 /// Run a single step (with fan-out for `parallel: true` matrix steps).
+/// Outcome of one step. `Single` is a normal
+/// (non-matrix) step — the apply loop tracks it in `completed` but
+/// has no per-branch records to rollback against. `Matrix` carries
+/// the per-branch results so [`do_rollback`] can iterate ONLY the
+/// succeeded branches with per-branch matrix interpolation.
+pub(crate) enum StepOutcome {
+    Single,
+    Matrix(Vec<BranchResult>),
+}
+
 fn run_step(
     runner: &dyn RemoteRunner,
     bundle: &Bundle,
@@ -496,12 +618,14 @@ fn run_step(
     bundle_id: &str,
     store: &AuditStore,
     opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<StepOutcome> {
     let kind = step.body_kind().map_err(|e| anyhow!("{e}"))?;
 
     // `--apply` gate per step. Skipped if step opts out (`apply:
-    // false`) or if it's a read-only `run`/`watch` step.
-    let needs_apply = step.apply && matches!(kind, StepBodyKind::Exec);
+    // false`) or if it's a read-only `run`/`watch` step. :
+    // compose: bodies mutate state (up/down/pull/build/restart all do),
+    // so they go through the same gate as `exec:`.
+    let needs_apply = step.apply && matches!(kind, StepBodyKind::Exec | StepBodyKind::Compose);
     if needs_apply && !opts.apply {
         return Err(anyhow!(
             "step `{}` is destructive and `--apply` was not passed",
@@ -510,11 +634,12 @@ fn run_step(
     }
 
     if step.parallel && !step.matrix.is_empty() {
-        return run_parallel_matrix(runner, bundle, step, kind, bundle_id, store, opts);
+        let branches = run_parallel_matrix(runner, bundle, step, kind, bundle_id, store, opts)?;
+        return Ok(StepOutcome::Matrix(branches));
     }
 
     let empty_matrix = BTreeMap::new();
-    run_single_branch(
+    let _audit_id = run_single_branch(
         runner,
         bundle,
         step,
@@ -523,9 +648,18 @@ fn run_step(
         bundle_id,
         store,
         opts,
-    )
+    )?;
+    Ok(StepOutcome::Single)
 }
 
+/// Run one (possibly matrix-branch) step body. Returns the audit
+/// entry id minted for this branch when the body wrote one (every
+/// `exec` and `watch` step does; `run` is intentionally unaudited).
+/// `Matrix` is non-empty only for branches dispatched
+/// from `run_parallel_matrix`; when non-empty, the audit entry is
+/// stamped with `bundle_branch` + `bundle_branch_status` so
+/// `inspect bundle status <id>` can render per-branch outcomes
+/// without re-deriving them from `args` text.
 #[allow(clippy::too_many_arguments)]
 fn run_single_branch(
     runner: &dyn RemoteRunner,
@@ -536,7 +670,7 @@ fn run_single_branch(
     bundle_id: &str,
     store: &AuditStore,
     _opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let target_ns = step
         .target
         .as_deref()
@@ -605,14 +739,27 @@ fn run_single_branch(
             // Audit only `exec` (per Run-vs-Exec contract). Record the
             // user-authored body, not the docker-exec wrapper, so the
             // audit log matches what the operator wrote in YAML.
+            let mut audit_id: Option<String> = None;
             if matches!(kind, StepBodyKind::Exec) {
                 let mut e = AuditEntry::new("exec", target_ns);
-                e.args = body.clone();
+                // G2 (post-v0.1.3 audit hardening): redact embedded
+                // secrets in the command body before recording.
+                e.args = crate::redact::redact_for_audit(&body).into_owned();
                 e.exit = out.exit_code;
                 e.duration_ms = dur_ms;
                 e.reason = crate::safety::validate_reason(reason.as_deref())?;
                 e.bundle_id = Some(bundle_id.to_string());
                 e.bundle_step = Some(step.id.clone());
+                // Stamp matrix-branch metadata when this
+                // single-branch run is the per-branch leg of a
+                // `parallel: true` + `matrix:` step.
+                if let Some((mkey, mval)) = matrix.iter().next() {
+                    let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+                    e.bundle_branch = Some(format!("{mkey}={label}"));
+                    e.bundle_branch_status =
+                        Some(if out.ok() { "ok" } else { "failed" }.to_string());
+                }
+                audit_id = Some(e.id.clone());
                 let _ = store.append(&e);
             }
 
@@ -623,7 +770,7 @@ fn run_single_branch(
                     out.stderr.trim().lines().next().unwrap_or("")
                 ));
             }
-            Ok(())
+            Ok(audit_id)
         }
         StepBodyKind::Watch => {
             let watch_step = step
@@ -648,12 +795,351 @@ fn run_single_branch(
             e.reason = crate::safety::validate_reason(reason.as_deref())?;
             e.bundle_id = Some(bundle_id.to_string());
             e.bundle_step = Some(step.id.clone());
+            // Mirror the matrix-branch metadata for
+            // watch-step branches so `inspect bundle status` can
+            // group them alongside the exec-step branches.
+            if let Some((mkey, mval)) = matrix.iter().next() {
+                let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+                e.bundle_branch = Some(format!("{mkey}={label}"));
+                e.bundle_branch_status = Some(if code == 0 { "ok" } else { "failed" }.to_string());
+            }
+            let audit_id = Some(e.id.clone());
             let _ = store.append(&e);
             if code != 0 {
                 return Err(anyhow!("watch exit {code}"));
             }
-            Ok(())
+            Ok(audit_id)
         }
+        StepBodyKind::Compose => run_compose_branch(
+            runner,
+            bundle,
+            step,
+            matrix,
+            bundle_id,
+            store,
+            target_ns,
+            reason.as_deref(),
+            timeout_secs,
+            started,
+        ),
+    }
+}
+
+/// Execute one branch of a `compose:` step. Renders
+/// the docker compose command, captures the live compose-file hash
+/// for the audit, runs the command, and stamps an audit entry that
+/// matches the standalone `inspect compose <action>` shape so
+/// post-mortem queries can join across both surfaces.
+#[allow(clippy::too_many_arguments)]
+fn run_compose_branch(
+    runner: &dyn RemoteRunner,
+    bundle: &Bundle,
+    step: &Step,
+    matrix: &BTreeMap<String, serde_yaml::Value>,
+    bundle_id: &str,
+    store: &AuditStore,
+    target_ns: &str,
+    reason: Option<&str>,
+    timeout_secs: u64,
+    started: Instant,
+) -> Result<Option<String>> {
+    use crate::profile::cache::load_profile;
+    use crate::verbs::compose::write_common::{
+        build_compose_cmd, build_compose_per_service_down_cmd, compose_file_sha_short, project_tags,
+    };
+
+    let spec = step
+        .compose
+        .as_ref()
+        .ok_or_else(|| anyhow!("step `{}`: compose body missing", step.id))?;
+
+    // Plan-time-style validation re-run at execution: project must
+    // exist on the resolved namespace's cached profile. We do this
+    // here (not just at plan) because matrix interpolation may
+    // produce per-branch project names that the static plan walker
+    // can't enumerate.
+    let project_name = super::vars::interpolate(&spec.project, &bundle.vars, matrix)
+        .map_err(|e| anyhow!("step `{}` compose project: {e}", step.id))?;
+    let service_rendered = match spec.service.as_deref() {
+        Some(s) => Some(
+            super::vars::interpolate(s, &bundle.vars, matrix)
+                .map_err(|e| anyhow!("step `{}` compose service: {e}", step.id))?,
+        ),
+        None => None,
+    };
+
+    // Resolve the namespace through the standard plan/iter pipeline
+    // so we get the same SshTarget the standalone compose verbs use.
+    let (_runner_unused, nses, targets) = resolve_plan(target_ns)
+        .map_err(|e| anyhow!("step `{}`: resolving target `{target_ns}`: {e}", step.id))?;
+    let resolved: Vec<_> = iter_steps(&nses, &targets).collect();
+    let rstep = resolved.first().ok_or_else(|| {
+        anyhow!(
+            "step `{}`: target `{target_ns}` matched no resources",
+            step.id
+        )
+    })?;
+    let ns = &rstep.ns.namespace;
+    let target = &rstep.ns.target;
+
+    // Look up the project on the cached profile.
+    let profile = load_profile(ns)?.ok_or_else(|| {
+        anyhow!(
+            "step `{}`: namespace `{ns}` has no cached profile (run `inspect setup {ns}` first)",
+            step.id
+        )
+    })?;
+    let project = profile
+        .compose_projects
+        .iter()
+        .find(|p| p.name == project_name)
+        .cloned()
+        .ok_or_else(|| {
+            let known: Vec<&str> = profile
+                .compose_projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            anyhow!(
+                "step `{}`: compose project `{project_name}` not found on namespace `{ns}` \
+                 (known: {})",
+                step.id,
+                if known.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )
+        })?;
+
+    // Validate flag set against the action's allowlist (already done
+    // at plan time, but re-check here so a mid-bundle re-render
+    // never executes an unrecognized flag silently).
+    for key in spec.flags.keys() {
+        if !spec.action.allowed_flags().contains(&key.as_str()) {
+            return Err(anyhow!(
+                "step `{}`: compose action `{}` does not accept flag `{}` \
+                 (allowed: {})",
+                step.id,
+                spec.action.as_str(),
+                key,
+                spec.action.allowed_flags().join(", "),
+            ));
+        }
+    }
+
+    // Per-service `down` rejects volumes / rmi (project-scoped ops).
+    if matches!(spec.action, super::schema::ComposeAction::Down) && service_rendered.is_some() {
+        if flag_is_true(&spec.flags, "volumes") {
+            return Err(anyhow!(
+                "step `{}`: compose down --volumes is not supported for per-service selectors \
+                 (project=`{project_name}`, service=`{}`); named volumes are project-scoped",
+                step.id,
+                service_rendered.as_deref().unwrap_or("")
+            ));
+        }
+        if flag_is_true(&spec.flags, "rmi") {
+            return Err(anyhow!(
+                "step `{}`: compose down --rmi is not supported for per-service selectors",
+                step.id
+            ));
+        }
+    }
+
+    // Render the docker compose command. `down` per-service uses the
+    // explicit `stop && rm -f` form; everything else is the standard
+    // `docker compose -p <p> <action> [flags] [<svc>]` shape.
+    let cmd = if matches!(spec.action, super::schema::ComposeAction::Down)
+        && service_rendered.is_some()
+    {
+        build_compose_per_service_down_cmd(&project, service_rendered.as_deref().unwrap())
+    } else {
+        let flag_strs: Vec<String> = compose_flag_strings(&spec.action, &spec.flags);
+        let flag_refs: Vec<&str> = flag_strs.iter().map(|s| s.as_str()).collect();
+        // up's default is `-d`; mirror the standalone verb's default.
+        let mut all_flags: Vec<&str> = Vec::with_capacity(flag_refs.len() + 1);
+        if matches!(spec.action, super::schema::ComposeAction::Up)
+            && !flag_is_true(&spec.flags, "no_detach")
+        {
+            all_flags.push("-d");
+        }
+        all_flags.extend(flag_refs);
+        build_compose_cmd(
+            &project,
+            spec.action.as_str(),
+            &all_flags,
+            service_rendered.as_deref(),
+        )
+    };
+
+    // Capture compose_file_hash before exec so the audit can be
+    // verified post-hoc. One extra ssh round-trip; same shape as the
+    // standalone compose verbs.
+    let compose_hash = compose_file_sha_short(runner, ns, target, &project);
+
+    // Stream so multi-minute pulls/builds show progress live.
+    let opts = RunOpts::with_timeout(timeout_secs);
+    let mut on_line = |line: &str| {
+        eprintln!("    {line}");
+    };
+    let out = runner.run_streaming_capturing(ns, target, &cmd, opts, &mut on_line)?;
+    let dur_ms = started.elapsed().as_millis() as u64;
+
+    // Audit. Verb mirrors the standalone compose sub-verbs so a
+    // post-mortem query like `inspect audit ls --verb compose.up`
+    // catches both bundle-driven and ad-hoc invocations.
+    let audit_selector = match service_rendered.as_deref() {
+        Some(svc) => format!("{ns}/{}/{svc}", project.name),
+        None => format!("{ns}/{}", project.name),
+    };
+    let audit_verb = format!("compose.{}", spec.action.as_str());
+    let mut e = AuditEntry::new(&audit_verb, &audit_selector);
+    e.exit = out.exit_code;
+    e.duration_ms = dur_ms;
+    e.reason = crate::safety::validate_reason(reason)?;
+    e.applied = Some(out.ok());
+    // G2: bundle compose verbs are structured but the rendered shell
+    // can still embed compose-file env vars; redact defensively.
+    e.rendered_cmd = Some(crate::redact::redact_for_audit(&cmd).into_owned());
+    e.bundle_id = Some(bundle_id.to_string());
+    e.bundle_step = Some(step.id.clone());
+    if let Some((mkey, mval)) = matrix.iter().next() {
+        let label = super::vars::yaml_to_str(mval).unwrap_or_default();
+        e.bundle_branch = Some(format!("{mkey}={label}"));
+        e.bundle_branch_status = Some(if out.ok() { "ok" } else { "failed" }.to_string());
+    }
+    let mut extras: Vec<String> = Vec::new();
+    for (k, v) in &spec.flags {
+        if let Some(b) = v.as_bool() {
+            if b {
+                extras.push(format!("[{k}=true]"));
+            }
+        }
+    }
+    let extra_refs: Vec<&str> = extras.iter().map(|s| s.as_str()).collect();
+    e.args = project_tags(
+        &project.name,
+        service_rendered.as_deref(),
+        &compose_hash,
+        &extra_refs,
+    );
+    e.revert = Some(compose_revert_for_action(
+        spec.action,
+        ns,
+        &project.name,
+        service_rendered.as_deref(),
+    ));
+    let audit_id = Some(e.id.clone());
+    let _ = store.append(&e);
+
+    if !out.ok() {
+        return Err(anyhow!(
+            "compose.{} exit {}: {}",
+            spec.action.as_str(),
+            out.exit_code,
+            out.stderr.trim().lines().next().unwrap_or(""),
+        ));
+    }
+    Ok(audit_id)
+}
+
+/// Turn the compose-step `flags:` map into the docker
+/// compose CLI flags. Per-flag rendering is action-aware so an `up`
+/// step's `force_recreate: true` becomes `--force-recreate`, and a
+/// `down` step's `volumes: true` becomes `--volumes`. Unknown flags
+/// are caught by the allowlist check upstream.
+fn compose_flag_strings(
+    action: &super::schema::ComposeAction,
+    flags: &BTreeMap<String, serde_yaml::Value>,
+) -> Vec<String> {
+    use super::schema::ComposeAction;
+    let mut out: Vec<String> = Vec::new();
+    let truthy = |k: &str| flag_is_true(flags, k);
+    match action {
+        ComposeAction::Up => {
+            if truthy("force_recreate") {
+                out.push("--force-recreate".into());
+            }
+            // no_detach handled in caller (drops the implicit `-d`)
+        }
+        ComposeAction::Down => {
+            if truthy("volumes") {
+                out.push("--volumes".into());
+            }
+            if truthy("rmi") {
+                out.push("--rmi".into());
+                out.push("local".into());
+            }
+        }
+        ComposeAction::Pull => {
+            if truthy("ignore_pull_failures") {
+                out.push("--ignore-pull-failures".into());
+            }
+        }
+        ComposeAction::Build => {
+            if truthy("no_cache") {
+                out.push("--no-cache".into());
+            }
+            if truthy("pull") {
+                out.push("--pull".into());
+            }
+        }
+        ComposeAction::Restart => {}
+    }
+    out
+}
+
+fn flag_is_true(map: &BTreeMap<String, serde_yaml::Value>, key: &str) -> bool {
+    map.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Revert taxonomy for compose actions. Mirrors the
+/// standalone verbs: up ↔ down, restart re-restart, pull is
+/// unsupported (you can't un-pull), build is roughly
+/// `down --rmi local`.
+fn compose_revert_for_action(
+    action: super::schema::ComposeAction,
+    ns: &str,
+    project: &str,
+    service: Option<&str>,
+) -> crate::safety::Revert {
+    use super::schema::ComposeAction;
+    use crate::safety::Revert;
+    let sel = match service {
+        Some(svc) => format!("{ns}/{project}/{svc}"),
+        None => format!("{ns}/{project}"),
+    };
+    match action {
+        // Per-step
+        // compose reverts previously stored an `inspect compose <inv>
+        // {sel} --apply` CLI wrapper as the runnable payload. That
+        // payload is dispatched by `revert_command_pair` via
+        // `runner.run` against the remote target — where `inspect`
+        // is not installed — so direct
+        // `inspect revert <compose-step-audit-id> --apply` failed
+        // with `command not found`. The native bundle revert path
+        // (`inspect bundle apply --on-failure rollback`) walks the
+        // composite parent audit, not these per-step entries, and
+        // already invokes the inverse verb locally. Direct revert
+        // requires bundle context (project path, flag set) we do
+        // not have here, so refuse loudly via `Unsupported` and
+        // point the operator at the right manual verb.
+        ComposeAction::Up => Revert::unsupported(format!(
+            "compose up has no remote-runnable inverse; run `inspect compose down {sel} --apply`"
+        )),
+        ComposeAction::Down => Revert::unsupported(format!(
+            "compose down has no remote-runnable inverse; run `inspect compose up {sel} --apply`"
+        )),
+        ComposeAction::Restart => Revert::unsupported(format!(
+            "compose restart has no inverse; re-run `inspect compose restart {sel} --apply` to repeat"
+        )),
+        ComposeAction::Pull => Revert::unsupported(
+            "compose pull has no inverse — pulled images stay in the local docker cache"
+                .to_string(),
+        ),
+        ComposeAction::Build => Revert::unsupported(format!(
+            "compose build has no remote-runnable inverse; run `inspect compose down {sel} --apply` to drop containers"
+        )),
     }
 }
 
@@ -666,7 +1152,7 @@ fn run_parallel_matrix(
     bundle_id: &str,
     store: &AuditStore,
     opts: &ApplyOpts,
-) -> Result<()> {
+) -> Result<Vec<BranchResult>> {
     // Single-key matrix only (validated earlier). Build the per-branch
     // matrix maps and run them with bounded concurrency.
     let (mkey, mvals) = step
@@ -690,12 +1176,17 @@ fn run_parallel_matrix(
     let queue: Arc<Mutex<Vec<serde_yaml::Value>>> = Arc::new(Mutex::new(mvals.clone()));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stop_flag = Arc::new(AtomicBool::new(false));
+    // Per-branch outcome ledger. Workers append to it as
+    // they complete; the parent reads it back after the scope joins
+    // and forwards it to the apply loop for rollback consumption.
+    let branches: Arc<Mutex<Vec<BranchResult>>> = Arc::new(Mutex::new(Vec::new()));
 
     std::thread::scope(|scope| {
         for _ in 0..cap {
             let queue = Arc::clone(&queue);
             let first_err = Arc::clone(&first_err);
             let stop_flag = Arc::clone(&stop_flag);
+            let branches = Arc::clone(&branches);
             let mkey = mkey.clone();
             // Captures of &-references are fine inside scoped threads.
             scope.spawn(move || loop {
@@ -733,15 +1224,28 @@ fn run_parallel_matrix(
                         Err(anyhow!("panic: {msg}"))
                     }
                 };
+                let branch_id = format!("{mkey}={label}");
                 match res {
-                    Ok(()) => {
-                        eprintln!("    ├─ {mkey}={label} ok");
+                    Ok(_audit_id) => {
+                        eprintln!("    ├─ {branch_id} ok");
+                        branches.lock().unwrap().push(BranchResult {
+                            branch_id,
+                            status: BranchStatus::Ok,
+                            matrix_value: v.clone(),
+                            matrix_key: mkey.clone(),
+                        });
                     }
                     Err(e) => {
-                        eprintln!("    ├─ {mkey}={label} FAILED: {e}");
+                        eprintln!("    ├─ {branch_id} FAILED: {e}");
+                        branches.lock().unwrap().push(BranchResult {
+                            branch_id: branch_id.clone(),
+                            status: BranchStatus::Failed,
+                            matrix_value: v.clone(),
+                            matrix_key: mkey.clone(),
+                        });
                         let mut slot = first_err.lock().unwrap();
                         if slot.is_none() {
-                            *slot = Some(format!("{mkey}={label}: {e}"));
+                            *slot = Some(format!("{branch_id}: {e}"));
                             // First failure aborts the rest of the
                             // matrix — avoids burning compute on a
                             // run we're going to roll back anyway.
@@ -753,10 +1257,68 @@ fn run_parallel_matrix(
         }
     });
 
-    if let Some(msg) = first_err.lock().unwrap().clone() {
-        return Err(anyhow!(msg));
+    // Branches that the stop_flag short-circuited never
+    // actually started. Synthesize Skipped records so
+    // `inspect bundle status` can render the full matrix table and
+    // the rollback path can prove it didn't try to invert them.
+    let mut branches_vec = std::mem::take(&mut *branches.lock().unwrap());
+    let executed: BTreeSet<String> = branches_vec.iter().map(|b| b.branch_id.clone()).collect();
+    let leftover: Vec<serde_yaml::Value> = std::mem::take(&mut *queue.lock().unwrap());
+    for v in leftover {
+        let label = super::vars::yaml_to_str(&v).unwrap_or_default();
+        let branch_id = format!("{mkey}={label}");
+        if !executed.contains(&branch_id) {
+            branches_vec.push(BranchResult {
+                branch_id,
+                status: BranchStatus::Skipped,
+                matrix_value: v,
+                matrix_key: mkey.clone(),
+            });
+        }
     }
-    Ok(())
+    // Sort by branch_id so the rollback path and post-mortem queries
+    // see the same deterministic order regardless of worker
+    // scheduling.
+    branches_vec.sort_by(|a, b| a.branch_id.cmp(&b.branch_id));
+
+    if let Some(msg) = first_err.lock().unwrap().clone() {
+        // Even on failure we return the per-branch ledger via Err
+        // so the apply loop can stash it for rollback. Encode the
+        // branches alongside the error message via a side channel —
+        // simplest is to thread it through a thread-local-like
+        // sidecar. We use a `BranchFailure` shape that the apply
+        // loop unpacks.
+        return Err(BranchFailureCarrier::wrap(branches_vec, msg));
+    }
+    Ok(branches_vec)
+}
+
+/// When a `parallel` matrix step fails partway, we need
+/// to thread the per-branch ledger back to the apply loop alongside
+/// the error message so [`do_rollback`] can invert only the
+/// succeeded branches. anyhow's [`anyhow::Error`] is a single-value
+/// container; we attach the ledger via a thread-local sidecar
+/// keyed by the error's pointer identity. This avoids touching
+/// `Result<T, E>`'s shape.
+struct BranchFailureCarrier;
+
+impl BranchFailureCarrier {
+    fn wrap(branches: Vec<BranchResult>, msg: String) -> anyhow::Error {
+        BRANCH_LEDGER_SIDECAR.with(|cell| {
+            *cell.borrow_mut() = Some(branches);
+        });
+        anyhow!(msg)
+    }
+    /// Drain the most recently stashed ledger. Returns `None` if the
+    /// caller's failure didn't come from a matrix step.
+    fn drain() -> Option<Vec<BranchResult>> {
+        BRANCH_LEDGER_SIDECAR.with(|cell| cell.borrow_mut().take())
+    }
+}
+
+thread_local! {
+    static BRANCH_LEDGER_SIDECAR: std::cell::RefCell<Option<Vec<BranchResult>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn build_watch_args(
@@ -802,16 +1364,34 @@ fn build_watch_args(
 // Rollback
 // -----------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn do_rollback(
     runner: &dyn RemoteRunner,
     bundle: &Bundle,
     bundle_id: &str,
     store: &AuditStore,
     completed: &[usize],
+    step_branches: &BTreeMap<usize, Vec<BranchResult>>,
     rollback_to: Option<&str>,
     no_prompt: bool,
 ) {
-    if completed.is_empty() && bundle.rollback.is_empty() {
+    // Even when no top-level step `completed`, a
+    // parallel-matrix step that failed mid-way may have produced
+    // succeeded branches that DO need inverting. Walk both the
+    // `completed` set and any partially-failed matrix steps.
+    let mut to_visit: Vec<usize> = completed.to_vec();
+    for &idx in step_branches.keys() {
+        if !to_visit.contains(&idx) {
+            to_visit.push(idx);
+        }
+    }
+    to_visit.sort();
+
+    let any_branch_to_invert = step_branches
+        .values()
+        .any(|brs| brs.iter().any(|b| b.status == BranchStatus::Ok));
+
+    if to_visit.is_empty() && bundle.rollback.is_empty() && !any_branch_to_invert {
         eprintln!("[inspect] nothing to rollback");
         return;
     }
@@ -825,7 +1405,7 @@ fn do_rollback(
 
     eprintln!("[inspect] rolling back...");
 
-    // Per-step rollbacks: walk completed steps in reverse, run each
+    // Per-step rollbacks: walk visited steps in reverse, run each
     // step's `rollback:` field if set and the step is reversible.
     // Stop at `rollback_to` if specified.
     let stop_idx = match rollback_to {
@@ -834,7 +1414,7 @@ fn do_rollback(
     };
 
     let empty = BTreeMap::new();
-    for &idx in completed.iter().rev() {
+    for &idx in to_visit.iter().rev() {
         if let Some(stop) = stop_idx {
             if idx <= stop {
                 eprintln!(
@@ -855,6 +1435,77 @@ fn do_rollback(
         let Some(rb_cmd) = &step.rollback else {
             continue;
         };
+
+        // Branch-aware rollback. For matrix steps we
+        // run the rollback block once per SUCCEEDED branch, with
+        // `{{ matrix.<key> }}` resolving to that branch's value.
+        // Failed/skipped branches log an audit note explaining why
+        // no inverse fired (the step never produced an effect on
+        // them).
+        if let Some(branches) = step_branches.get(&idx) {
+            for br in branches {
+                match br.status {
+                    BranchStatus::Ok => {
+                        let mut mtx = BTreeMap::new();
+                        mtx.insert(br.matrix_key.clone(), br.matrix_value.clone());
+                        let rb_rendered = match interpolate(rb_cmd, &bundle.vars, &mtx) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!(
+                                    "[inspect] rollback FAILED on `{}` branch {}: render error: {e}",
+                                    step.id, br.branch_id
+                                );
+                                eprintln!(
+                                    "[inspect] STOPPING rollback — bundle is in mixed state."
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = run_rollback_action(
+                            runner,
+                            bundle,
+                            &step.id,
+                            &rb_rendered,
+                            bundle_id,
+                            store,
+                            Some(&br.branch_id),
+                        ) {
+                            eprintln!(
+                                "[inspect] rollback FAILED on `{}` branch {}: {e}",
+                                step.id, br.branch_id
+                            );
+                            eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
+                            return;
+                        }
+                    }
+                    BranchStatus::Failed | BranchStatus::Skipped => {
+                        let why = if br.status == BranchStatus::Failed {
+                            "branch failed mid-execution"
+                        } else {
+                            "branch skipped (peer branch failed first)"
+                        };
+                        eprintln!(
+                            "[inspect] skip rollback of `{}` branch {} — {why}",
+                            step.id, br.branch_id
+                        );
+                        // Audit note so the bundle status report can
+                        // show "no inverse fired, branch never
+                        // applied an effect" for forensic clarity.
+                        let mut e = AuditEntry::new("bundle.rollback.skip", &step.id);
+                        e.is_revert = true;
+                        e.bundle_id = Some(bundle_id.to_string());
+                        e.bundle_step = Some(step.id.clone());
+                        e.bundle_branch = Some(br.branch_id.clone());
+                        e.bundle_branch_status = Some(br.status.as_audit_str().to_string());
+                        e.diff_summary = format!("rollback skipped: {why}");
+                        let _ = store.append(&e);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Non-matrix step: legacy single-rollback path.
         let rb_rendered = match interpolate(rb_cmd, &bundle.vars, &empty) {
             Ok(r) => r,
             Err(e) => {
@@ -866,9 +1517,15 @@ fn do_rollback(
                 return;
             }
         };
-        if let Err(e) =
-            run_rollback_action(runner, bundle, &step.id, &rb_rendered, bundle_id, store)
-        {
+        if let Err(e) = run_rollback_action(
+            runner,
+            bundle,
+            &step.id,
+            &rb_rendered,
+            bundle_id,
+            store,
+            None,
+        ) {
             eprintln!("[inspect] rollback FAILED on `{}`: {e}", step.id);
             eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
             return;
@@ -886,9 +1543,12 @@ fn do_rollback(
                     return;
                 }
             };
-            if !matches!(kind, StepBodyKind::Exec | StepBodyKind::Run) {
+            if !matches!(
+                kind,
+                StepBodyKind::Exec | StepBodyKind::Run | StepBodyKind::Compose
+            ) {
                 eprintln!(
-                    "[inspect] rollback `{}` body kind {:?} not supported (use exec/run)",
+                    "[inspect] rollback `{}` body kind {:?} not supported (use exec/run/compose)",
                     step.id, kind
                 );
                 return;
@@ -900,7 +1560,9 @@ fn do_rollback(
                     return;
                 }
             };
-            if let Err(e) = run_rollback_action(runner, bundle, &step.id, &body, bundle_id, store) {
+            if let Err(e) =
+                run_rollback_action(runner, bundle, &step.id, &body, bundle_id, store, None)
+            {
                 eprintln!("[inspect] rollback step `{}` FAILED: {e}", step.id);
                 eprintln!("[inspect] STOPPING rollback — bundle is in mixed state.");
                 return;
@@ -918,8 +1580,13 @@ fn run_rollback_action(
     body: &str,
     bundle_id: &str,
     store: &AuditStore,
+    branch_label: Option<&str>,
 ) -> Result<()> {
-    eprintln!("[inspect] rollback `{step_id}`: {}", short(body));
+    let prefix = match branch_label {
+        Some(b) => format!("[inspect] rollback `{step_id}` branch {b}: "),
+        None => format!("[inspect] rollback `{step_id}`: "),
+    };
+    eprintln!("{prefix}{}", short(body));
     let target_ns = bundle
         .host
         .as_deref()
@@ -948,11 +1615,20 @@ fn run_rollback_action(
     )?;
     let dur_ms = started.elapsed().as_millis() as u64;
     let mut e = AuditEntry::new("bundle.rollback", target_ns);
-    e.args = body.to_string();
+    // G2: redact the rollback command body before recording.
+    e.args = crate::redact::redact_for_audit(body).into_owned();
     e.exit = out.exit_code;
     e.duration_ms = dur_ms;
+    e.is_revert = true;
     e.bundle_id = Some(bundle_id.to_string());
     e.bundle_step = Some(step_id.to_string());
+    // When this rollback is for a specific matrix
+    // branch (per-branch invert), stamp the branch label so audit
+    // queries can group by it.
+    if let Some(b) = branch_label {
+        e.bundle_branch = Some(b.to_string());
+        e.bundle_branch_status = Some(if out.ok() { "ok" } else { "failed" }.to_string());
+    }
     let _ = store.append(&e);
     if !out.ok() {
         return Err(anyhow!(
@@ -1018,6 +1694,7 @@ mod tests {
             exec: Some(format!("echo {id}")),
             run: None,
             watch: None,
+            compose: None,
             requires: vec![],
             parallel: false,
             matrix: BTreeMap::new(),

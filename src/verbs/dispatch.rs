@@ -5,14 +5,16 @@
 //! namespace are surfaced through [`StepError`] but do not abort the
 //! caller's loop unless it chooses to.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use thiserror::Error;
 
 use crate::profile::cache::load_profile;
 use crate::profile::schema::{Profile, Service};
-use crate::selector::resolve::{resolve as sel_resolve, ResolvedTarget, SelectorError, TargetKind};
+use crate::selector::resolve::{
+    chosen_namespaces_for, resolve as sel_resolve, ResolvedTarget, SelectorError, TargetKind,
+};
 use crate::ssh::options::SshTarget;
 
 use super::runtime::{current_runner, resolve_target, RemoteRunner};
@@ -30,6 +32,23 @@ pub struct NsCtx {
     pub namespace: String,
     pub target: SshTarget,
     pub profile: Option<Profile>,
+    /// Per-namespace remote env overlay, sourced from
+    /// `[namespaces.<ns>.env]` in `~/.inspect/servers.toml` (merged
+    /// with any env-var overrides). Empty when no overlay is
+    /// configured. Verbs that dispatch operator-supplied free-form
+    /// commands (`run`, `exec`) consult this map and prepend an
+    /// `env KEY="VAL" ... -- ` to the remote command line via
+    /// [`crate::exec::env_overlay::apply_to_cmd`]. Read verbs
+    /// (`logs`, `ps`, `status`, etc.) issue inspect-internal
+    /// commands and ignore this field — see spec scope.
+    pub env_overlay: BTreeMap<String, String>,
+    /// Per-namespace policy on stale-session
+    /// auto-reauth. Sourced from `[servers.<ns>].auto_reauth` in
+    /// `~/.inspect/servers.toml`; defaults to `true` when the field
+    /// is absent. `--no-reauth` on `run` / `exec` overrides this
+    /// per-invocation. Verbs that wrap dispatch consult this field
+    /// before invoking the reauth path.
+    pub auto_reauth: bool,
 }
 
 /// A flat resolution: namespace context + a single target inside it.
@@ -64,7 +83,7 @@ impl<'a> Step<'a> {
     /// the command still runs on hosts that haven't been discovered.
     /// Returns `None` for host-level steps (`arte/_`).
     ///
-    /// Field pitfall §6.1 (v0.1.1 P2): the user-facing service name
+    /// Field pitfall: the user-facing service name
     /// (`name`, possibly a compose label like `api`) is what the
     /// selector matches on, but the docker daemon only knows the real
     /// container name (`luminary-api`). Always pass `container()` to
@@ -78,7 +97,7 @@ impl<'a> Step<'a> {
 }
 
 /// Resolve `selector` and prepare a fan-out plan. Returns the runner and a
-/// vec of (NsCtx, Vec<ResolvedTarget>) pairs keyed by namespace, so the
+/// vec of `(NsCtx, Vec<ResolvedTarget>)` pairs keyed by namespace, so the
 /// caller can iterate in stable namespace order.
 pub type Plan = (Box<dyn RemoteRunner>, Vec<NsCtx>, Vec<ResolvedTarget>);
 
@@ -91,7 +110,7 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
         if nses.contains_key(&t.namespace) {
             continue;
         }
-        let (_, target) = resolve_target(&t.namespace).map_err(StepError::Other)?;
+        let (resolved, target) = resolve_target(&t.namespace).map_err(StepError::Other)?;
         let profile = load_profile(&t.namespace).map_err(StepError::Other)?;
         nses.insert(
             t.namespace.clone(),
@@ -99,8 +118,38 @@ pub fn plan(selector: &str) -> Result<Plan, StepError> {
                 namespace: t.namespace.clone(),
                 target,
                 profile,
+                env_overlay: resolved.config.env.clone().unwrap_or_default(),
+                auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
             },
         );
+    }
+    // A wildcard selector ("everything in this
+    // namespace") against an empty profile resolves to zero targets,
+    // but the verb still wants to talk to the namespace's host (e.g.
+    // status's empty-state path needs `docker ps` so it can phrase
+    // "N container(s) discovered but unmatched"). Backfill `nses`
+    // from the namespaces the selector actually matched, even when
+    // no service-level targets came back.
+    if nses.is_empty() {
+        if let Ok(ns_names) = chosen_namespaces_for(selector) {
+            for ns in ns_names {
+                if nses.contains_key(&ns) {
+                    continue;
+                }
+                let (resolved, target) = resolve_target(&ns).map_err(StepError::Other)?;
+                let profile = load_profile(&ns).map_err(StepError::Other)?;
+                nses.insert(
+                    ns.clone(),
+                    NsCtx {
+                        namespace: ns,
+                        target,
+                        profile,
+                        env_overlay: resolved.config.env.clone().unwrap_or_default(),
+                        auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
+                    },
+                );
+            }
+        }
     }
     let mut ns_vec: Vec<NsCtx> = nses.into_values().collect();
     ns_vec.sort_by(|a, b| a.namespace.cmp(&b.namespace));

@@ -6,22 +6,68 @@
 //! deepest dependency in failing state that has no failing dependency
 //! beneath it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 
 use crate::cli::WhyArgs;
 use crate::error::ExitKind;
+use crate::profile::cache::load_profile;
+use crate::profile::runtime::{RuntimeSnapshot, SourceInfo};
 use crate::profile::schema::{HealthStatus, Profile, Service};
-use crate::ssh::exec::RunOpts;
+use crate::selector::ast::{ServerAtom, ServerSpec, ServiceAtom, ServiceSpec};
+use crate::selector::parser::parse_selector;
+use crate::selector::resolve::SelectorError;
+use crate::ssh::SshTarget;
+use crate::verbs::cache::{aggregate_sources, get_runtime, print_source_line, GetOpts};
 use crate::verbs::correlation::why_rules;
-use crate::verbs::dispatch::{iter_steps, plan, NsCtx};
+use crate::verbs::dispatch::{iter_steps, plan, NsCtx, StepError};
 use crate::verbs::output::OutputDoc;
-use crate::verbs::runtime::RemoteRunner;
+use crate::verbs::runtime::{current_runner, resolve_target, RemoteRunner};
+
+/// Hard cap on the recent-logs tail. Anything larger is
+/// clamped with a one-line stderr notice. Protects the operator from
+/// accidentally pulling tens of thousands of lines through redaction.
+pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
-    let (runner, nses, targets) = plan(&args.selector)?;
-    let live_running = collect_live_running(runner.as_ref(), &nses);
+    // When the selector resolves to zero services BUT
+    // the inventory contains a running container with that exact name,
+    // surface a chained hint pointing at logs / docker inspect / setup
+    // instead of the generic "no targets" selector error. Catches the
+    // common "running container is not a registered service" gap that
+    // bites operators on first contact with a partly-discovered
+    // namespace.
+    let (runner, nses, targets) = match plan(&args.selector) {
+        Ok(p) => p,
+        Err(StepError::Selector(
+            e @ (SelectorError::NoMatches { .. } | SelectorError::EmptyProfile { .. }),
+        )) => {
+            if let Some(hint) = build_container_hint(&args.selector) {
+                println!("{hint}");
+                return Ok(ExitKind::Success);
+            }
+            return Err(anyhow::Error::from(e));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (runtime_by_ns, sources, refresh_warnings) =
+        collect_runtime(runner.as_ref(), &nses, args.refresh);
+    let aggregated_source = aggregate_sources(&sources);
+    let fmt = args.format.resolve()?;
+    print_source_line(&aggregated_source, &fmt);
+
+    // Clamp --log-tail at LOG_TAIL_CAP with a one-line
+    // stderr notice. Keeps redaction + transport bills bounded.
+    let log_tail_clamped = if args.log_tail > LOG_TAIL_CAP {
+        eprintln!(
+            "warning: --log-tail {} clamped to {}",
+            args.log_tail, LOG_TAIL_CAP
+        );
+        LOG_TAIL_CAP
+    } else {
+        args.log_tail
+    };
 
     let mut data_lines: Vec<String> = Vec::new();
     let mut services_json: Vec<serde_json::Value> = Vec::new();
@@ -29,6 +75,7 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
     let mut overall_total = 0usize;
     let mut emitted = 0usize;
     let mut last_root: Option<(String, String)> = None; // (server, root)
+    let mut bundle_next_steps: Vec<crate::verbs::output::NextStep> = Vec::new();
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = match step.service() {
@@ -41,12 +88,12 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
         };
         emitted += 1;
         let ns = &step.ns.namespace;
-        let live = live_running.get(ns);
+        let runtime = runtime_by_ns.get(ns);
         let walk = walk_deps(profile, &svc_name);
         let status_map: HashMap<String, NodeStatus> = walk
             .nodes
             .iter()
-            .map(|n| (n.clone(), node_status(profile, live, n)))
+            .map(|n| (n.clone(), node_status(profile, runtime, n)))
             .collect();
         let root = pick_root_cause(&walk, &status_map);
         if let Some(r) = &root {
@@ -79,6 +126,9 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             "self_status": status_map.get(&svc_name).copied().unwrap_or(NodeStatus::Unknown).as_str(),
             "root_cause": root.clone(),
             "nodes": nodes_json,
+            "recent_logs": serde_json::Value::Array(Vec::new()),
+            "effective_command": serde_json::Value::Null,
+            "port_reality": serde_json::Value::Array(Vec::new()),
         }));
 
         data_lines.push(format!("{ns}/{svc_name}:"));
@@ -92,6 +142,59 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             };
             let indent = "  ".repeat(depth + 1);
             data_lines.push(format!("{indent}{name}: {}{mark}", st.as_str()));
+        }
+
+        // Diagnostic bundle for failing target services.
+        // Only fires for the target service (not transitive deps), and
+        // only when its status is unhealthy/down. ≤4 remote commands
+        // per service per bundle invocation.
+        let target_status = status_map
+            .get(&svc_name)
+            .copied()
+            .unwrap_or(NodeStatus::Unknown);
+        if !args.no_bundle && matches!(target_status, NodeStatus::Unhealthy | NodeStatus::Down) {
+            if let Some(svc) = profile.services.iter().find(|s| s.name == svc_name) {
+                let bundle = collect_diagnostic_bundle(
+                    runner.as_ref(),
+                    ns,
+                    &step.ns.target,
+                    &svc.container_name,
+                    log_tail_clamped,
+                );
+                // Patch the JSON entry we just pushed with the real
+                // bundle fields so agents see populated data.
+                if let Some(last) = services_json.last_mut() {
+                    last["recent_logs"] = serde_json::Value::Array(
+                        bundle
+                            .recent_logs
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
+                    last["effective_command"] = bundle
+                        .effective_command
+                        .as_ref()
+                        .map(|ec| serde_json::to_value(ec).unwrap_or(serde_json::Value::Null))
+                        .unwrap_or(serde_json::Value::Null);
+                    last["port_reality"] = serde_json::to_value(&bundle.port_reality)
+                        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+                }
+                for line in bundle.render_text() {
+                    data_lines.push(line);
+                }
+                if bundle.has_double_bind() {
+                    bundle_next_steps.push(crate::verbs::output::NextStep::new(
+                        format!("inspect run {ns}/{svc_name} -- 'cat /docker-entrypoint.sh'"),
+                        "inspect entrypoint for flag-injection (port bound twice)",
+                    ));
+                }
+                if bundle.logs_show_port_conflict() {
+                    bundle_next_steps.push(crate::verbs::output::NextStep::new(
+                        format!("inspect ports {ns}"),
+                        "host port reality (logs show 'address already in use')",
+                    ));
+                }
+            }
         }
     }
 
@@ -111,7 +214,17 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             }
         }),
     )
-    .with_meta("selector", args.selector.clone());
+    .with_meta("selector", args.selector.clone())
+    .with_meta("source", aggregated_source.to_json())
+    .with_quiet(args.format.quiet);
+    // Smart NEXT hints derived from the bundle (entrypoint
+    // inspection on bound-twice, host port reality on "address
+    // already in use" log lines). These come *before* the generic
+    // why_rules suggestions so the most actionable guidance lands
+    // first.
+    for step in bundle_next_steps {
+        doc.push_next(step);
+    }
     if let Some((server, root)) = &last_root {
         for n in why_rules(server, Some(root.as_str())) {
             doc.push_next(n);
@@ -125,36 +238,91 @@ pub fn run(args: WhyArgs) -> Result<ExitKind> {
             doc.push_next(n);
         }
     }
+    if aggregated_source.stale {
+        doc.push_next(crate::verbs::output::NextStep::new(
+            format!(
+                "inspect connectivity {}",
+                nses.first()
+                    .map(|n| n.namespace.clone())
+                    .unwrap_or_else(|| "<ns>".to_string())
+            ),
+            "diagnose why runtime refresh failed",
+        ));
+    }
+    if !refresh_warnings.is_empty() {
+        for w in &refresh_warnings {
+            eprintln!("warning: {w}");
+        }
+    }
 
-    let fmt = args.format.resolve()?;
-    crate::format::render::render_doc(&doc, &fmt, &data_lines)?;
+    let exit =
+        crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())?;
 
+    // The "any failing service" exit class takes precedence over
+    // filter-class exit codes.
     Ok(if overall_failing > 0 {
         ExitKind::Error
     } else {
-        ExitKind::Success
+        exit
     })
 }
 
-fn collect_live_running(
+/// Per-namespace runtime snapshot collection through the
+/// cache orchestrator. Returns
+///   (snapshots-by-ns, per-ns SourceInfo entries, refresh warnings)
+/// — the same shape `status` and `health` use. Cold cache + failed
+/// refresh becomes a `Stale` source entry with no snapshot for that
+/// namespace; downstream `node_status` then falls back to the
+/// inventory tier's `health_status`.
+fn collect_runtime(
     runner: &dyn RemoteRunner,
     nses: &[NsCtx],
-) -> HashMap<String, HashSet<String>> {
-    let mut out = HashMap::new();
+    refresh: bool,
+) -> (
+    HashMap<String, RuntimeSnapshot>,
+    Vec<SourceInfo>,
+    Vec<String>,
+) {
+    use crate::profile::runtime::{inventory_age, SourceMode};
+    let opts = GetOpts {
+        force_refresh: refresh,
+    };
+    let mut by_ns = HashMap::new();
+    let mut sources = Vec::new();
+    let mut warnings = Vec::new();
     for ns in nses {
-        if let Ok(o) = runner.run(
-            &ns.namespace,
-            &ns.target,
-            "docker ps --format '{{.Names}}'",
-            RunOpts::with_timeout(15),
-        ) {
-            if o.ok() {
-                let set: HashSet<String> = o.stdout.lines().map(|s| s.to_string()).collect();
-                out.insert(ns.namespace.clone(), set);
+        match get_runtime(runner, ns, opts) {
+            Ok((snap, info)) => {
+                if info.stale {
+                    if let Some(reason) = &info.reason {
+                        warnings.push(format!(
+                            "{}: serving cached data — {}",
+                            ns.namespace, reason
+                        ));
+                    }
+                }
+                by_ns.insert(ns.namespace.clone(), snap);
+                sources.push(info);
+            }
+            Err(_) => {
+                sources.push(SourceInfo {
+                    mode: SourceMode::Stale,
+                    runtime_age_s: None,
+                    inventory_age_s: inventory_age(&ns.namespace).map(|d| d.as_secs()),
+                    stale: true,
+                    reason: Some(format!(
+                        "{}: runtime refresh failed (no cache)",
+                        ns.namespace
+                    )),
+                });
+                warnings.push(format!(
+                    "{}: runtime refresh failed and no cache present",
+                    ns.namespace
+                ));
             }
         }
     }
-    out
+    (by_ns, sources, warnings)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,17 +346,31 @@ impl NodeStatus {
     }
 }
 
-fn node_status(profile: &Profile, live: Option<&HashSet<String>>, name: &str) -> NodeStatus {
+/// Prefer the runtime snapshot for both running-state and health.
+/// Falls back to the inventory tier's `health_status` only when the
+/// snapshot lacks a row for the container — the bug pattern from the
+/// 3rd field user (where post-restart `health_status` was stuck on
+/// the pre-restart value) is *exactly* what this fixes.
+fn node_status(profile: &Profile, runtime: Option<&RuntimeSnapshot>, name: &str) -> NodeStatus {
     let svc: Option<&Service> = profile.services.iter().find(|s| s.name == name);
     let svc = match svc {
         Some(s) => s,
         None => return NodeStatus::Missing,
     };
-    if let Some(set) = live {
-        if !set.contains(&svc.name) {
+    let rt = runtime.and_then(|s| s.lookup(&svc.container_name));
+    if let Some(r) = rt {
+        if !r.running {
             return NodeStatus::Down;
         }
+        return match r.health_status.or(svc.health_status) {
+            Some(HealthStatus::Ok) => NodeStatus::Ok,
+            Some(HealthStatus::Unhealthy) => NodeStatus::Unhealthy,
+            Some(HealthStatus::Starting) => NodeStatus::Unknown,
+            Some(HealthStatus::Unknown) | None => NodeStatus::Unknown,
+        };
     }
+    // No runtime row for this container — degraded mode. Fall back
+    // to inventory tier and treat it as unknown if missing.
     match svc.health_status {
         Some(HealthStatus::Ok) => NodeStatus::Ok,
         Some(HealthStatus::Unhealthy) => NodeStatus::Unhealthy,
@@ -280,4 +462,372 @@ fn pick_root_cause(walk: &Walk, status: &HashMap<String, NodeStatus>) -> Option<
         }
     }
     best.map(|(_, n)| n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnostic bundle.
+//
+// For unhealthy / down / restart-looping target services, attach three
+// artifacts inline so the operator (human or LLM) doesn't have to
+// re-run `inspect logs`, `inspect inspect`, and `inspect ports` to
+// reconstruct the picture. ≤4 remote commands per service per
+// invocation; each independent so partial failure still surfaces what
+// worked.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct EffectiveCommand {
+    entrypoint: Vec<String>,
+    cmd: Vec<String>,
+    /// Wrapper-script-injected flag (e.g. `-dev-listen-address=0.0.0.0:8200`)
+    /// detected by reading the container's docker-entrypoint script. None
+    /// when no injection pattern is found.
+    wrapper_injects: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PortRow {
+    port: u16,
+    /// `"bound→<host>:<port>"` when the host is listening on this
+    /// port, or `"free"` otherwise.
+    host: String,
+    /// `"bound"`, `"bound (twice!)"`, or `"exposed"` from the
+    /// container's perspective. "twice!" fires when the port is
+    /// declared both in `PortBindings` *and* in an entrypoint
+    /// wrapper-injected listener flag — the headline reproducer
+    /// pattern from the Vault triage.
+    container: String,
+    /// `"config"`, `"entrypoint <flag>"`, `"config + entrypoint <flag>"`,
+    /// or `"exposed"` — how this port came to be declared.
+    declared_by: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DiagnosticBundle {
+    recent_logs: Vec<String>,
+    effective_command: Option<EffectiveCommand>,
+    port_reality: Vec<PortRow>,
+}
+
+impl DiagnosticBundle {
+    /// Render the three sections as indented text lines for the human
+    /// `DATA:` block.
+    fn render_text(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push("  logs:".to_string());
+        if self.recent_logs.is_empty() {
+            lines.push("    (no recent logs)".to_string());
+        } else {
+            for l in &self.recent_logs {
+                lines.push(format!("    {l}"));
+            }
+        }
+        lines.push("  effective_command:".to_string());
+        match &self.effective_command {
+            Some(ec) => {
+                lines.push(format!("    entrypoint: {:?}", ec.entrypoint));
+                lines.push(format!("    cmd: {:?}", ec.cmd));
+                if let Some(w) = &ec.wrapper_injects {
+                    lines.push(format!("    wrapper injects: {w}"));
+                }
+            }
+            None => lines.push("    (unavailable)".to_string()),
+        }
+        lines.push("  port_reality:".to_string());
+        if self.port_reality.is_empty() {
+            lines.push("    (no declared ports)".to_string());
+        } else {
+            for p in &self.port_reality {
+                lines.push(format!(
+                    "    {}: declared by {}; host: {}; container: {}",
+                    p.port, p.declared_by, p.host, p.container
+                ));
+            }
+        }
+        lines
+    }
+
+    fn has_double_bind(&self) -> bool {
+        self.port_reality
+            .iter()
+            .any(|p| p.container.contains("twice"))
+    }
+
+    fn logs_show_port_conflict(&self) -> bool {
+        self.recent_logs
+            .iter()
+            .any(|l| l.to_lowercase().contains("address already in use"))
+    }
+}
+
+fn collect_diagnostic_bundle(
+    runner: &dyn RemoteRunner,
+    ns: &str,
+    target: &SshTarget,
+    container_name: &str,
+    log_tail: u32,
+) -> DiagnosticBundle {
+    use crate::ssh::exec::RunOpts as SshRunOpts;
+    let opts = SshRunOpts::with_timeout(15);
+    let mut bundle = DiagnosticBundle::default();
+
+    // ── 1/4: recent logs ────────────────────────────────────────────────
+    let cmd = format!("docker logs --tail {log_tail} {container_name} 2>&1 || true");
+    if let Ok(out) = runner.run(ns, target, &cmd, opts.clone()) {
+        let body = if !out.stdout.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        // Redact the log-tail bundle the same way the
+        // standalone `inspect logs` does. `inspect why` is read-only
+        // and not audited, so there's no `--show-secrets` flag to
+        // honor here yet — operators who genuinely need the verbatim
+        // tail can still run `inspect logs --tail N --show-secrets`.
+        // The redactor is per-bundle (one container's tail).
+        let redactor = crate::redact::OutputRedactor::new(false, false);
+        for line in body.lines() {
+            if let Some(masked) = redactor.mask_line(line) {
+                bundle.recent_logs.push(masked.into_owned());
+            }
+        }
+    }
+
+    // ── 2/4: effective Cmd / Entrypoint / declared ports (single inspect) ─
+    let cmd = format!(
+        "docker inspect --format '{{{{json .Config.Cmd}}}}|{{{{json .Config.Entrypoint}}}}|{{{{json .HostConfig.PortBindings}}}}|{{{{json .Config.ExposedPorts}}}}' {container_name}"
+    );
+    let mut declared_by_config: BTreeSet<u16> = BTreeSet::new();
+    let mut host_bindings: HashMap<u16, String> = HashMap::new();
+    let mut exposed_only: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(out) = runner.run(ns, target, &cmd, opts.clone()) {
+        if out.exit_code == 0 {
+            let trimmed = out.stdout.trim();
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            if parts.len() >= 4 {
+                let cmd_v: Vec<String> = serde_json::from_str(parts[0]).unwrap_or_default();
+                let ep_v: Vec<String> = serde_json::from_str(parts[1]).unwrap_or_default();
+                if let Ok(pb) = serde_json::from_str::<serde_json::Value>(parts[2]) {
+                    if let Some(map) = pb.as_object() {
+                        for (k, v) in map {
+                            if let Some(p) = parse_container_port(k) {
+                                declared_by_config.insert(p);
+                                if let Some(arr) = v.as_array() {
+                                    if let Some(first) = arr.first() {
+                                        let host_ip = first
+                                            .get("HostIp")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        let host_port = first
+                                            .get("HostPort")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        host_bindings.insert(p, format!("{host_ip}:{host_port}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(ep) = serde_json::from_str::<serde_json::Value>(parts[3]) {
+                    if let Some(map) = ep.as_object() {
+                        for k in map.keys() {
+                            if let Some(p) = parse_container_port(k) {
+                                if !declared_by_config.contains(&p) {
+                                    exposed_only.insert(p);
+                                }
+                            }
+                        }
+                    }
+                }
+                bundle.effective_command = Some(EffectiveCommand {
+                    cmd: cmd_v,
+                    entrypoint: ep_v,
+                    wrapper_injects: None,
+                });
+            }
+        }
+    }
+
+    // ── 3/4: entrypoint script — wrapper-injection scan ─────────────────
+    let cat_cmd = format!(
+        "docker exec {container_name} cat /docker-entrypoint.sh 2>/dev/null \
+         || docker exec {container_name} cat /entrypoint.sh 2>/dev/null \
+         || true"
+    );
+    let mut entrypoint_injects: BTreeSet<u16> = BTreeSet::new();
+    let mut wrapper_flag: Option<String> = None;
+    if let Ok(out) = runner.run(ns, target, &cat_cmd, opts.clone()) {
+        if !out.stdout.is_empty() {
+            let prefixes = [
+                "-dev-listen-address=",
+                "-listen-address=",
+                "-bind-address=",
+                "-api-addr=",
+                "--listen-address=",
+            ];
+            'outer: for line in out.stdout.lines() {
+                for prefix in &prefixes {
+                    if let Some(idx) = line.find(prefix) {
+                        let rest = &line[idx..];
+                        let end = rest
+                            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                            .unwrap_or(rest.len());
+                        let flag = &rest[..end];
+                        wrapper_flag = Some(flag.to_string());
+                        if let Some(p) = extract_port_from_addr(flag) {
+                            entrypoint_injects.insert(p);
+                        }
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ec) = bundle.effective_command.as_mut() {
+        ec.wrapper_injects = wrapper_flag.clone();
+    }
+
+    // ── 4/4: host port reality ──────────────────────────────────────────
+    let ss_cmd = "ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true";
+    let mut host_listening: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(out) = runner.run(ns, target, ss_cmd, opts.clone()) {
+        for line in out.stdout.lines() {
+            for tok in line.split_whitespace() {
+                if let Some(colon) = tok.rfind(':') {
+                    let port_str = &tok[colon + 1..];
+                    if let Ok(p) = port_str.parse::<u16>() {
+                        host_listening.insert(p);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Combine into port_reality rows ──────────────────────────────────
+    let mut all_ports: BTreeSet<u16> = BTreeSet::new();
+    all_ports.extend(declared_by_config.iter().copied());
+    all_ports.extend(exposed_only.iter().copied());
+    all_ports.extend(entrypoint_injects.iter().copied());
+    for p in all_ports {
+        let from_config = declared_by_config.contains(&p);
+        let from_entry = entrypoint_injects.contains(&p);
+        let declared_by = match (from_config, from_entry) {
+            (true, true) => format!(
+                "config + entrypoint {}",
+                wrapper_flag.as_deref().unwrap_or("(injection)")
+            ),
+            (true, false) => "config".to_string(),
+            (false, true) => format!(
+                "entrypoint {}",
+                wrapper_flag.as_deref().unwrap_or("(injection)")
+            ),
+            (false, false) => "exposed".to_string(),
+        };
+        let host = if host_listening.contains(&p) {
+            host_bindings
+                .get(&p)
+                .map(|b| format!("bound→{b}"))
+                .unwrap_or_else(|| "bound".to_string())
+        } else {
+            "free".to_string()
+        };
+        let container = if from_config && from_entry {
+            "bound (twice!)".to_string()
+        } else if from_config || from_entry {
+            "bound".to_string()
+        } else {
+            "exposed".to_string()
+        };
+        bundle.port_reality.push(PortRow {
+            port: p,
+            host,
+            container,
+            declared_by,
+        });
+    }
+
+    bundle
+}
+
+fn parse_container_port(spec: &str) -> Option<u16> {
+    spec.split('/').next().and_then(|s| s.parse::<u16>().ok())
+}
+
+fn extract_port_from_addr(flag: &str) -> Option<u16> {
+    let rhs = flag.split_once('=')?.1;
+    let last = rhs.rsplit(':').next()?;
+    last.trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse::<u16>()
+        .ok()
+}
+
+/// When `inspect why <ns>/<token>` resolves to zero
+/// services, look up `<token>` against the runtime inventory of each
+/// candidate namespace. If `<token>` matches a running container's
+/// `container_name`, return the chained hint string. Otherwise return
+/// `None` so the caller falls back to the original selector error.
+///
+/// Conservative: only fires for the simple `<ns>/<single-token>`
+/// shape. Globs, regex atoms, multi-atom selectors, `_` host
+/// targets, and `:path` suffixes all fall through. The hint must be
+/// unambiguous or it isn't worth printing.
+fn build_container_hint(raw_selector: &str) -> Option<String> {
+    let sel = parse_selector(raw_selector).ok()?;
+    if sel.path.is_some() {
+        return None;
+    }
+    let token = match sel.service.as_ref()? {
+        ServiceSpec::Atoms(atoms) if atoms.len() == 1 => match &atoms[0] {
+            ServiceAtom::Pattern(p) if !p.contains('*') && !p.contains('?') && !p.contains('[') => {
+                p.clone()
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let ns_atoms: Vec<&str> = match &sel.server {
+        ServerSpec::Atoms(atoms) => atoms
+            .iter()
+            .filter_map(|a| match a {
+                ServerAtom::Pattern(p)
+                    if !p.contains('*') && !p.contains('?') && !p.contains('[') =>
+                {
+                    Some(p.as_str())
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => return None,
+    };
+    if ns_atoms.is_empty() {
+        return None;
+    }
+    let runner = current_runner();
+    for ns in &ns_atoms {
+        let Ok((resolved, target)) = resolve_target(ns) else {
+            continue;
+        };
+        let profile = load_profile(ns).ok().flatten();
+        let ctx = NsCtx {
+            namespace: (*ns).to_string(),
+            target,
+            profile,
+            env_overlay: resolved.config.env.clone().unwrap_or_default(),
+            auto_reauth: resolved.config.auto_reauth.unwrap_or(true),
+        };
+        let Ok((snapshot, _)) = get_runtime(runner.as_ref(), &ctx, GetOpts::default()) else {
+            continue;
+        };
+        if snapshot.services.iter().any(|s| s.container_name == token) {
+            let pretty = format!("{ns}/{token}");
+            return Some(format!(
+                "note: '{pretty}' is a running container but not a registered service definition.\n  \
+                 → inspect logs {pretty}                       (tail logs directly)\n  \
+                 → inspect run {ns} 'docker inspect {token}'    (raw inspect dump)\n  \
+                 → inspect setup {ns} --force                   (re-classify if you expect this to be a service)"
+            ));
+        }
+    }
+    None
 }

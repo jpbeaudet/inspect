@@ -72,6 +72,39 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
     // the FIRST colon that is OUTSIDE any regex `/.../` for service/path.
 
     // 1) server/service split: first slash from the start.
+    //
+    // The host-path shorthand `arte:/var/log/syslog`
+    // (sugar for `arte/_:/var/log/syslog`) used to be rejected here
+    // because the embedded `/` from the absolute path was treated as
+    // the server/service separator, leaving the parser with a server
+    // of `arte:` (which then failed character validation with a
+    // generic "invalid selector character" error). Detect the shape
+    // early: if the FIRST `:` outside any regex appears BEFORE the
+    // first `/`, the input is the host-path shorthand and the colon
+    // is the service/path separator, not part of the server.
+    let first_slash = trimmed.find('/');
+    let first_colon = split_outside_regex(trimmed, ':').map(|(pre, _)| pre.len());
+    let host_shorthand = matches!(
+        (first_colon, first_slash),
+        (Some(c), Some(s)) if c < s
+    ) || matches!((first_colon, first_slash), (Some(_), None));
+    if host_shorthand {
+        let c = first_colon.unwrap();
+        let server = &trimmed[..c];
+        let path = &trimmed[c + 1..];
+        if server.is_empty() {
+            return Err(SelectorParseError::EmptyServer(trimmed.to_string()));
+        }
+        if path.is_empty() {
+            return Err(SelectorParseError::EmptyPath(trimmed.to_string()));
+        }
+        return Ok(Selector {
+            server: parse_server(server)?,
+            service: Some(ServiceSpec::Host),
+            path: Some(PathSpec(path.to_string())),
+            source: trimmed.to_string(),
+        });
+    }
     let (server_str, after_slash): (&str, Option<&str>) = match trimmed.find('/') {
         Some(i) => (&trimmed[..i], Some(&trimmed[i + 1..])),
         None => (trimmed, None),

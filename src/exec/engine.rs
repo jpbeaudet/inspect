@@ -5,7 +5,7 @@
 //! 2. For each selector branch in the union:
 //!    a. Resolve `source=` to a [`Medium`].
 //!    b. Resolve `server`/`service` to concrete (namespace, target) steps.
-//!    c. Read records via the medium's [`Reader`].
+//!    c. Read records via the medium's `Reader`.
 //!    d. Apply remaining selector matchers (server/service/source
 //!    regexes, plus user-defined labels).
 //! 3. Concatenate all branch outputs.
@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 
-use crate::alias;
 use crate::exec::medium::Medium;
 use crate::exec::metric;
 use crate::exec::pipeline;
@@ -45,9 +44,10 @@ pub enum ExecOutput {
 
 /// Parse and execute a query end-to-end.
 pub fn execute(query: &str, opts: crate::exec::ExecOpts) -> Result<ExecOutput> {
-    let expanded = crate::logql::expand_aliases(query, |name| {
-        alias::get(name).ok().flatten().map(|e| e.selector)
-    })?;
+    // Chain unwinding + `$param` substitution happen inside
+    // `default_alias_resolver`, so a `@svc-logs(svc=pulse) |= "x"`
+    // query with a chained body expands fully before the parser runs.
+    let expanded = crate::logql::expand_aliases(query, crate::logql::default_alias_resolver)?;
     let ast = crate::logql::parse(&expanded)?;
     let runner = current_runner();
     let ctx = ExecCtx {

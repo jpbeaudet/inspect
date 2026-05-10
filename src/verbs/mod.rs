@@ -9,7 +9,9 @@
 //! - `1` — no matches (search-shaped verbs only: `grep`, `find`)
 //! - `2` — error (any failure path)
 
+pub mod cache;
 pub mod cat;
+pub mod compose;
 pub mod correlation;
 pub mod cursor;
 pub mod dispatch;
@@ -31,6 +33,8 @@ pub mod quote;
 pub mod run;
 pub mod runtime;
 pub mod status;
+pub mod steps;
+pub mod transfer;
 pub mod volumes;
 pub mod watch;
 pub mod write;

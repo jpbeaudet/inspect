@@ -1,4 +1,4 @@
-//! `--merged` multi-container log view (P5, v0.1.1).
+//! `--merged` multi-container log view.
 //!
 //! When a `inspect logs` selector matches multiple services and the user
 //! passes `--merged`, we render a single interleaved stream prefixed by
@@ -18,7 +18,7 @@
 //!   between hosts is documented in the help body; the alternative
 //!   (buffered window-merge) would cap the live feel of `--follow`.
 //!
-//! Field-pitfall driver: P5 in `INSPECT_v0.1.1_PATCH_SPEC.md`. Operators
+//! Field-pitfall driver: merged tail across services. Operators
 //! correlating across multiple services lost mental context juggling
 //! N terminal panes; the merged view restores chronology.
 
@@ -122,6 +122,7 @@ pub fn batch_merged(
     runner: &(dyn RemoteRunner + Send + Sync),
     sources: &[MergeSource<'_>],
     timeout_secs: u64,
+    show_secrets: bool,
     mut emit: impl FnMut(&MergeLine),
 ) -> Result<usize> {
     // Collect per-source results in the same order as `sources` so the
@@ -135,14 +136,22 @@ pub fn batch_merged(
                     let opts = RunOpts::with_timeout(timeout_secs);
                     let out = runner.run(src.namespace, src.target, &src.cmd, opts)?;
                     let mut buf = Vec::new();
+                    // Each source has its own redactor so
+                    // a PEM block from source A doesn't poison source
+                    // B's state — the merge happens after redaction.
+                    let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
                     for (seq, raw) in (0_u64..).zip(out.stdout.lines()) {
                         let (ts, body) = split_timestamp(raw);
+                        let masked = match redactor.mask_line(body) {
+                            Some(m) => m.into_owned(),
+                            None => continue,
+                        };
                         buf.push(MergeLine {
                             ts,
                             svc_idx: idx,
                             seq,
                             svc: src.svc.clone(),
-                            line: body.to_string(),
+                            line: masked,
                         });
                     }
                     Ok(buf)
@@ -174,6 +183,7 @@ pub fn follow_merged(
     runner: &(dyn RemoteRunner + Send + Sync),
     sources: &[MergeSource<'_>],
     timeout_secs: u64,
+    show_secrets: bool,
     mut emit: impl FnMut(&MergeLine),
 ) -> Result<usize> {
     let (tx, rx) = mpsc::channel::<MergeLine>();
@@ -185,18 +195,25 @@ pub fn follow_merged(
                 let opts = RunOpts::with_timeout(timeout_secs);
                 let mut seq: u64 = 0;
                 let svc = src.svc.clone();
+                // Per-source redactor — same rationale as
+                // `batch_merged` (PEM state must not cross sources).
+                let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
                 let _ =
                     runner.run_streaming(src.namespace, src.target, &src.cmd, opts, &mut |line| {
                         if crate::exec::cancel::is_cancelled() {
                             return;
                         }
                         let (ts, body) = split_timestamp(line);
+                        let masked = match redactor.mask_line(body) {
+                            Some(m) => m.into_owned(),
+                            None => return,
+                        };
                         let m = MergeLine {
                             ts,
                             svc_idx: idx,
                             seq,
                             svc: svc.clone(),
-                            line: body.to_string(),
+                            line: masked,
                         };
                         seq += 1;
                         // Receiver gone == main thread aborted; drop.
@@ -224,12 +241,21 @@ pub fn follow_merged(
 pub fn print_human(prefix_svc: &str, body: &str) {
     let safe =
         crate::format::safe::safe_terminal_line(body, crate::format::safe::DEFAULT_MAX_LINE_BYTES);
-    println!("[{prefix_svc}] {safe}");
+    crate::tee_println!("[{prefix_svc}] {safe}");
 }
 
 /// JSON-out variant: emit a single envelope keyed on the namespace
 /// recorded by the source plus a `svc` field for the merged stream.
-pub fn print_json(namespace: &str, svc: &str, body: &str) {
+///
+/// `filter` is the `--select` streaming filter, threaded
+/// through the same chokepoint as the non-merged path so `--select`
+/// covers both flavors uniformly.
+pub fn print_json(
+    namespace: &str,
+    svc: &str,
+    body: &str,
+    filter: Option<&mut crate::query::ndjson::Filter>,
+) -> anyhow::Result<()> {
     JsonOut::write(
         &Envelope::new(namespace, "logs", "logs")
             .with_service(svc)
@@ -238,7 +264,8 @@ pub fn print_json(namespace: &str, svc: &str, body: &str) {
                 crate::format::safe::safe_machine_line(body).as_ref(),
             )
             .put("merged", true),
-    );
+        filter,
+    )
 }
 
 #[cfg(test)]

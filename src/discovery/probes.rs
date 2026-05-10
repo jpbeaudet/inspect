@@ -5,8 +5,8 @@
 //! degrade gracefully when a tool is missing or a command fails.
 
 use crate::profile::schema::{
-    HealthStatus, Image, LogDriver, Mount, Network, Port, RemoteTooling, Service, ServiceKind,
-    Volume,
+    ComposeProject, HealthStatus, Image, LogDriver, Mount, Network, Port, RemoteTooling, Service,
+    ServiceKind, Volume,
 };
 use crate::ssh::{run_remote, RunOpts, SshTarget};
 use crate::verbs::quote::shquote;
@@ -20,7 +20,185 @@ pub struct ProbeResult {
     pub networks: Vec<Network>,
     pub remote_tooling: Option<RemoteTooling>,
     pub host_listeners: Vec<HostListener>,
+    /// Compose projects discovered by `probe_compose_projects`.
+    pub compose_projects: Vec<ComposeProject>,
     pub warnings: Vec<String>,
+    /// A probe-level *fatal* condition. When `Some`, the
+    /// discovery engine escalates to an `error:` (non-zero exit) with
+    /// the embedded chained hint instead of folding the line into
+    /// `warnings`. Today only the docker-inspect path uses this — when
+    /// every per-container fallback also failed, we know the daemon is
+    /// down (or the socket is gone) and the right answer is "error,
+    /// not warning".
+    pub fatal: Option<String>,
+}
+
+// -----------------------------------------------------------------------------
+// Three-bucket classification of `docker inspect` outcomes.
+//
+// Field feedback (v0.1.2, two independent users) flagged a single noisy
+// `warning:` line on every healthy `inspect setup` against hosts with
+// 30+ containers. Root cause: a fixed 10s budget on the batched
+// `docker inspect` invocation, plus an unconditional `warning: ...
+// falling back to per-container probe` whenever the batch was slow.
+// We now distinguish three buckets so the warning channel only fires
+// on real, actionable problems:
+//
+//   1. `Clean`               — every container inspected, no noise.
+//   2. `SlowButSuccessful`   — batch slow, fallback rescued every
+//                              container. Demoted to debug-level.
+//   3. `PartialTimeout`      — N of M containers still failed after
+//                              the per-container fallback. ONE summary
+//                              warning at end of probe.
+//   4. `GenuineFailure`      — zero containers inspected. Escalated
+//                              to a probe-level error via `r.fatal`.
+//
+// See docs/RUNBOOK.md "Docker inspect timeout classification" for the
+// full design and the formula used to scale the batch timeout.
+// -----------------------------------------------------------------------------
+
+/// Outcome of a batched `docker inspect` against a known total number of
+/// containers, after the per-container fallback (if any) has run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectClassification {
+    /// Every container inspected. No warning, no fatal.
+    Clean,
+    /// Batch slow but fallback (or batch retry) collected every
+    /// container. Demoted to debug-level only — no user-visible
+    /// warning. The string is the short description used by the
+    /// debug log.
+    SlowButSuccessful { detail: String },
+    /// `failed` of `total` containers could not be inspected even
+    /// after the per-container fallback. One summary warning line.
+    PartialTimeout { failed: usize, total: usize },
+    /// Zero containers inspected (daemon down, socket gone, etc.).
+    /// Escalated to error.
+    GenuineFailure { detail: String },
+}
+
+impl InspectClassification {
+    /// Render the user-visible warning line for this classification,
+    /// matching the spec format. Returns `None` when no warning
+    /// should be emitted (Clean, SlowButSuccessful, GenuineFailure —
+    /// the last one is escalated through `ProbeResult.fatal` instead).
+    pub fn warning_line(&self) -> Option<String> {
+        match self {
+            Self::PartialTimeout { failed, total } => Some(format!(
+                "docker inspect timed out for {failed}/{total} containers; \
+                 rerun with --force or check daemon load"
+            )),
+            Self::Clean | Self::SlowButSuccessful { .. } | Self::GenuineFailure { .. } => None,
+        }
+    }
+
+    /// Render the chained-hint error message for the fatal bucket.
+    /// Returns `None` for non-fatal classifications.
+    pub fn fatal_line(&self) -> Option<String> {
+        match self {
+            Self::GenuineFailure { detail } => Some(format!(
+                "docker inspect failed for every container ({detail}); \
+                 the daemon is unreachable or refusing connections — \
+                 try `inspect run <ns> -- 'sudo systemctl status docker'` \
+                 then rerun `inspect setup <ns> --force`"
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Classify a `docker inspect` outcome into one of the four buckets.
+///
+/// * `total` — number of containers we attempted to inspect.
+/// * `succeeded` — number of containers for which we got valid detail
+///   JSON (after batch + per-container fallback).
+/// * `batch_was_slow` — `true` when the batched call hit its timeout
+///   but the fallback then rescued some/all containers. Unused when
+///   `succeeded == total` and the batch itself succeeded (Clean) — we
+///   only need it to distinguish Clean from SlowButSuccessful.
+/// * `last_error` — short, human-readable description of the most
+///   recent batch / per-container error, used for the debug-log line
+///   on SlowButSuccessful and the chained hint on GenuineFailure.
+///   Empty string is fine when nothing went wrong.
+pub fn classify_inspect_outcome(
+    total: usize,
+    succeeded: usize,
+    batch_was_slow: bool,
+    last_error: &str,
+) -> InspectClassification {
+    if total == 0 {
+        // No containers on the host: nothing to classify.
+        return InspectClassification::Clean;
+    }
+    if succeeded == 0 {
+        return InspectClassification::GenuineFailure {
+            detail: last_error.to_string(),
+        };
+    }
+    if succeeded == total {
+        if batch_was_slow {
+            return InspectClassification::SlowButSuccessful {
+                detail: last_error.to_string(),
+            };
+        }
+        return InspectClassification::Clean;
+    }
+    InspectClassification::PartialTimeout {
+        failed: total.saturating_sub(succeeded),
+        total,
+    }
+}
+
+/// Scale the batched `docker inspect` timeout with the
+/// container inventory size. A fixed 10s budget was too aggressive for
+/// hosts with 30+ containers (every healthy `inspect setup` emitted a
+/// spurious warning). New formula:
+///
+/// ```text
+///     timeout = max(10s, 250ms * container_count), capped at 60s.
+/// ```
+///
+/// `override_secs` (set via `INSPECT_DOCKER_INSPECT_TIMEOUT=<seconds>`,
+/// future `discovery.docker_inspect_timeout` in `config.toml`) bypasses
+/// the formula entirely so operators on pathological hosts can pin a
+/// known-good budget.
+pub fn compute_docker_inspect_timeout(
+    container_count: usize,
+    override_secs: Option<u64>,
+) -> std::time::Duration {
+    use std::time::Duration;
+    if let Some(s) = override_secs {
+        // Operator override wins, even when 0 (interpreted as "use
+        // libssh's default" — the ssh layer enforces its own ceiling).
+        return Duration::from_secs(s);
+    }
+    let scaled_ms = 250u64.saturating_mul(container_count as u64);
+    let scaled = Duration::from_millis(scaled_ms);
+    let floor = Duration::from_secs(10);
+    let cap = Duration::from_secs(60);
+    let chosen = if scaled < floor { floor } else { scaled };
+    if chosen > cap {
+        cap
+    } else {
+        chosen
+    }
+}
+
+/// Read the `INSPECT_DOCKER_INSPECT_TIMEOUT` env var (seconds) if set,
+/// returning `None` on parse failure or absence.
+fn docker_inspect_timeout_override() -> Option<u64> {
+    let raw = std::env::var("INSPECT_DOCKER_INSPECT_TIMEOUT").ok()?;
+    raw.trim().parse::<u64>().ok()
+}
+
+/// True when debug-level discovery logs should reach stderr. Honors
+/// `INSPECT_DEBUG=1` (canonical) and `RUST_LOG=debug` (familiar to
+/// operators coming from the `tracing`/`env_logger` ecosystem).
+fn discovery_debug_enabled() -> bool {
+    matches!(std::env::var("INSPECT_DEBUG").as_deref(), Ok("1"))
+        || std::env::var("RUST_LOG")
+            .ok()
+            .map(|v| v.to_ascii_lowercase().contains("debug"))
+            .unwrap_or(false)
 }
 
 /// A single host-level listening socket discovered via `ss` / `netstat`.
@@ -34,6 +212,13 @@ pub struct HostListener {
 /// Probe which remote tools are present. Cheap; runs a single shell line.
 pub fn probe_remote_tooling(ns: &str, target: &SshTarget) -> ProbeResult {
     // `command -v X >/dev/null 2>&1 && echo X=1 || echo X=0`
+    // `Jq` is probed informationally only — every recipe
+    // in the manual / runbook / help system uses the in-binary
+    // `--select` flag (jaq engine). A missing `jq` does not fire any
+    // warning; the human renderer in `commands::setup::print_human`
+    // attaches an "optional from v0.1.3 onward" pointer when
+    // `t.jq == false` so an operator scanning the summary isn't left
+    // wondering. See `inspect help select`.
     let tools = [
         "rg",
         "jq",
@@ -189,38 +374,84 @@ pub fn probe_docker_containers(ns: &str, target: &SshTarget) -> ProbeResult {
     // 2) Collect ports + mounts + log driver via a single `docker inspect`
     //    on all the IDs. Output is JSON; we use `serde_json` to parse.
     //
-    // P13: if the batch call times out we fall back to inspecting each
+    // Scale the batch timeout with inventory size. A
+    // fixed 10s budget produced a spurious `warning:` on every
+    // healthy `inspect setup` against hosts with 30+ containers.
+    // The new floor-and-cap formula keeps tiny hosts at 10s and
+    // grants larger fleets up to 60s. `INSPECT_DOCKER_INSPECT_TIMEOUT=<s>`
+    // overrides for operators on pathological daemons.
+    //
+    // If the batch call times out we fall back to inspecting each
     // container individually with a tighter per-call timeout. A single
     // wedged container (e.g. one whose Docker daemon socket is slow,
     // or whose health check is hung) used to take the entire host's
     // discovery down with it; now we record a warning, mark just that
     // service as `discovery_incomplete`, and keep going.
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    let total = ids.len();
     let mut incomplete_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let inspect_cmd = format!(
         "docker inspect --format '{{{{json .}}}}' {} 2>/dev/null",
         ids.join(" ")
     );
-    let details = match run_remote(ns, target, &inspect_cmd, RunOpts::with_timeout(10)) {
+    let batch_timeout = compute_docker_inspect_timeout(total, docker_inspect_timeout_override());
+    // Track whether the batch exhausted its budget so we can
+    // distinguish `Clean` from `SlowButSuccessful` for the final
+    // classification. `last_error` carries the most recent failure
+    // detail for the debug-log line / fatal hint.
+    let mut batch_was_slow = false;
+    let mut last_error = String::new();
+    let details = match run_remote(
+        ns,
+        target,
+        &inspect_cmd,
+        RunOpts::with_timeout(batch_timeout.as_secs().max(1)),
+    ) {
         Ok(o) if o.ok() => parse_docker_inspect(&o.stdout),
         // Batched call failed (timeout, partial JSON, daemon hiccup) --
         // probe each container individually with a 5s budget so a
-        // single wedged container can't block the rest.
+        // single wedged container can't block the rest:
+        // fallback is silent (no warning); we classify the aggregate
+        // outcome at the end and emit at most one summary line.
         Ok(o) => {
-            r.warnings.push(format!(
-                "docker inspect (batched) exited {}: {} -- falling back to per-container probe",
+            batch_was_slow = true;
+            last_error = format!(
+                "batched docker inspect exited {}: {}",
                 o.exit_code,
                 o.stderr.trim()
-            ));
-            inspect_per_container(ns, target, &ids, &mut r, &mut incomplete_ids)
+            );
+            inspect_per_container(ns, target, &ids, &mut incomplete_ids, &mut last_error)
         }
         Err(e) => {
-            r.warnings.push(format!(
-                "docker inspect (batched) failed: {e} -- falling back to per-container probe"
-            ));
-            inspect_per_container(ns, target, &ids, &mut r, &mut incomplete_ids)
+            batch_was_slow = true;
+            last_error = format!("batched docker inspect failed: {e}");
+            inspect_per_container(ns, target, &ids, &mut incomplete_ids, &mut last_error)
         }
     };
+
+    // Classify the aggregate outcome and route it to the right
+    // channel — silent / debug-only / single warning / fatal error.
+    let succeeded = total.saturating_sub(incomplete_ids.len());
+    let classification = classify_inspect_outcome(total, succeeded, batch_was_slow, &last_error);
+    match &classification {
+        InspectClassification::Clean => {}
+        InspectClassification::SlowButSuccessful { detail } => {
+            if discovery_debug_enabled() {
+                eprintln!(
+                    "debug: docker inspect slow-but-successful on {} ({} container(s)): {}",
+                    target.host, total, detail
+                );
+            }
+        }
+        InspectClassification::PartialTimeout { .. } => {
+            if let Some(line) = classification.warning_line() {
+                r.warnings.push(line);
+            }
+        }
+        InspectClassification::GenuineFailure { .. } => {
+            r.fatal = classification.fatal_line();
+        }
+    }
 
     // Field pitfall §2.1: warn when any json-file container log has
     // grown past `INSPECT_LOG_SIZE_WARN_BYTES` (default 1 GiB). One
@@ -429,7 +660,6 @@ pub fn probe_docker_inventory(ns: &str, target: &SshTarget) -> ProbeResult {
                 r.images.push(Image {
                     repo_tag: cols[0].to_string(),
                     id: cols.get(1).map(|s| s.to_string()).filter(|s| !s.is_empty()),
-                    size_bytes: None, // human size; deferred for now
                 });
             }
         }
@@ -437,26 +667,105 @@ pub fn probe_docker_inventory(ns: &str, target: &SshTarget) -> ProbeResult {
     r
 }
 
-/// Probe host-level listening sockets via `ss -tlnpH` (preferred) with
-/// `netstat -tlnp` fallback.
+/// Probe compose projects via `docker compose ls --format
+/// json`. Best-effort: hosts without `docker compose` installed
+/// (compose v1, or no compose plugin) return an empty list with no
+/// warning, because the absence of compose is normal on plain
+/// container hosts. A genuine command failure (daemon down) is
+/// already reported by [`probe_docker_containers`]; we don't
+/// double-warn here.
+///
+/// The default `docker compose ls` only returns *running* projects.
+/// We pass `--all` so stopped projects show up too — operators want
+/// to see "this project exists but is currently down" without
+/// having to remember the flag.
+pub fn probe_compose_projects(ns: &str, target: &SshTarget) -> ProbeResult {
+    let mut r = ProbeResult::default();
+    let cmd = "docker compose ls --all --format json 2>/dev/null";
+    let out = match run_remote(ns, target, cmd, RunOpts::with_timeout(15)) {
+        Ok(o) => o,
+        Err(_) => return r,
+    };
+    if !out.ok() {
+        // Treat as "no compose plugin" — silent. The docker probe
+        // already covers genuine daemon failures.
+        return r;
+    }
+    let raw = out.stdout.trim();
+    if raw.is_empty() || raw == "[]" {
+        return r;
+    }
+    r.compose_projects = ComposeProject::parse_ls_json(raw);
+    r
+}
+
+/// Probe host-level listening sockets. : runs both TCP
+/// (`ss -H -tlnp`) and UDP (`ss -H -ulnp`) probes — earlier surfaced
+/// only TCP, leaving DNS forwarders, mDNS responders, syslog
+/// receivers, IPSec daemons, and WireGuard endpoints invisible to
+/// `inspect ports` and `inspect status`. Each probe falls back to
+/// the matching `netstat` invocation when `ss` is missing. Per-proto
+/// failures are independent — a host that exposes TCP listeners but
+/// rejects UDP probing still surfaces TCP. Each parsed line is
+/// tagged with its proto so the downstream `Port.proto` and the
+/// JSON envelopes get the right value (the schema's
+/// `default_proto` was already `"tcp"` for backwards compat with
+/// earlier profiles, but the parser stamps both protos explicitly).
 pub fn probe_host_listeners(ns: &str, target: &SshTarget) -> ProbeResult {
     let mut r = ProbeResult::default();
-    let tries = ["ss -H -tlnp 2>/dev/null", "netstat -tlnp 2>/dev/null"];
-    for cmd in tries {
+    let mut got_tcp = false;
+    let mut got_udp = false;
+    probe_listeners_one_proto(
+        ns,
+        target,
+        "tcp",
+        &["ss -H -tlnp 2>/dev/null", "netstat -tlnp 2>/dev/null"],
+        &mut r,
+        &mut got_tcp,
+    );
+    probe_listeners_one_proto(
+        ns,
+        target,
+        "udp",
+        &["ss -H -ulnp 2>/dev/null", "netstat -ulnp 2>/dev/null"],
+        &mut r,
+        &mut got_udp,
+    );
+    if !got_tcp && !got_udp {
+        r.warnings
+            .push("no host-port listing available (ss/netstat absent or no permission)".into());
+    }
+    r
+}
+
+/// Run one of the two probe-command lists (TCP or UDP)
+/// and tag every parsed listener with the given `proto`. The first
+/// command that returns ok + non-empty stdout wins; subsequent
+/// fallbacks are skipped so we don't double-count a host that has
+/// both `ss` and `netstat`. Sets `got` to true on success so the
+/// outer probe can decide whether the global "nothing reachable"
+/// warning fires.
+fn probe_listeners_one_proto(
+    ns: &str,
+    target: &SshTarget,
+    proto: &str,
+    cmds: &[&str],
+    r: &mut ProbeResult,
+    got: &mut bool,
+) {
+    for cmd in cmds {
         if let Ok(out) = run_remote(ns, target, cmd, RunOpts::with_timeout(10)) {
             if out.ok() && !out.stdout.trim().is_empty() {
                 for line in out.stdout.lines() {
-                    if let Some(l) = parse_listener_line(line) {
+                    if let Some(l) = parse_listener_line_with_proto(line, proto) {
                         r.host_listeners.push(l);
                     }
                 }
-                return r;
+                *got = true;
+                return;
             }
         }
     }
-    r.warnings
-        .push("no host-port listing available (ss/netstat absent or no permission)".into());
-    r
 }
 
 /// Probe non-Docker services via systemd. Returns at most a few hundred
@@ -776,18 +1085,24 @@ pub(crate) struct InspectDetail {
     pub log_path: Option<String>,
 }
 
-/// P13: per-container `docker inspect` fallback used when the batched
+/// Per-container `docker inspect` fallback used when the batched
 /// call timed out or otherwise failed. Each id gets its own 5-second
 /// budget; ids whose individual probe also fails are recorded in
 /// `incomplete_ids` so the caller can flag the corresponding service
 /// with `discovery_incomplete = true`. Returns the merged
 /// detail-by-id map of every container we *did* successfully inspect.
+///
+/// This helper no longer pushes one warning per failing
+/// container — the caller classifies the aggregate outcome and emits
+/// at most one summary line. We do thread the most recent failure
+/// detail back via `last_error` so the classifier's debug / fatal
+/// lines have something useful to say.
 fn inspect_per_container(
     ns: &str,
     target: &SshTarget,
     ids: &[&str],
-    r: &mut ProbeResult,
     incomplete_ids: &mut std::collections::HashSet<String>,
+    last_error: &mut String,
 ) -> std::collections::HashMap<String, InspectDetail> {
     let mut out = std::collections::HashMap::new();
     for id in ids {
@@ -798,17 +1113,15 @@ fn inspect_per_container(
                 out.extend(part);
             }
             Ok(o) => {
-                r.warnings.push(format!(
-                    "docker inspect for container {id} exited {}: {} -- service marked incomplete",
+                *last_error = format!(
+                    "per-container docker inspect for {id} exited {}: {}",
                     o.exit_code,
                     o.stderr.trim()
-                ));
+                );
                 incomplete_ids.insert((*id).to_string());
             }
             Err(e) => {
-                r.warnings.push(format!(
-                    "docker inspect for container {id} failed: {e} -- service marked incomplete"
-                ));
+                *last_error = format!("per-container docker inspect for {id} failed: {e}");
                 incomplete_ids.insert((*id).to_string());
             }
         }
@@ -953,11 +1266,18 @@ pub(crate) fn parse_health_from_status(status: &str) -> Option<HealthStatus> {
     }
 }
 
-pub(crate) fn parse_listener_line(line: &str) -> Option<HostListener> {
-    // ss -H -tlnp output (one socket per line):
+/// Parse one row of `ss -H -[tu]lnp` or
+/// `netstat -[tu]lnp` output and tag the resulting `HostListener`
+/// with the supplied proto. The line shape is identical between
+/// TCP and UDP so the parser is shared — only the caller knows
+/// which probe produced this row.
+pub(crate) fn parse_listener_line_with_proto(line: &str, proto: &str) -> Option<HostListener> {
+    // ss -H -tlnp / -ulnp output (one socket per line):
     //   LISTEN 0  4096  0.0.0.0:22  0.0.0.0:*  users:(("sshd",pid=1,fd=3))
-    // netstat -tlnp output:
+    //   UNCONN 0  0     0.0.0.0:53  0.0.0.0:*  users:(("dnsmasq",pid=...))
+    // netstat -tlnp / -ulnp output:
     //   tcp  0  0  0.0.0.0:22  0.0.0.0:*  LISTEN  1/sshd
+    //   udp  0  0  0.0.0.0:53  0.0.0.0:*          1/dnsmasq
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -969,10 +1289,6 @@ pub(crate) fn parse_listener_line(line: &str) -> Option<HostListener> {
         .find(|t| t.contains(':') && !t.contains("users:"))?;
     let port_str = bind.rsplit(':').next()?;
     let port: u16 = port_str.parse().ok()?;
-
-    // Both `ss -tln` and `netstat -tln` filter to TCP, so we always tag
-    // these listeners as `tcp`. UDP discovery is deferred.
-    let proto = "tcp";
 
     let process = extract_process(line);
     Some(HostListener {
@@ -1158,17 +1474,49 @@ mod tests {
     #[test]
     fn parse_ss_line() {
         let l = "LISTEN 0  4096  0.0.0.0:22  0.0.0.0:*  users:((\"sshd\",pid=1,fd=3))";
-        let r = parse_listener_line(l).unwrap();
+        let r = parse_listener_line_with_proto(l, "tcp").unwrap();
         assert_eq!(r.port, 22);
+        assert_eq!(r.proto, "tcp");
         assert_eq!(r.process.as_deref(), Some("sshd"));
     }
 
     #[test]
     fn parse_netstat_line() {
         let l = "tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN      42/myapp";
-        let r = parse_listener_line(l).unwrap();
+        let r = parse_listener_line_with_proto(l, "tcp").unwrap();
         assert_eq!(r.port, 8080);
+        assert_eq!(r.proto, "tcp");
         assert_eq!(r.process.as_deref(), Some("myapp"));
+    }
+
+    // UDP-shaped probe rows from `ss -H -ulnp` and
+    // `netstat -ulnp`. The line shape is identical between TCP and
+    // UDP; the proto comes from the caller.
+    #[test]
+    fn l9_parse_ss_udp_line() {
+        let l = "UNCONN 0  0  0.0.0.0:53  0.0.0.0:*  users:((\"dnsmasq\",pid=99,fd=4))";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 53);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("dnsmasq"));
+    }
+
+    #[test]
+    fn l9_parse_netstat_udp_line() {
+        let l = "udp        0      0 0.0.0.0:514             0.0.0.0:*                           7/rsyslogd";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 514);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("rsyslogd"));
+    }
+
+    #[test]
+    fn l9_parse_ipv6_udp_bind() {
+        let l = "UNCONN 0  0  [::]:5353  [::]:*  users:((\"avahi\",pid=42,fd=5))";
+        let r = parse_listener_line_with_proto(l, "udp").unwrap();
+        assert_eq!(r.port, 5353);
+        assert_eq!(r.proto, "udp");
+        assert_eq!(r.process.as_deref(), Some("avahi"));
     }
 
     #[test]
@@ -1258,5 +1606,173 @@ mod tests {
         assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
         assert_eq!(human_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(human_bytes(2u64 * 1024 * 1024 * 1024), "2.0 GiB");
+    }
+
+    // -------------------------------------------------------------------------
+    // acceptance tests — three-bucket classification and the
+    // inventory-scaled timeout formula. Each test maps 1:1 to a contract
+    // line in the changelog.
+    //
+    // The integration test file `tests/phase_f_v013.rs` cannot import
+    // internal helpers (this crate has no library target), so the     // unit suite lives next to the code under test. The contract is
+    // unchanged: every bucket the spec calls out has a named test.
+    // -------------------------------------------------------------------------
+
+    use super::{classify_inspect_outcome, compute_docker_inspect_timeout, InspectClassification};
+    use std::time::Duration;
+
+    /// contract #1: a healthy host with 37 containers, every one
+    /// successfully inspected by the batch, produces zero `warning:`
+    /// lines on stderr. With the field-feedback default of 10s the
+    /// batch was timing out before completion; with the new scaled
+    /// formula the host gets ~10s and the classifier reports `Clean`.
+    #[test]
+    fn f2_no_spurious_docker_inspect_warning_at_field_scale() {
+        let c = classify_inspect_outcome(37, 37, false, "");
+        assert_eq!(c, InspectClassification::Clean);
+        assert!(c.warning_line().is_none(), "Clean must emit no warning");
+        assert!(c.fatal_line().is_none(), "Clean must emit no fatal");
+    }
+
+    /// contract #2: a slow batch that the per-container fallback
+    /// rescues completely is *demoted to debug-level only*. The
+    /// classifier reports `SlowButSuccessful`; user-visible warning
+    /// channel stays empty.
+    #[test]
+    fn f2_slow_but_successful_demoted_to_debug() {
+        let c = classify_inspect_outcome(37, 37, true, "batched docker inspect failed: timeout");
+        match &c {
+            InspectClassification::SlowButSuccessful { detail } => {
+                assert!(detail.contains("timeout"));
+            }
+            other => panic!("expected SlowButSuccessful, got {other:?}"),
+        }
+        assert!(
+            c.warning_line().is_none(),
+            "SlowButSuccessful must NOT emit a warning"
+        );
+    }
+
+    /// contract #3: every per-container probe failed too — daemon
+    /// is down. The classifier reports `GenuineFailure`; the engine
+    /// turns this into a non-zero exit with a chained hint, never a
+    /// warning.
+    #[test]
+    fn f2_genuine_failure_emits_error_with_chained_hint() {
+        let c = classify_inspect_outcome(50, 0, true, "Connection refused");
+        match &c {
+            InspectClassification::GenuineFailure { detail } => {
+                assert!(detail.contains("Connection refused"));
+            }
+            other => panic!("expected GenuineFailure, got {other:?}"),
+        }
+        assert!(
+            c.warning_line().is_none(),
+            "fatal must not double as warning"
+        );
+        let line = c.fatal_line().expect("fatal must produce a hint");
+        assert!(line.contains("daemon is unreachable"));
+        assert!(line.contains("inspect run"));
+        assert!(line.contains("inspect setup"));
+    }
+
+    /// contract #4: 3 of 50 per-container probes failed. The
+    /// classifier reports `PartialTimeout` and renders exactly one
+    /// summary line at end of discovery.
+    #[test]
+    fn f2_partial_timeout_emits_single_summary_line() {
+        let c = classify_inspect_outcome(50, 47, true, "");
+        assert_eq!(
+            c,
+            InspectClassification::PartialTimeout {
+                failed: 3,
+                total: 50
+            }
+        );
+        let line = c.warning_line().expect("partial must emit a warning");
+        assert!(
+            line.contains("docker inspect timed out for 3/50 containers"),
+            "warning line missing N/M counts: {line:?}"
+        );
+        assert!(line.contains("rerun with --force"));
+        assert!(line.contains("check daemon load"));
+        assert!(c.fatal_line().is_none(), "partial is non-fatal");
+    }
+
+    /// contract #5: operator override
+    /// (`INSPECT_DOCKER_INSPECT_TIMEOUT=5` / future
+    /// `discovery.docker_inspect_timeout = "5s"`) bypasses the scaling
+    /// formula. The pure helper takes the raw seconds and never
+    /// rewrites them.
+    #[test]
+    fn f2_config_override_bypasses_scaling_formula() {
+        // Without override: 50 containers → max(10s, 250ms*50) = 12.5s.
+        let scaled = compute_docker_inspect_timeout(50, None);
+        assert_eq!(scaled, Duration::from_millis(12_500));
+
+        // With override = 5s: takes operator's value verbatim.
+        let pinned = compute_docker_inspect_timeout(50, Some(5));
+        assert_eq!(pinned, Duration::from_secs(5));
+
+        // Override even ignores the inventory cap (e.g. operators on a
+        // pathologically slow daemon may want 120s — the env-var path
+        // does not silently re-clip them).
+        let above_cap = compute_docker_inspect_timeout(1000, Some(120));
+        assert_eq!(above_cap, Duration::from_secs(120));
+    }
+
+    /// 10s floor for tiny hosts.
+    #[test]
+    fn f2_timeout_formula_floor_for_small_hosts() {
+        assert_eq!(
+            compute_docker_inspect_timeout(0, None),
+            Duration::from_secs(10),
+            "floor must apply when there are no containers"
+        );
+        assert_eq!(
+            compute_docker_inspect_timeout(1, None),
+            Duration::from_secs(10)
+        );
+        // 39 containers * 250ms = 9.75s → still pinned to floor.
+        assert_eq!(
+            compute_docker_inspect_timeout(39, None),
+            Duration::from_secs(10)
+        );
+        // 40 * 250ms = 10s exactly → equals floor.
+        assert_eq!(
+            compute_docker_inspect_timeout(40, None),
+            Duration::from_secs(10)
+        );
+    }
+
+    /// Scales linearly between floor and cap.
+    #[test]
+    fn f2_timeout_formula_scales_then_caps() {
+        // 100 * 250ms = 25s.
+        assert_eq!(
+            compute_docker_inspect_timeout(100, None),
+            Duration::from_secs(25)
+        );
+        // 240 * 250ms = 60s exactly → at the cap.
+        assert_eq!(
+            compute_docker_inspect_timeout(240, None),
+            Duration::from_secs(60)
+        );
+        // 1000 * 250ms = 250s → clipped to 60s cap.
+        assert_eq!(
+            compute_docker_inspect_timeout(1000, None),
+            Duration::from_secs(60)
+        );
+    }
+
+    /// An empty host (no containers reported by
+    /// `docker ps`) is `Clean` even when called with an empty error
+    /// string. We never emit "0/0 containers timed out" noise.
+    #[test]
+    fn f2_empty_host_is_clean_not_partial() {
+        let c = classify_inspect_outcome(0, 0, false, "");
+        assert_eq!(c, InspectClassification::Clean);
+        assert!(c.warning_line().is_none());
+        assert!(c.fatal_line().is_none());
     }
 }

@@ -15,6 +15,9 @@ use crate::verbs::output::{Envelope, JsonOut};
 use crate::verbs::quote::shquote;
 
 pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
+    // Activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     if let Some(s) = &args.since {
         parse_duration(s)?;
     }
@@ -24,7 +27,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     let (runner, nses, targets) = plan(&args.selector)?;
 
-    // P10 (v0.1.1): handle --reset-cursor up front -- it does not stream
+    // Handle --reset-cursor up front -- it does not stream
     // any logs, just drops the cursor file(s) for every selected target.
     if args.reset_cursor {
         let mut deleted = 0usize;
@@ -35,14 +38,20 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             }
         }
         if !args.format.is_json() {
-            eprintln!("reset {deleted} cursor(s)");
+            crate::tee_eprintln!("reset {deleted} cursor(s)");
         }
         return Ok(ExitKind::Success);
     }
 
     let mut any_lines = false;
 
-    // P5 (v0.1.1): merged multi-container view. We honor --since-last
+    // Construct the streaming `--select` filter ONCE at
+    // function entry so a parse error fails fast before any frame is
+    // emitted. Threaded into both the merged-mode closures and the
+    // per-step (batch + follow) emission paths.
+    let mut select = args.format.select_filter()?;
+
+    // Merged multi-container view. We honor --since-last
     // and the log-driver gate per source, then dispatch to the merger
     // module which fans out execution and re-orders by RFC3339
     // timestamp (batch) or arrival order (follow).
@@ -66,7 +75,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 let now = crate::verbs::cursor::Cursor::now(&step.ns.namespace, &svc_name);
                 if let Err(e) = now.save() {
                     if !args.format.is_json() {
-                        eprintln!("warn: failed to save cursor: {e}");
+                        crate::tee_eprintln!("warn: failed to save cursor: {e}");
                     }
                 }
             }
@@ -75,7 +84,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 if let Some(driver) = svc_def.log_driver {
                     if !driver.is_readable_via_docker_logs() {
                         if !args.format.is_json() {
-                            eprintln!(
+                            crate::tee_eprintln!(
                                 "{}/{}: log driver `{}` is not readable via `docker logs` -- skipped in merged view",
                                 step.ns.namespace,
                                 svc_name,
@@ -119,33 +128,61 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         } else {
             60
         };
+        // The merged closures emit one envelope per
+        // merged line — they need the streaming filter handle so that
+        // `--select` covers merged output too. The closure captures
+        // `&mut select` directly (FnMut); on a per-frame filter
+        // failure inside `print_json`, we surface via `error::emit`
+        // and continue (matching the streaming contract — a long-
+        // running follow must not abort on one bad frame).
         let total = if args.follow {
-            crate::verbs::merged::follow_merged(runner.as_ref(), &sources, timeout, |m| {
-                if json {
-                    crate::verbs::merged::print_json(
-                        // The MergeSource borrows namespace as &str; we
-                        // re-derive it from svc_idx into the source list.
-                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
-                        &m.svc,
-                        &m.line,
-                    );
-                } else {
-                    crate::verbs::merged::print_human(&m.svc, &m.line);
-                }
-            })?
+            crate::verbs::merged::follow_merged(
+                runner.as_ref(),
+                &sources,
+                timeout,
+                args.show_secrets,
+                |m| {
+                    if json {
+                        if let Err(e) = crate::verbs::merged::print_json(
+                            // The MergeSource borrows namespace as &str; we
+                            // re-derive it from svc_idx into the source list.
+                            sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
+                            &m.svc,
+                            &m.line,
+                            select.as_mut(),
+                        ) {
+                            crate::error::emit(format!("merged emit: {e}"));
+                        }
+                    } else {
+                        crate::verbs::merged::print_human(&m.svc, &m.line);
+                    }
+                },
+            )?
         } else {
-            crate::verbs::merged::batch_merged(runner.as_ref(), &sources, timeout, |m| {
-                if json {
-                    crate::verbs::merged::print_json(
-                        sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
-                        &m.svc,
-                        &m.line,
-                    );
-                } else {
-                    crate::verbs::merged::print_human(&m.svc, &m.line);
-                }
-            })?
+            crate::verbs::merged::batch_merged(
+                runner.as_ref(),
+                &sources,
+                timeout,
+                args.show_secrets,
+                |m| {
+                    if json {
+                        if let Err(e) = crate::verbs::merged::print_json(
+                            sources.get(m.svc_idx).map(|s| s.namespace).unwrap_or("_"),
+                            &m.svc,
+                            &m.line,
+                            select.as_mut(),
+                        ) {
+                            crate::error::emit(format!("merged emit: {e}"));
+                        }
+                    } else {
+                        crate::verbs::merged::print_human(&m.svc, &m.line);
+                    }
+                },
+            )?
         };
+        if json {
+            crate::verbs::output::flush_filter(select.as_mut())?;
+        }
         return Ok(if total > 0 {
             ExitKind::Success
         } else if !args.match_re.is_empty() && !args.follow {
@@ -153,7 +190,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             // non-merged path. We don't bother distinguishing per
             // source here — the merged view is one logical stream.
             if !args.format.is_json() {
-                eprintln!("{}", no_match_notice(&args));
+                crate::tee_eprintln!("{}", no_match_notice(&args));
             }
             ExitKind::Success
         } else {
@@ -163,8 +200,13 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
     for step in iter_steps(&nses, &targets) {
         let svc_name = step.service().unwrap_or("_").to_string();
+        // Per-step redactor. Used for the non-follow
+        // batch path below; `stream_follow` constructs its own per
+        // reconnect attempt so a transport drop mid-PEM-block does
+        // not poison the post-reconnect state.
+        let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
 
-        // P10: --since-last expands into --since <unix-ts> from the
+        // --since-last expands into --since <unix-ts> from the
         // saved cursor (or INSPECT_SINCE_LAST_DEFAULT on cold start).
         // We always rewrite the cursor at the start of the run so a
         // crash mid-stream still leaves the next call resumable; the
@@ -182,7 +224,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             // the user's actual log query.
             if let Err(e) = now.save() {
                 if !args.format.is_json() {
-                    eprintln!("warn: failed to save cursor: {e}");
+                    crate::tee_eprintln!("warn: failed to save cursor: {e}");
                 }
             }
         }
@@ -209,9 +251,10 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                                 .with_service(&svc_name)
                                 .put("error", msg.as_str())
                                 .put("log_driver", driver.as_str()),
-                        );
+                            select.as_mut(),
+                        )?;
                     } else {
-                        eprintln!("{msg}");
+                        crate::tee_eprintln!("{msg}");
                     }
                     continue;
                 }
@@ -220,7 +263,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
 
         let cmd = build_logs(step.service_def(), step.service(), step.container(), &args);
 
-        // P1 (v0.1.1): in --follow mode, render each line as it
+        // In --follow mode, render each line as it
         // arrives instead of buffering until the SSH process exits.
         // We also implement client-side reconnect (3 tries with 1/2/4s
         // backoff) so a transient SSH drop doesn't end the user's
@@ -236,7 +279,9 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 &svc_name,
                 args.follow_timeout_secs.unwrap_or(60 * 60 * 8),
                 args.format.is_json(),
+                args.show_secrets,
                 &mut any_lines,
+                &mut select,
             );
             continue;
         }
@@ -261,7 +306,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                 continue;
             }
             if !args.format.is_json() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}/{}: logs failed (exit {}): {}",
                     step.ns.namespace,
                     svc_name,
@@ -272,6 +317,14 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             continue;
         }
         for line in out.stdout.lines() {
+            // Redactor is stateful for PEM blocks; lines
+            // inside a block return None and are swallowed so the
+            // BEGIN-line marker is the only output for the whole
+            // block.
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => continue,
+            };
             any_lines = true;
             if args.format.is_json() {
                 JsonOut::write(
@@ -279,17 +332,22 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
                         .with_service(&svc_name)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                )?;
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{}/{} | {safe}", step.ns.namespace, svc_name);
+                crate::tee_println!("{}/{} | {safe}", step.ns.namespace, svc_name);
             }
         }
+    }
+
+    if args.format.is_json() {
+        crate::verbs::output::flush_filter(select.as_mut())?;
     }
 
     Ok(if any_lines {
@@ -304,7 +362,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         // never reach this branch — the stream stays open until the
         // user cancels or the upstream times out.
         if !args.format.is_json() {
-            eprintln!("{}", no_match_notice(&args));
+            crate::tee_eprintln!("{}", no_match_notice(&args));
         }
         ExitKind::Success
     } else {
@@ -312,8 +370,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     })
 }
 
-/// B3 (v0.1.2): build the human-readable "(no matches for X in
-/// <window>)" line printed when `inspect logs --match` produces zero
+/// B3 (v0.1.2): build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
 /// hits. Pulled out so the same message is reachable from both the
 /// per-step and merged code paths.
 fn no_match_notice(args: &LogsArgs) -> String {
@@ -426,7 +483,7 @@ fn build_docker_logs_once(svc: &str, args: &LogsArgs, reconnect: bool) -> String
         s.push_str(" -f");
     }
     if args.merged {
-        // P5: required so the merger has a parseable RFC3339 prefix
+        // Required so the merger has a parseable RFC3339 prefix
         // on every line. The merger strips it before printing.
         s.push_str(" --timestamps");
     }
@@ -485,10 +542,22 @@ fn build_journalctl(unit: &str, args: &LogsArgs) -> String {
     s
 }
 
-/// P1 (v0.1.1): client-side reconnect wrapper for `--follow`. Streams
+/// Client-side reconnect wrapper for `--follow`. Streams
 /// each line from the SSH child to stdout (or JSON), and on transient
 /// SSH failure retries up to 3 times with 1s/2s/4s backoff. Aborts
 /// cleanly on Ctrl-C (cancellation flag set by [`crate::exec::cancel`]).
+///
+/// A fresh redactor is constructed inside each retry
+/// iteration. A transport drop mid-PEM-block invalidates the prior
+/// in-block state because the post-reconnect stream is a new server
+/// process; carrying the flag across would over-redact (suppressing
+/// good lines until an END marker that may never come). The downside
+/// is a vanishingly small window where a key whose BEGIN was on the
+/// pre-drop stream and whose END is on the post-drop one would have
+/// its post-drop body bytes leak through; the per-line maskers
+/// (header/URL/env) still apply, and the realistic failure mode is
+/// that `docker logs -f` after reconnect resumes from "now", not
+/// mid-block.
 #[allow(clippy::too_many_arguments)]
 fn stream_follow(
     runner: &dyn crate::verbs::runtime::RemoteRunner,
@@ -498,7 +567,16 @@ fn stream_follow(
     svc_name: &str,
     timeout_secs: u64,
     json: bool,
+    show_secrets: bool,
     any_lines: &mut bool,
+    // Per-frame `--select` streaming filter. Threaded
+    // in from the verb's run loop as `&mut Option<Filter>` so the
+    // closure can re-borrow `select.as_mut()` per frame and we don't
+    // have to wrestle with Option<&mut T> reborrowing through a
+    // closure boundary. Per-frame filter errors are emitted to
+    // stderr and the stream continues (a long-running follow must
+    // not abort on one bad frame).
+    select: &mut Option<crate::query::ndjson::Filter>,
 ) {
     const MAX_RECONNECTS: u32 = 3;
     let mut attempt: u32 = 0;
@@ -510,23 +588,31 @@ fn stream_follow(
         // Borrow-checker: `any_lines` is mutated inside the closure.
         // Use a local flag and merge after the call.
         let mut got_any = false;
+        let redactor = crate::redact::OutputRedactor::new(show_secrets, false);
         let result = runner.run_streaming(namespace, target, cmd, opts, &mut |line| {
+            let masked = match redactor.mask_line(line) {
+                Some(m) => m,
+                None => return,
+            };
             got_any = true;
             if json {
-                JsonOut::write(
+                if let Err(e) = JsonOut::write(
                     &Envelope::new(namespace, "logs", "logs")
                         .with_service(svc_name)
                         .put(
                             "line",
-                            crate::format::safe::safe_machine_line(line).as_ref(),
+                            crate::format::safe::safe_machine_line(&masked).as_ref(),
                         ),
-                );
+                    select.as_mut(),
+                ) {
+                    crate::error::emit(format!("logs follow emit: {e}"));
+                }
             } else {
                 let safe = crate::format::safe::safe_terminal_line(
-                    line,
+                    &masked,
                     crate::format::safe::DEFAULT_MAX_LINE_BYTES,
                 );
-                println!("{namespace}/{svc_name} | {safe}");
+                crate::tee_println!("{namespace}/{svc_name} | {safe}");
             }
         });
         if got_any {
@@ -543,7 +629,7 @@ fn stream_follow(
             Ok(_) | Err(_) if attempt >= MAX_RECONNECTS => {
                 if let Err(e) = result {
                     if !json {
-                        eprintln!("{namespace}/{svc_name}: stream ended ({e})");
+                        crate::tee_eprintln!("{namespace}/{svc_name}: stream ended ({e})");
                     }
                 }
                 return;
@@ -554,7 +640,7 @@ fn stream_follow(
         attempt += 1;
         let backoff = std::time::Duration::from_secs(1u64 << (attempt - 1));
         if !json {
-            eprintln!(
+            crate::tee_eprintln!(
                 "{namespace}/{svc_name}: stream dropped, reconnecting in {}s (attempt {attempt}/{MAX_RECONNECTS})",
                 backoff.as_secs()
             );
@@ -588,6 +674,7 @@ mod tests {
             merged: false,
             match_re: Vec::new(),
             exclude_re: Vec::new(),
+            show_secrets: false,
             format: FormatArgs::default(),
             follow_timeout_secs: None,
         }

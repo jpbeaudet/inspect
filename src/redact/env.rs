@@ -1,33 +1,20 @@
-//! Helpers for redacting sensitive values in logs and human output.
+//! Env-secret line masker.
 //!
-//! Never print passphrases, key material, or env-var contents. Show the
-//! _name_ of the env var holding a secret, never the secret value.
+//! Detects `KEY=VALUE` pairs whose KEY name suggests a secret (suffix
+//! match against the list below, or one of the explicit
+//! `*_URL` connection-string forms) and rewrites the value to keep
+//! only the first 4 + last 2 characters; values <8 chars become
+//! `****`. With `redact_all = true`, every well-formed `KEY=VALUE`
+//! line is masked regardless of key name.
+//!
+//! Invariants preserved verbatim from the v0.1.1 implementation
+//! (originally `crate::redact::EnvSecretMasker`); the v0.1.3
+//! refactor only relocates this logic into a submodule of
+//! [`crate::redact`] so the new header / PEM / URL maskers can sit
+//! beside it.
 
 use std::borrow::Cow;
-
-/// Universal redaction placeholder.
-pub const REDACTED: &str = "<redacted>";
-
-/// Redact an `Option<String>` for display.
-pub fn redact_opt(value: &Option<String>) -> &'static str {
-    match value {
-        Some(_) => REDACTED,
-        None => "<unset>",
-    }
-}
-
-/// P4 (v0.1.1): line-oriented secret masker for `inspect run` / `inspect exec`
-/// stdout. Detects `KEY=VALUE` pairs whose KEY name suggests a secret
-/// (suffix matches against the list below) and rewrites the value to keep
-/// only the first 4 + last 2 characters; values <8 chars become `****`.
-///
-/// **Limitation**: only catches `KEY=VALUE` form. Anything inside a JSON
-/// blob or free text passes through. Documented in `help/content/write.md`.
-pub struct EnvSecretMasker {
-    show_secrets: bool,
-    redact_all: bool,
-    active: std::cell::Cell<bool>,
-}
+use std::cell::Cell;
 
 /// Case-insensitive suffix list for keys whose values look like secrets.
 const SECRET_KEY_SUFFIXES: &[&str] = &[
@@ -56,28 +43,30 @@ const SECRET_KEY_EXACT: &[&str] = &[
     "POSTGRESQL_URL",
 ];
 
-impl EnvSecretMasker {
-    pub fn new(show_secrets: bool, redact_all: bool) -> Self {
+pub(super) struct EnvMasker {
+    redact_all: bool,
+    active: Cell<bool>,
+}
+
+impl EnvMasker {
+    pub(super) fn new(redact_all: bool) -> Self {
         Self {
-            show_secrets,
             redact_all,
-            active: std::cell::Cell::new(false),
+            active: Cell::new(false),
         }
     }
 
-    /// True iff we masked at least one line so far. Used by `exec` to
-    /// stamp the audit entry.
-    pub fn was_active(&self) -> bool {
+    /// `true` iff [`Self::mask_line`] has rewritten at least one line
+    /// since construction. Used by the composer to populate
+    /// `AuditEntry::secrets_masked_kinds`.
+    pub(super) fn was_active(&self) -> bool {
         self.active.get()
     }
 
-    pub fn mask_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
-        if self.show_secrets {
-            return Cow::Borrowed(line);
-        }
-        // Only mask lines that look like a single KEY=VALUE pair (or
-        // a `export KEY=VALUE` form). Multi-pair lines are masked
-        // pair-by-pair within their boundaries.
+    /// Returns the input unchanged when the line is not a `KEY=VALUE`
+    /// pair (or the key does not look secret and `redact_all` is off);
+    /// otherwise an owned `KEY=<masked>` string.
+    pub(super) fn mask_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
         let stripped = line.strip_prefix("export ").unwrap_or(line);
         let eq = match stripped.find('=') {
             Some(i) => i,
@@ -93,7 +82,6 @@ impl EnvSecretMasker {
         let value = &stripped[eq + 1..];
         let masked_value = mask_value(value);
         self.active.set(true);
-        // Preserve `export ` prefix when present.
         if line.starts_with("export ") {
             Cow::Owned(format!("export {key}={masked_value}"))
         } else {
@@ -156,19 +144,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn show_secrets_passes_through() {
-        let m = EnvSecretMasker::new(true, false);
-        assert_eq!(
-            m.mask_line("API_KEY=sk-abcdefgh12").as_ref(),
-            "API_KEY=sk-abcdefgh12"
-        );
-        assert!(!m.was_active());
-    }
-
-    #[test]
     fn masks_anthropic_api_key() {
-        let m = EnvSecretMasker::new(false, false);
-        // 11 chars: "sk-abcdefgh" + "k3" -> head sk-a + **** + last 2.
+        let m = EnvMasker::new(false);
         let out = m.mask_line("ANTHROPIC_API_KEY=sk-abcdefghk3");
         assert!(out.contains("sk-a****"));
         assert!(out.contains("k3"));
@@ -178,7 +155,7 @@ mod tests {
 
     #[test]
     fn passes_through_non_secret_keys() {
-        let m = EnvSecretMasker::new(false, false);
+        let m = EnvMasker::new(false);
         assert_eq!(m.mask_line("FOO=bar").as_ref(), "FOO=bar");
         assert_eq!(
             m.mask_line("PATH=/usr/bin:/bin").as_ref(),
@@ -189,28 +166,27 @@ mod tests {
 
     #[test]
     fn redact_all_masks_every_kv() {
-        let m = EnvSecretMasker::new(false, true);
+        let m = EnvMasker::new(true);
         let out = m.mask_line("FOO=bar-baz-qux-12");
         assert!(out.contains("****"));
     }
 
     #[test]
     fn redact_all_only_for_kv_lines() {
-        let m = EnvSecretMasker::new(false, true);
-        // Plain log lines are still untouched.
+        let m = EnvMasker::new(true);
         let out = m.mask_line("2025-01-01 hello world");
         assert_eq!(out.as_ref(), "2025-01-01 hello world");
     }
 
     #[test]
     fn short_secret_becomes_stars() {
-        let m = EnvSecretMasker::new(false, false);
+        let m = EnvMasker::new(false);
         assert_eq!(m.mask_line("API_KEY=hi").as_ref(), "API_KEY=****");
     }
 
     #[test]
     fn preserves_export_prefix() {
-        let m = EnvSecretMasker::new(false, false);
+        let m = EnvMasker::new(false);
         let out = m.mask_line("export API_TOKEN=abcdefghijkl");
         assert!(out.starts_with("export API_TOKEN="));
         assert!(out.contains("****"));
@@ -218,15 +194,33 @@ mod tests {
 
     #[test]
     fn database_url_is_secret() {
-        let m = EnvSecretMasker::new(false, false);
+        let m = EnvMasker::new(false);
         let out = m.mask_line("DATABASE_URL=postgres://u:pw@host/db");
         assert!(out.contains("****"));
     }
 
     #[test]
     fn quoted_value_keeps_quotes() {
-        let m = EnvSecretMasker::new(false, false);
+        let m = EnvMasker::new(false);
         let out = m.mask_line("API_KEY=\"sk-abcdefghk3\"");
         assert!(out.contains("\"sk-a****k3\""));
+    }
+
+    #[test]
+    fn not_active_until_first_match() {
+        let m = EnvMasker::new(false);
+        let _ = m.mask_line("FOO=bar");
+        assert!(!m.was_active());
+        let _ = m.mask_line("API_KEY=secretvalue123");
+        assert!(m.was_active());
+    }
+
+    #[test]
+    fn invalid_key_shape_passes_through() {
+        let m = EnvMasker::new(false);
+        // Leading digit — not a valid POSIX env key.
+        assert_eq!(m.mask_line("1FOO=bar").as_ref(), "1FOO=bar");
+        // Hyphen — not allowed.
+        assert_eq!(m.mask_line("FOO-BAR=baz").as_ref(), "FOO-BAR=baz");
     }
 }

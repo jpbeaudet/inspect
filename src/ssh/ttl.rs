@@ -20,6 +20,13 @@ pub const ENV_CODESPACES: &str = "CODESPACES";
 pub enum TtlSource {
     Flag,
     Env,
+    /// Per-namespace `session_ttl` from
+    /// `~/.inspect/servers.toml`. Slots between the env override and
+    /// the auth-mode default.
+    PerNamespace,
+    /// Default for `auth = "password"` namespaces (`12h`).
+    /// Operators on legacy boxes don't want to re-prompt every 30m.
+    PasswordDefault,
     CodespaceDefault,
     LocalDefault,
 }
@@ -29,11 +36,19 @@ impl TtlSource {
         match self {
             TtlSource::Flag => "--ttl flag",
             TtlSource::Env => "INSPECT_PERSIST_TTL env",
+            TtlSource::PerNamespace => "namespace session_ttl",
+            TtlSource::PasswordDefault => "password-auth default (12h)",
             TtlSource::CodespaceDefault => "Codespace default (4h)",
             TtlSource::LocalDefault => "default (30m)",
         }
     }
 }
+
+/// Hard cap on any operator-supplied TTL when the
+/// namespace uses password auth. Mirrors the schema cap so
+/// `--ttl 48h` against a password-auth ns is rejected the same way
+/// `session_ttl = "48h"` is.
+pub const PASSWORD_AUTH_TTL_CAP_SECS: u64 = 24 * 60 * 60;
 
 /// Returns the default TTL string (e.g. `"4h"` or `"30m"`) plus its source.
 pub fn default_ttl() -> (String, TtlSource) {
@@ -44,8 +59,37 @@ pub fn default_ttl() -> (String, TtlSource) {
     }
 }
 
-/// Resolve the TTL string used for `ControlPersist`, honoring env override.
-pub fn resolve(flag: Option<&str>) -> Result<(String, TtlSource)> {
+/// TTL resolver with per-namespace context. Priority:
+/// `--ttl` flag → `INSPECT_PERSIST_TTL` env → per-namespace
+/// `session_ttl` → password-default (12h) when `auth = "password"`
+/// → Codespace/local default. When the resolved namespace uses
+/// password auth, the final TTL is capped at 24h regardless of
+/// where it came from (so `--ttl 48h legacy-box` is rejected the
+/// same way `session_ttl = "48h"` is).
+pub fn resolve_with_ns(
+    flag: Option<&str>,
+    per_ns: Option<&str>,
+    password_auth: Option<bool>,
+) -> Result<(String, TtlSource)> {
+    let (value, source) = resolve_inner(flag, per_ns, password_auth)?;
+    if password_auth == Some(true) {
+        let dur = parse_ttl(&value)?;
+        if dur.as_secs() > PASSWORD_AUTH_TTL_CAP_SECS {
+            return Err(anyhow!(
+                "ttl '{value}' (from {src}) exceeds the 24h password-auth cap; \
+                 pick a shorter duration so a forgotten session does not stay live indefinitely",
+                src = source.label()
+            ));
+        }
+    }
+    Ok((value, source))
+}
+
+fn resolve_inner(
+    flag: Option<&str>,
+    per_ns: Option<&str>,
+    password_auth: Option<bool>,
+) -> Result<(String, TtlSource)> {
     if let Some(v) = flag {
         validate(v)?;
         return Ok((v.to_string(), TtlSource::Flag));
@@ -55,6 +99,13 @@ pub fn resolve(flag: Option<&str>) -> Result<(String, TtlSource)> {
             validate(&env)?;
             return Ok((env, TtlSource::Env));
         }
+    }
+    if let Some(v) = per_ns {
+        validate(v)?;
+        return Ok((v.to_string(), TtlSource::PerNamespace));
+    }
+    if password_auth == Some(true) {
+        return Ok(("12h".to_string(), TtlSource::PasswordDefault));
     }
     Ok(default_ttl())
 }
@@ -115,5 +166,50 @@ mod tests {
         assert!(parse_ttl("30").is_err());
         assert!(parse_ttl("3x").is_err());
         assert!(parse_ttl("h30").is_err());
+    }
+
+    // ---- : per-namespace + password defaults --------------------
+
+    #[test]
+    fn l4_resolve_with_ns_picks_per_ns_over_default() {
+        let (v, src) = resolve_with_ns(None, Some("8h"), Some(true)).unwrap();
+        assert_eq!(v, "8h");
+        assert_eq!(src, TtlSource::PerNamespace);
+    }
+
+    #[test]
+    fn l4_resolve_with_ns_password_default_when_unset() {
+        let (v, src) = resolve_with_ns(None, None, Some(true)).unwrap();
+        assert_eq!(v, "12h");
+        assert_eq!(src, TtlSource::PasswordDefault);
+    }
+
+    #[test]
+    fn l4_resolve_with_ns_key_auth_unchanged_default() {
+        let (_v, src) = resolve_with_ns(None, None, Some(false)).unwrap();
+        // Either local or codespace default depending on env; never password.
+        assert!(matches!(
+            src,
+            TtlSource::LocalDefault | TtlSource::CodespaceDefault
+        ));
+    }
+
+    #[test]
+    fn l4_resolve_with_ns_flag_wins() {
+        let (v, src) = resolve_with_ns(Some("2h"), Some("8h"), Some(true)).unwrap();
+        assert_eq!(v, "2h");
+        assert_eq!(src, TtlSource::Flag);
+    }
+
+    #[test]
+    fn l4_resolve_with_ns_caps_at_24h_for_password() {
+        // Per-namespace 48h is rejected when password_auth=true even
+        // though 48h passes basic ttl parsing.
+        let err = resolve_with_ns(None, Some("48h"), Some(true)).unwrap_err();
+        assert!(err.to_string().contains("24h password-auth cap"));
+        // 24h exactly is fine.
+        assert!(resolve_with_ns(None, Some("24h"), Some(true)).is_ok());
+        // 24h is fine for key auth too — the cap only applies to password mode.
+        assert!(resolve_with_ns(Some("48h"), None, Some(false)).is_ok());
     }
 }

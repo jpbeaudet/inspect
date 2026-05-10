@@ -1,6 +1,6 @@
 [package]
 name = "inspect-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Operational debugging CLI for cross-server search and safe hot-fix application"
@@ -23,10 +23,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 thiserror = "1"
 anyhow = "1"
-dirs = "5"
 regex = "1"
 base64 = "0.22"
-once_cell = "1"
 rpassword = "7"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 tempfile = "3"
@@ -35,8 +33,23 @@ serde_json = "1"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 similar = "2"
-hex = "0.4"
 unicode-width = "0.1"
+flate2 = "1"
+# L2 (v0.1.3): OS keychain for opt-in cross-session passphrase / password
+# persistence. Pre-approved in INSPECT_v0.1.3_BACKLOG.md (L2 spec). Feature
+# selection picks the native backend on each platform: macOS Keychain,
+# Windows Credential Manager (also reachable from WSL2), Linux Secret
+# Service (GNOME Keyring / KDE Wallet) with pure-Rust crypto so we don't
+# depend on system OpenSSL.
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+# v0.1.3 release-smoke follow-on: pure-Rust jq filter language so
+# `inspect <verb> --json --select '<filter>'` works on a fresh
+# install without an external `jq` dependency. See CLAUDE.md
+# Dependency Policy "jaq rationale (2026-05-05)" for the decision
+# trace. Pinned at major version to track jq language semantics.
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

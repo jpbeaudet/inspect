@@ -14,12 +14,19 @@
     "BadAliasType",
     "BadLogQL",
     "BadSelectorGrammar",
+    "ControlSocketPathTooLong",
     "CpNeedsRemote",
     "CpRemoteRemote",
     "EmptyQuery",
     "EmptyTargets",
     "ExecMissingCommand",
+    "FilterParse",
+    "FilterRawNonString",
+    "FilterRequiresJson",
+    "FilterRuntime",
+    "InvalidHost",
     "InvalidNamespaceName",
+    "InvalidUser",
     "MaxSessionsExceeded",
     "MissingApply",
     "MutuallyExclusiveFormat",
@@ -102,6 +109,8 @@
     "recipes",
     "discovery",
     "ssh",
-    "examples"
+    "examples",
+    "compose",
+    "select"
   ]
 }

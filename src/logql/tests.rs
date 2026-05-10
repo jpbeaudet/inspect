@@ -117,11 +117,11 @@ fn label_format_and_drop() {
 
 #[test]
 fn alias_substitution() {
-    let q = parse_with_aliases(r#"@plogs |= "x""#, |n| {
+    let q = parse_with_aliases(r#"@plogs |= "x""#, |n, _p| {
         if n == "plogs" {
-            Some(r#"{server="arte", source="logs"}"#.into())
+            Ok(Some(r#"{server="arte", source="logs"}"#.into()))
         } else {
-            None
+            Ok(None)
         }
     })
     .unwrap();
@@ -130,10 +130,12 @@ fn alias_substitution() {
 
 #[test]
 fn alias_union_or() {
-    let q = parse_with_aliases(r#"@plogs or @atlas |= "milvus""#, |n| match n {
-        "plogs" => Some(r#"{server="arte", source="logs"}"#.into()),
-        "atlas" => Some(r#"{server="arte", source="file:/etc/atlas.conf"}"#.into()),
-        _ => None,
+    let q = parse_with_aliases(r#"@plogs or @atlas |= "milvus""#, |n, _p| match n {
+        "plogs" => Ok(Some(r#"{server="arte", source="logs"}"#.into())),
+        "atlas" => Ok(Some(
+            r#"{server="arte", source="file:/etc/atlas.conf"}"#.into(),
+        )),
+        _ => Ok(None),
     })
     .unwrap();
     let Query::Log(l) = q else { unreachable!() };
@@ -246,7 +248,7 @@ fn diagnostic_for_missing_open_brace_suggests_selector_form() {
 }
 
 // ---------------------------------------------------------------------------
-// Audit P2 — alias-error wrapping (§1.7), zero-duration rejection (§1.4),
+// Audit pitfalls — alias-error wrapping (§1.7), zero-duration rejection (§1.4),
 // and negative-test matrix (§1.1).
 // ---------------------------------------------------------------------------
 
@@ -255,8 +257,10 @@ fn alias_expansion_error_wraps_alias_name() {
     // Body is malformed; without wrapping the user would see a span
     // pointing into the substituted text and no mention of which
     // alias caused it.
-    let e = parse_with_aliases("@bad", |n| (n == "bad").then(|| "{server=}".to_string()))
-        .expect_err("malformed alias body must error");
+    let e = parse_with_aliases("@bad", |n, _p| {
+        Ok((n == "bad").then(|| "{server=}".to_string()))
+    })
+    .expect_err("malformed alias body must error");
     assert!(
         e.message.contains("@bad"),
         "expected alias name in error, got: {}",

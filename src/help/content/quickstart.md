@@ -26,7 +26,8 @@ DESCRIPTION
   Three tiers of usage — pick the smallest that fits the task:
     Tier 1:  Verbs (`grep`, `logs`, `edit`, `restart`) — no DSL, just flags
     Tier 2:  `inspect search '<LogQL>'` — for cross-medium pipelined queries
-    Tier 3:  `--json | jq | xargs` — for scripted automation
+    Tier 3:  `--json --select '<jq>' | xargs` — for scripted automation
+             (see `inspect help select` for the filter language)
 
 SAFETY
   Every write verb is dry-run by default. Adding `--apply` is the only

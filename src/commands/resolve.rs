@@ -5,6 +5,9 @@ use crate::error::ExitKind;
 use crate::selector::resolve::{resolve, TargetKind};
 
 pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
+    // Activate the FormatArgs mutex check
+    // (e.g. `--select` without `--json` → exit 2).
+    args.format.resolve()?;
     let targets = resolve(&args.selector)?;
 
     if args.format.is_json() {
@@ -23,11 +26,16 @@ pub fn run(args: ResolveArgs) -> anyhow::Result<ExitKind> {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::Value::Array(arr))?
+        // Route through `print_json_value` so `--select`
+        // applies to the resolved-targets array. Pre-fix this verb
+        // pretty-printed via `to_string_pretty` + `println!`; the
+        // `--select` filter compacts the rendered output (one line per
+        // yielded value), which matches every other JSON-emitting
+        // verb's filter contract.
+        return crate::verbs::output::print_json_value(
+            &serde_json::Value::Array(arr),
+            args.format.select_spec(),
         );
-        return Ok(ExitKind::Success);
     }
 
     println!("SUMMARY: selector resolved to {} target(s)", targets.len());

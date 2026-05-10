@@ -20,7 +20,7 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
         let out = runner.run(&ns.namespace, &ns.target, &cmd, RunOpts::with_timeout(20))?;
         if !out.ok() {
             if fmt.shows_envelope() {
-                eprintln!(
+                crate::tee_eprintln!(
                     "{}: docker ps failed (exit {}): {}",
                     ns.namespace,
                     out.exit_code,
@@ -63,6 +63,6 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
     }
     human.summary(format!("{count} container(s) running"));
     human.next("inspect status <sel> for health rollup");
-    human.dispatch(&fmt)?;
-    Ok(ExitKind::Success)
+    let select = args.format.select_filter()?;
+    human.dispatch(&fmt, select)
 }

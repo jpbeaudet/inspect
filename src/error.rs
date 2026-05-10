@@ -12,7 +12,7 @@ use thiserror::Error;
 
 /// Logical exit kinds that map to documented exit codes.
 ///
-/// `Inner(u8)` (P11, v0.1.1) carries through the remote command's own
+/// `Inner(u8)` carries through the remote command's own
 /// exit code on `inspect run` / `inspect exec`. Shells truncate to 8
 /// bits, so we store the bottom byte; callers should pass
 /// `(remote_exit_code & 0xff) as u8`.
@@ -22,6 +22,12 @@ pub enum ExitKind {
     NoMatches,
     Error,
     Inner(u8),
+    /// SSH transport-level failure. Maps to dedicated
+    /// exit codes 12 / 13 / 14 (stale / unreachable / auth_failed) so
+    /// wrapper agents can distinguish a dead socket from a real
+    /// remote command failure. The verb's own SUMMARY trailer carries
+    /// the matching `ssh_error:` chained hint.
+    Transport(crate::ssh::transport::TransportClass),
 }
 
 impl ExitKind {
@@ -31,6 +37,7 @@ impl ExitKind {
             ExitKind::NoMatches => 1,
             ExitKind::Error => 2,
             ExitKind::Inner(n) => n,
+            ExitKind::Transport(t) => t.exit_code(),
         }
     }
 }
@@ -63,6 +70,56 @@ pub enum ConfigError {
 
     #[error("conflicting key sources: only one of key_path or key_inline may be set")]
     ConflictingKeySources,
+
+    #[error(
+        "invalid env-overlay key '{key}' for namespace '{namespace}': must match \
+         [A-Za-z_][A-Za-z0-9_]* (POSIX shell variable name)"
+    )]
+    InvalidEnvKey { namespace: String, key: String },
+
+    #[error(
+        "invalid user '{user}' for namespace '{namespace}': must match \
+         [A-Za-z_][A-Za-z0-9_.-]* (POSIX-portable login-name shape; \
+         shell metacharacters and whitespace are rejected so a hostile \
+         value cannot expand inside ssh_config %u tokens — \
+         CVE-2026-35386 family)"
+    )]
+    InvalidUser { namespace: String, user: String },
+
+    #[error(
+        "invalid host '{host}' for namespace '{namespace}': must be an IP \
+         literal or a DNS-shaped name (alphanumeric, '.', '-'; no \
+         shell metacharacters or whitespace)"
+    )]
+    InvalidHost { namespace: String, host: String },
+
+    #[error(
+        "invalid auth mode '{value}' for namespace '{namespace}': expected \
+         \"key\" (default) or \"password\""
+    )]
+    InvalidAuthMode { namespace: String, value: String },
+
+    #[error(
+        "namespace '{namespace}': password_env is only meaningful with \
+         auth = \"password\"; either set auth = \"password\" or unset password_env"
+    )]
+    PasswordEnvWithoutPasswordAuth { namespace: String },
+
+    #[error(
+        "invalid session_ttl '{value}' for namespace '{namespace}': {reason} \
+         (use a duration like \"12h\", \"30m\", \"3600s\")"
+    )]
+    InvalidSessionTtl {
+        namespace: String,
+        value: String,
+        reason: String,
+    },
+
+    #[error(
+        "session_ttl '{value}' for namespace '{namespace}' exceeds the 24h cap; \
+         pick a shorter duration so a forgotten session does not stay live indefinitely"
+    )]
+    SessionTtlAboveCap { namespace: String, value: String },
 
     #[error("config IO error at '{path}': {source}")]
     Io {
@@ -183,6 +240,35 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         summary: "more than one output format flag was set",
         help_topic: Some("formats"),
     },
+    // ---- select / jq filter -----------------------------
+    // Three discrete fragments rather than a single broader "filter"
+    // match so an unrelated error message containing the word "filter"
+    // (e.g. compose-logs --match/--exclude prose) cannot accidentally
+    // collide with the select topic.
+    ErrorEntry {
+        code: "FilterParse",
+        fragment: "filter parse:",
+        summary: "--select filter failed to parse as a jq expression",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRuntime",
+        fragment: "filter runtime:",
+        summary: "--select filter raised a runtime error",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRawNonString",
+        fragment: "filter --raw:",
+        summary: "--select-raw was set but the filter yielded a non-string value",
+        help_topic: Some("select"),
+    },
+    ErrorEntry {
+        code: "FilterRequiresJson",
+        fragment: "--select requires --json",
+        summary: "--select set without a JSON-class output format",
+        help_topic: Some("select"),
+    },
     // ---- write --------------------------------------------------------
     ErrorEntry {
         code: "CpRemoteRemote",
@@ -252,7 +338,31 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         summary: "namespace name does not match the [a-z0-9][a-z0-9_-]* shape",
         help_topic: Some("discovery"),
     },
+    // User / host shape validation.
+    // Defense-in-depth against ssh_config `Match exec %u` expansion
+    // (CVE-2026-35386 family).
+    ErrorEntry {
+        code: "InvalidUser",
+        fragment: "invalid user",
+        summary: "user contains shell metacharacters or whitespace",
+        help_topic: Some("discovery"),
+    },
+    ErrorEntry {
+        code: "InvalidHost",
+        fragment: "invalid host",
+        summary: "host contains shell metacharacters or whitespace",
+        help_topic: Some("discovery"),
+    },
     // ---- ssh ----------------------------------------------------------
+    // G5 (v0.1.3): the kernel's `sun_path` cap (108 bytes on Linux,
+    // 104 on macOS) is conservatively enforced at 104. More specific
+    // than the generic "ssh" fragment below, so it must come first.
+    ErrorEntry {
+        code: "ControlSocketPathTooLong",
+        fragment: "control socket path",
+        summary: "namespace produces a Unix-socket path longer than the kernel sun_path cap",
+        help_topic: Some("ssh"),
+    },
     ErrorEntry {
         code: "SshConnectFailed",
         fragment: "ssh",
@@ -273,10 +383,15 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("recipes"),
     },
     // ---- help ---------------------------------------------------------
+    // Wording changed from "unknown help topic" to
+    // "unknown command or topic" so `inspect help <foo>` reflects
+    // both lookup paths (verb synonym + editorial topic). The
+    // fragment match is still substring-based, and the catalog row
+    // continues to point operators at the index page.
     ErrorEntry {
         code: "UnknownHelpTopic",
-        fragment: "unknown help topic",
-        summary: "help topic is not registered",
+        fragment: "unknown command or topic",
+        summary: "neither a known command nor a known help topic",
         help_topic: Some("examples"),
     },
 ];
@@ -305,9 +420,13 @@ pub fn topic_for_message(msg: &str) -> Option<&'static str> {
 /// `error:` line, matching the HP-0 baseline.
 pub fn emit(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
-    eprintln!("error: {msg}");
+    let line = format!("error: {msg}");
+    eprintln!("{line}");
+    crate::transcript::tee_stderr(&line);
     if let Some(topic) = topic_for_message(msg) {
-        eprintln!("  see: inspect help {topic}");
+        let see = format!("  see: inspect help {topic}");
+        eprintln!("{see}");
+        crate::transcript::tee_stderr(&see);
     }
 }
 
@@ -355,7 +474,7 @@ mod hp5_tests {
             Some("safety")
         );
         assert_eq!(
-            topic_for_message("unknown help topic 'foo'"),
+            topic_for_message("unknown command or topic: 'foo'"),
             Some("examples")
         );
         assert_eq!(topic_for_message("totally unrelated message"), None);
