@@ -1333,6 +1333,24 @@ mod local_passphrase_validation_tests {
             .status()
             .expect("ssh-keygen -t ed25519");
         assert!(status.success(), "ssh-keygen keygen failed");
+        // Modern OpenSSH refuses to load private keys whose
+        // permissions are group- or world-readable. ssh-keygen
+        // honors the process umask when it writes the key, so on a
+        // host with umask 0022 (the default in many CI / codespace
+        // images) the file lands as 0644 and every subsequent ssh /
+        // ssh-keygen invocation that touches it fails with
+        // "Permissions 0644 ... are too open." Tighten to 0600
+        // explicitly so the fixture is portable across umask
+        // settings.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&key_path)
+                .expect("stat fixture key")
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&key_path, perms).expect("chmod 0600 fixture key");
+        }
         key_path
     }
 
