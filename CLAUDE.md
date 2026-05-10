@@ -187,7 +187,10 @@ The help surface is **first-class API for agentic callers**, not a
 nicety:
 
 - New flag → docstring on the clap arg with the rationale, the
-  feature ID (`F<n>` / `L<n>`), and version (`v0.1.3`).
+  feature ID (`F<n>` / `L<n>`), and version (`v0.1.3`). These
+  in-flight markers are kept throughout the release-window for
+  cross-file traceability and removed in a single sweep at
+  release-prep time — see [`CLEANING_DUTY.md`](CLEANING_DUTY.md).
 - New JSON field → document the discriminator values inline in the
   verb's `LONG_*` (see `LONG_STATUS` for the F7.5 `state` field
   pattern).
@@ -216,6 +219,31 @@ nicety:
   if the user has not said "commit" in the current turn.
 - **Never push without explicit user request.** Pushing is a
   separate authorization from committing.
+
+## Release-prep cleanup (Cleaning Duty)
+
+Once per minor release, after the last backlog item ships and the
+live smoke runbook passes, run the **cleanup pass** documented in
+[`CLEANING_DUTY.md`](CLEANING_DUTY.md) **before** the version tag
+is cut. The pass strips `F<n>` / `L<n>` / `(vX.Y.Z)` markers from
+inline comments and doc-comments, normalizing them to industry-
+grade prose that an open-source contributor can read cold.
+
+The marker convention is load-bearing **during** development —
+keep it on every new commit through the entire release window.
+Cleanup is the final step before the tag, not a continuous
+discipline. The release-prep order is:
+
+1. Final backlog item shipped + smoke green.
+2. Cleaning Duty (per `CLEANING_DUTY.md`).
+3. Archive sweep (closed planning docs → `archives/v<X.Y.Z>/`).
+4. README freshness pass.
+5. CLAUDE.md release-window pivot to the next release.
+6. Tag, build, publish.
+
+Test names (`f14_*`, `l7_*`) and the CHANGELOG keep their markers
+— they are git-archaeology IDs and historical record respectively.
+The closed backlog itself moves into `archives/` unmodified.
 
 ## Audit schema
 
