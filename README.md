@@ -40,6 +40,16 @@ multi-step migrations with rollback.
 - **Built-in manual.** `inspect help`, `inspect help <topic>`, and
   `inspect help search <query>` work offline — no man pages, no
   network.
+- **Agent-ready, no MCP server required.** Any LLM with a generic
+  shell tool (`bash`, `run_in_terminal`, `Cmd`, etc.) drives
+  `inspect` as well as a purpose-built integration would. The
+  stable JSON envelope, `-h`-discoverable contracts, redacted
+  stdout, chained `hint:` / `see: inspect help <topic>` recovery
+  lines, and explicit exit-code classes (0 ok / 1 no-match /
+  2 usage / 12-14 transport / inner pass-through on `run`) mean
+  an agent learns the surface from `inspect --help` and recovers
+  from failures without a custom adapter. **If you already have
+  a shell tool wired into your agent, you have the integration.**
 
 > **Current release:** `v0.1.3` — password auth + extended session
 > TTL + `ssh add-key` helper, optional OS keychain, audit log

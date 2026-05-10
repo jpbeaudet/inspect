@@ -22,6 +22,22 @@ For human contributors, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
   JSON envelopes, explicit exit codes, redacted stdout, chained
   recovery hints, and `-h`-discoverable contracts all exist because
   of them.
+- **The shell is the integration layer.** `inspect` is designed so
+  that any LLM with a generic shell tool (`bash`, `run_in_terminal`,
+  `Cmd`, etc.) drives it as well as a purpose-built MCP server
+  would. **No MCP wrapper is needed**, and writing one is an
+  anti-pattern: every shape an MCP server could expose is already
+  exposed as a composable verb whose contract is discoverable from
+  `-h` and stable across the whole `0.1.x → 0.2.0` window. When
+  designing a new verb, the question to answer is *not* "how would
+  an MCP tool surface this?" but *can an LLM with a shell tool +
+  `inspect <verb> --help` learn this contract cold and chain it to
+  the next action without an external adapter?* If the answer is no
+  — if the contract requires a custom prompt or a wrapper to
+  interpret — the design has drifted. Pull it back. The JSON
+  envelope, exit-code classes, `hint:` / `see: inspect help …`
+  trailers, and `--select` projection exist precisely so the shell
+  *is* enough.
 - **You** (Claude Code, this session) will drive `inspect` against a
   real server during end-to-end smoke tests at release time. Any bug
   shipped is a bug you may step on personally.
