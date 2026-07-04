@@ -131,6 +131,44 @@ master comes up. Re-running `inspect add <ns>` against an existing
 namespace requires `--force` (it idempotently overwrites the entry
 in `servers.toml`).
 
+#### Kubernetes namespaces (v0.1.4, K2)
+
+A namespace can target a Kubernetes cluster instead of a docker host by
+setting `type = "k8s"`. A k8s namespace is addressed by its **kubeconfig
+context**, not by SSH — it needs neither `host` nor `user`, and its
+SSH-only fields (`key_path`, `auth`, `session_ttl`, …) are inert
+(`inspect show` renders them `N/A (k8s)`). Auth inherits your kubeconfig
+entirely; inspect adds no new credential surface.
+
+```toml
+# ~/.inspect/servers.toml  (schema_version = 2)
+[namespaces.staging-k8s]
+type       = "k8s"
+kubeconfig = "~/.kube/staging.yaml"   # optional — else kubectl's default resolution
+context    = "staging"                # the context inspect pins on every call
+namespace  = "default"                # optional — the in-cluster k8s namespace
+```
+
+Or interactively / non-interactively:
+
+```sh
+inspect add staging-k8s --type k8s \
+  --context staging --kubeconfig ~/.kube/staging.yaml --namespace default
+```
+
+inspect **always pins `--context` explicitly** and never reads or
+mutates your ambient `kubectl` `current-context`, so it cannot be
+fooled into acting on the wrong cluster by a stray `kubectl config
+use-context` in another terminal. Only `docker` (the default when
+`type` is absent) and `k8s` / `kubernetes` are valid `type` values; any
+other value is rejected at parse time. Existing docker namespaces are
+unaffected — the schema bump to 2 is purely additive.
+
+> **Note.** K2 lands the k8s namespace *declaration* + validation. The
+> k8s read/write *verbs* (`status`, `logs`, `scale`, …) land in the
+> subsequent v0.1.4 waves; until then a k8s namespace parses, validates,
+> and shows, and `inspect setup`/`test` will verify the context.
+
 ### 3.3 Open a persistent session
 
 ```sh

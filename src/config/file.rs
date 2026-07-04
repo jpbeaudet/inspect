@@ -3,15 +3,27 @@
 //! File layout:
 //!
 //! ```toml
-//! schema_version = 1
+//! schema_version = 2
 //!
-//! [namespaces.arte]
+//! [namespaces.arte]              # docker (default) namespace
 //! host = "arte.example.internal"
 //! user = "ubuntu"
 //! port = 22
 //! key_path = "~/.ssh/id_ed25519"
 //! key_passphrase_env = "ARTE_SSH_PASSPHRASE"
+//!
+//! [namespaces.staging-k8s]       # K2 (v0.1.4): kubernetes namespace
+//! type = "k8s"
+//! kubeconfig = "~/.kube/staging.yaml"  # optional
+//! context = "staging"                  # optional
+//! namespace = "default"                # optional (k8s namespace)
 //! ```
+//!
+//! Schema version 2 (v0.1.4, K2) adds the `type` / `kubeconfig` /
+//! `context` / `namespace` fields for the kubernetes runtime medium.
+//! All four are optional and skipped when unset, so a v1 file (no
+//! `type`) loads unchanged as a docker namespace — the bump is purely
+//! additive.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,7 +34,7 @@ use super::namespace::NamespaceConfig;
 use crate::error::ConfigError;
 use crate::paths;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServersFile {
@@ -137,4 +149,31 @@ fn write_atomic_0600(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
     })?;
     paths::set_file_mode_0600(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn k2_schema_version_bumped() {
+        // K2 (v0.1.4) bumps the servers.toml schema to 2 for the new
+        // `type` / `kubeconfig` / `context` / `namespace` k8s fields.
+        assert!(
+            SCHEMA_VERSION >= 2,
+            "SCHEMA_VERSION must be >= 2 after the K2 k8s-config additions"
+        );
+        assert_eq!(ServersFile::default().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn k2_v1_file_without_type_loads_as_docker() {
+        // A pre-K2 (v1) file with no `type` field still parses and its
+        // namespace resolves as docker — the bump is purely additive.
+        let toml = "schema_version = 1\n\n[namespaces.arte]\nhost = \"h\"\nuser = \"u\"\n";
+        let parsed: ServersFile = toml::from_str(toml).expect("v1 file parses");
+        let ns = &parsed.namespaces["arte"];
+        assert!(ns.runtime_type.is_none());
+        assert!(ns.validate("arte").is_ok());
+    }
 }

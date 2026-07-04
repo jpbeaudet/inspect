@@ -100,6 +100,13 @@ pub enum ConfigError {
     InvalidAuthMode { namespace: String, value: String },
 
     #[error(
+        "invalid runtime type '{value}' for namespace '{namespace}': expected \
+         \"docker\" (default) or \"k8s\"; fix the `type` field in \
+         ~/.inspect/servers.toml"
+    )]
+    InvalidRuntimeType { namespace: String, value: String },
+
+    #[error(
         "namespace '{namespace}': password_env is only meaningful with \
          auth = \"password\"; either set auth = \"password\" or unset password_env"
     )]

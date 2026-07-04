@@ -6,6 +6,7 @@ use crate::commands::list::{json_opt_string, json_string};
 use crate::config::namespace::{validate_namespace_name, NamespaceSource};
 use crate::config::resolver;
 use crate::error::ExitKind;
+use crate::exec::runtime::RuntimeKind;
 use crate::redact;
 
 pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
@@ -16,13 +17,20 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
     // inspection time rather than waiting for the next `connect`.
     r.config.validate(&r.name)?;
 
+    let is_k8s = r.config.runtime_kind() == RuntimeKind::K8s;
+
     if args.format.is_json() {
+        // K2 (v0.1.4): schema 2 adds `type` + the k8s addressing fields.
+        // SSH-only fields serialize as their real value (null for a k8s
+        // namespace, since they are inert / unset there).
         let body = format!(
-            "{{\"schema_version\":1,\"name\":{name},\"host\":{host},\"user\":{user},\
-             \"port\":{port},\"key_path\":{key_path},\"key_passphrase_env\":{kpe},\
-             \"key_inline\":{inline},\"auth\":{auth},\"password_env\":{pe},\
-             \"session_ttl\":{ttl},\"source\":{src}}}",
+            "{{\"schema_version\":2,\"name\":{name},\"type\":{ty},\"host\":{host},\
+             \"user\":{user},\"port\":{port},\"key_path\":{key_path},\
+             \"key_passphrase_env\":{kpe},\"key_inline\":{inline},\"auth\":{auth},\
+             \"password_env\":{pe},\"session_ttl\":{ttl},\"kubeconfig\":{kubeconfig},\
+             \"context\":{context},\"namespace\":{k8sns},\"source\":{src}}}",
             name = json_string(&r.name),
+            ty = json_string(if is_k8s { "k8s" } else { "docker" }),
             host = json_opt_string(&r.config.host),
             user = json_opt_string(&r.config.user),
             port = r
@@ -41,6 +49,9 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             auth = json_opt_string(&r.config.auth),
             pe = json_opt_string(&r.config.password_env),
             ttl = json_opt_string(&r.config.session_ttl),
+            kubeconfig = json_opt_string(&r.config.kubeconfig),
+            context = json_opt_string(&r.config.context),
+            k8sns = json_opt_string(&r.config.k8s_namespace),
             src = json_string(describe_source(r.source)),
         );
         println!("{body}");
@@ -48,11 +59,51 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
     }
 
     println!(
-        "SUMMARY: namespace '{}' resolved from {}",
+        "SUMMARY: namespace '{}' resolved from {} (type: {})",
         r.name,
-        describe_source(r.source)
+        describe_source(r.source),
+        if is_k8s { "k8s" } else { "docker" }
     );
     println!("DATA:");
+
+    if is_k8s {
+        // Kubernetes namespace: show the k8s addressing; the SSH-only
+        // fields are inert here and render N/A rather than <unset>, so
+        // an operator doesn't read a blank as "misconfigured".
+        println!("  type:                k8s");
+        println!(
+            "  context:             {}",
+            r.config.context.as_deref().unwrap_or("<current-context>")
+        );
+        println!(
+            "  kubeconfig:          {}",
+            r.config
+                .kubeconfig
+                .as_deref()
+                .unwrap_or("<kubectl default>")
+        );
+        println!(
+            "  namespace:           {}",
+            r.config.k8s_namespace.as_deref().unwrap_or("<default>")
+        );
+        for field in [
+            "host",
+            "user",
+            "port",
+            "auth",
+            "key_path",
+            "key_passphrase_env",
+            "key_inline",
+            "password_env",
+            "session_ttl",
+        ] {
+            println!("  {field:<19} N/A (k8s)");
+        }
+        println!("NEXT:    inspect test {0}   inspect setup {0}", r.name);
+        return Ok(ExitKind::Success);
+    }
+
+    println!("  type:                docker");
     println!(
         "  host:                {}",
         r.config.host.as_deref().unwrap_or("<unset>")

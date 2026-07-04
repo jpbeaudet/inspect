@@ -13,6 +13,32 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
 ### Added
 
+- **K2 — namespace `type` / kubeconfig config + type-conditional
+  validation.** `servers.toml` gains four optional fields for the
+  kubernetes runtime medium — `type` (`docker` default | `k8s`),
+  `kubeconfig`, `context`, `namespace` (the in-cluster k8s namespace) —
+  all skipped when unset, so a pre-K2 file loads unchanged as a docker
+  namespace. **Config schema bumped 1 → 2** (additive; no migration —
+  the version-gate on load is unchanged). `NamespaceConfig::validate()`
+  is now **type-conditional**: a docker namespace keeps the `host` +
+  `user` requirement and all SSH/auth/key/ttl checks; a `type = "k8s"`
+  namespace requires **neither** `host` nor `user` (it is addressed by
+  its kubeconfig context, verified at `setup`/`test` in a later item),
+  and its SSH-only fields are inert. An unknown `type` value is rejected
+  loudly (`ConfigError::InvalidRuntimeType`, CI-gate-quality message)
+  rather than silently treated as docker. `inspect add --type k8s`
+  prompts for context/kubeconfig/namespace and skips the SSH prompts;
+  `inspect show` on a k8s namespace renders the SSH-only fields as
+  `N/A (k8s)` and adds `type` + the k8s addressing to both the human and
+  `--json` output (**show `--json` `schema_version` 1 → 2**, adds
+  `type`/`kubeconfig`/`context`/`namespace`). Env overrides
+  `INSPECT_<NS>_TYPE` / `_KUBECONFIG` / `_CONTEXT` / `_NAMESPACE` added.
+  `NamespaceConfig::runtime_kind()` bridges the config to the K1
+  `RuntimeKind` selector. No k8s *verb* runs yet — that is Wave B.
+  Acceptance: `k2_*` in `src/config/namespace.rs` + `src/config/file.rs`
+  and `k2_show_renders_ssh_fields_na_for_k8s` /
+  `k2_k8s_namespace_shows_without_host_user` / `k2_unknown_type_is_rejected`
+  in `tests/phase_k_v014.rs`.
 - **K1 — internal Runtime executor abstraction.** New `Runtime` trait
   (`src/exec/runtime.rs`) that abstracts runtime-specific command
   building behind an object-safe seam, with a `RuntimeKind`

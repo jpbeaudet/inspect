@@ -8,6 +8,9 @@
 //! - `INSPECT_<NS>_KEY_PATH`
 //! - `INSPECT_<NS>_KEY_PASSPHRASE_ENV`
 //! - `INSPECT_<NS>_KEY_INLINE`
+//! - `INSPECT_<NS>_TYPE` (K2, v0.1.4 — `docker` | `k8s`)
+//! - `INSPECT_<NS>_KUBECONFIG` / `INSPECT_<NS>_CONTEXT` /
+//!   `INSPECT_<NS>_NAMESPACE` (K2 — kubernetes addressing)
 //!
 //! `KEY_PATH` and `KEY_INLINE` are mutually exclusive; the resolver returns
 //! both so the caller's [`NamespaceConfig::validate`] can flag conflicts.
@@ -28,6 +31,11 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
     let key_path = std::env::var(format!("{prefix}KEY_PATH")).ok();
     let key_passphrase_env = std::env::var(format!("{prefix}KEY_PASSPHRASE_ENV")).ok();
     let key_inline = std::env::var(format!("{prefix}KEY_INLINE")).ok();
+    // K2 (v0.1.4): kubernetes addressing overrides.
+    let runtime_type = std::env::var(format!("{prefix}TYPE")).ok();
+    let kubeconfig = std::env::var(format!("{prefix}KUBECONFIG")).ok();
+    let context = std::env::var(format!("{prefix}CONTEXT")).ok();
+    let k8s_namespace = std::env::var(format!("{prefix}NAMESPACE")).ok();
 
     if host.is_none()
         && user.is_none()
@@ -35,6 +43,10 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         && key_path.is_none()
         && key_passphrase_env.is_none()
         && key_inline.is_none()
+        && runtime_type.is_none()
+        && kubeconfig.is_none()
+        && context.is_none()
+        && k8s_namespace.is_none()
     {
         return None;
     }
@@ -66,6 +78,10 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
         auth: None,
         password_env: None,
         session_ttl: None,
+        runtime_type,
+        kubeconfig,
+        context,
+        k8s_namespace,
     })
 }
 

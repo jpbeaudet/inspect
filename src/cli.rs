@@ -1762,6 +1762,27 @@ pub struct AddArgs {
     #[arg(long)]
     pub port: Option<u16>,
 
+    /// Runtime medium: `docker` (default) or `k8s` (K2, v0.1.4). A k8s
+    /// namespace uses kubeconfig/context/namespace instead of
+    /// host/user/key_path.
+    #[arg(long = "type")]
+    pub runtime_type: Option<String>,
+
+    /// (k8s) Path to the kubeconfig. Optional; defaults to kubectl's
+    /// own resolution (`$KUBECONFIG` / `~/.kube/config`).
+    #[arg(long)]
+    pub kubeconfig: Option<String>,
+
+    /// (k8s) kubeconfig context to pin on every kubectl call. inspect
+    /// never reads the ambient `current-context` (anti-footgun, K5).
+    #[arg(long)]
+    pub context: Option<String>,
+
+    /// (k8s) Kubernetes namespace inside the cluster to scope to.
+    /// Optional; defaults to the kubectl default namespace.
+    #[arg(long = "namespace")]
+    pub k8s_namespace: Option<String>,
+
     /// Overwrite an existing entry without prompting.
     #[arg(long)]
     pub force: bool,

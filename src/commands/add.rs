@@ -24,42 +24,74 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
         )));
     }
 
-    let host = collect_value("host", args.host.as_deref(), args.non_interactive, false)?
-        .ok_or_else(|| anyhow!("host is required"))?;
-    let user = collect_value("user", args.user.as_deref(), args.non_interactive, false)?
-        .ok_or_else(|| anyhow!("user is required"))?;
-    let key_path = collect_value(
-        "key_path",
-        args.key_path.as_deref(),
-        args.non_interactive,
-        false,
-    )?
-    .ok_or_else(|| anyhow!("key_path is required"))?;
-    let key_passphrase_env = collect_value(
-        "key_passphrase_env (optional, env var name)",
-        args.key_passphrase_env.as_deref(),
-        args.non_interactive,
-        true,
-    )?;
-    let port = match args.port {
-        Some(p) => Some(p),
-        None if args.non_interactive => None,
-        None => prompt_optional_u16("port (default 22)")?,
-    };
+    // K2 (v0.1.4): a `--type k8s` namespace collects kubeconfig /
+    // context / namespace and skips the SSH host/user/key prompts
+    // entirely (it is addressed by its kubeconfig context, not SSH).
+    let is_k8s = matches!(
+        args.runtime_type
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("k8s") | Some("kubernetes")
+    );
 
-    let cfg = NamespaceConfig {
-        env: None,
-        auto_reauth: None,
-        history: None,
-        host: Some(host),
-        user: Some(user),
-        port,
-        key_path: Some(key_path),
-        key_passphrase_env,
-        key_inline: None,
-        auth: None,
-        password_env: None,
-        session_ttl: None,
+    let cfg = if is_k8s {
+        let context = collect_value(
+            "context (kubeconfig context, optional but recommended)",
+            args.context.as_deref(),
+            args.non_interactive,
+            true,
+        )?;
+        let kubeconfig = collect_value(
+            "kubeconfig (path, optional — blank uses kubectl default)",
+            args.kubeconfig.as_deref(),
+            args.non_interactive,
+            true,
+        )?;
+        let k8s_namespace = collect_value(
+            "namespace (k8s namespace, optional — blank uses default)",
+            args.k8s_namespace.as_deref(),
+            args.non_interactive,
+            true,
+        )?;
+        NamespaceConfig {
+            runtime_type: Some("k8s".to_string()),
+            kubeconfig,
+            context,
+            k8s_namespace,
+            ..Default::default()
+        }
+    } else {
+        let host = collect_value("host", args.host.as_deref(), args.non_interactive, false)?
+            .ok_or_else(|| anyhow!("host is required"))?;
+        let user = collect_value("user", args.user.as_deref(), args.non_interactive, false)?
+            .ok_or_else(|| anyhow!("user is required"))?;
+        let key_path = collect_value(
+            "key_path",
+            args.key_path.as_deref(),
+            args.non_interactive,
+            false,
+        )?
+        .ok_or_else(|| anyhow!("key_path is required"))?;
+        let key_passphrase_env = collect_value(
+            "key_passphrase_env (optional, env var name)",
+            args.key_passphrase_env.as_deref(),
+            args.non_interactive,
+            true,
+        )?;
+        let port = match args.port {
+            Some(p) => Some(p),
+            None if args.non_interactive => None,
+            None => prompt_optional_u16("port (default 22)")?,
+        };
+        NamespaceConfig {
+            host: Some(host),
+            user: Some(user),
+            port,
+            key_path: Some(key_path),
+            key_passphrase_env,
+            ..Default::default()
+        }
     };
     cfg.validate(&args.namespace)?;
 
@@ -71,7 +103,11 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
         args.namespace,
         if exists { "updated" } else { "added" }
     );
-    println!("DATA:    host, user, port, key_path stored (passphrases never on disk)");
+    if is_k8s {
+        println!("DATA:    type=k8s; context, kubeconfig, namespace stored (kubeconfig inherits kubectl auth)");
+    } else {
+        println!("DATA:    host, user, port, key_path stored (passphrases never on disk)");
+    }
     println!(
         "NEXT:    inspect test {} && inspect connect {}",
         args.namespace, args.namespace

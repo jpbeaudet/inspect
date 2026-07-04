@@ -47,3 +47,47 @@ fn k1_help_renders_without_k8s_half_verbs() {
         .success()
         .stdout(contains("inspect").or(contains("Usage")));
 }
+
+// ---- K2 (v0.1.4): namespace `type` / kubeconfig config --------------
+
+/// K2: `inspect show` on a k8s namespace renders the SSH-only fields as
+/// `N/A (k8s)` (not `<unset>`, which would read as misconfigured) and
+/// surfaces the k8s addressing. Driven from an env-only k8s namespace so
+/// no on-disk config is needed.
+#[test]
+fn k2_show_renders_ssh_fields_na_for_k8s() {
+    inspect()
+        .env("INSPECT_STAGINGK8S_TYPE", "k8s")
+        .env("INSPECT_STAGINGK8S_CONTEXT", "staging")
+        .env("INSPECT_STAGINGK8S_NAMESPACE", "default")
+        .args(["show", "stagingk8s"])
+        .assert()
+        .success()
+        .stdout(contains("type:").and(contains("k8s")))
+        .stdout(contains("N/A (k8s)"))
+        .stdout(contains("staging"));
+}
+
+/// K2: an env-only k8s namespace with no host/user validates and shows
+/// (the type-conditional validation drops the docker host+user gate).
+#[test]
+fn k2_k8s_namespace_shows_without_host_user() {
+    inspect()
+        .env("INSPECT_KUBEONLY_TYPE", "kubernetes")
+        .args(["show", "kubeonly"])
+        .assert()
+        .success()
+        .stdout(contains("type:").and(contains("k8s")));
+}
+
+/// K2: an unknown `type` is rejected loudly rather than silently run as
+/// docker.
+#[test]
+fn k2_unknown_type_is_rejected() {
+    inspect()
+        .env("INSPECT_BADTYPE_TYPE", "kube")
+        .args(["show", "badtype"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid runtime type").or(contains("kube")));
+}

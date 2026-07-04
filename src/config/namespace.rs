@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
+use crate::exec::runtime::RuntimeKind;
 
 /// A configured namespace as it appears on disk and after resolution.
 ///
@@ -72,6 +73,34 @@ pub struct NamespaceConfig {
     /// doesn't hold a live remote session indefinitely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ttl: Option<String>,
+    /// K2 (v0.1.4): runtime medium selector. Absent or `"docker"`
+    /// (the default) is the docker-over-SSH runtime every existing
+    /// config uses; `"k8s"` / `"kubernetes"` selects the Kubernetes
+    /// runtime (kubectl shell-out). Any other value is rejected by
+    /// `validate`. Maps to [`crate::exec::runtime::RuntimeKind`] via
+    /// [`NamespaceConfig::runtime_kind`].
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub runtime_type: Option<String>,
+    /// K2 (v0.1.4): path to the kubeconfig for a `type = "k8s"`
+    /// namespace. `None` uses kubectl's default resolution
+    /// (`$KUBECONFIG` / `~/.kube/config`). Inert for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubeconfig: Option<String>,
+    /// K2 (v0.1.4): kubeconfig context to pin on every kubectl call
+    /// (the K5 anti-footgun invariant — inspect never reads the ambient
+    /// `current-context`). `None` until the operator sets it at `add` /
+    /// in `servers.toml`; `setup`/`test` (K6) verify it resolves. Inert
+    /// for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// K2 (v0.1.4): the Kubernetes namespace (inside the cluster) that
+    /// this inspect-namespace scopes to. `None` ⇒ kubectl's default
+    /// namespace; a per-verb `-n`/`-A` override (K7+) supersedes it.
+    /// Serialized as `namespace` in `servers.toml`; named
+    /// `k8s_namespace` in code to avoid confusion with the
+    /// inspect-namespace itself. Inert for docker namespaces.
+    #[serde(rename = "namespace", default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
 }
 
 /// Per-namespace transcript policy override. See
@@ -133,12 +162,77 @@ impl NamespaceConfig {
                 .session_ttl
                 .clone()
                 .or_else(|| self.session_ttl.clone()),
+            runtime_type: other
+                .runtime_type
+                .clone()
+                .or_else(|| self.runtime_type.clone()),
+            kubeconfig: other.kubeconfig.clone().or_else(|| self.kubeconfig.clone()),
+            context: other.context.clone().or_else(|| self.context.clone()),
+            k8s_namespace: other
+                .k8s_namespace
+                .clone()
+                .or_else(|| self.k8s_namespace.clone()),
         }
+    }
+
+    /// The runtime medium this namespace selects, from its `type` field.
+    /// Absent / `"docker"` → docker; `"k8s"` / `"kubernetes"` → k8s
+    /// (see [`crate::exec::runtime::RuntimeKind::from_type`]). `validate`
+    /// rejects any other `type` value, so by the time a resolved config
+    /// is dispatched this is an authoritative selection.
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        RuntimeKind::from_type(self.runtime_type.as_deref())
     }
 
     /// Validate that required fields are populated and that mutually
     /// exclusive options aren't both set.
+    ///
+    /// K2 (v0.1.4): validation is **type-conditional**. A docker
+    /// namespace keeps the `host` + `user` requirement (and all the SSH
+    /// shape / auth / key / ttl checks). A `type = "k8s"` namespace
+    /// requires **neither** `host` nor `user` — it is addressed by its
+    /// kubeconfig context, whose resolvability is checked at
+    /// `setup`/`test` (K6), not here. SSH-only fields on a k8s namespace
+    /// are inert (not validated); `show` renders them N/A. An unknown
+    /// `type` value is rejected loudly (CI-gate-quality) rather than
+    /// silently treated as docker.
     pub fn validate(&self, namespace: &str) -> Result<(), ConfigError> {
+        // Reject an unrecognized `type` up front, for both mediums —
+        // `RuntimeKind::from_type` is total (unknown → docker) so
+        // selection never panics, but a typo like `type = "kube"` must
+        // surface here rather than silently running docker.
+        if let Some(t) = self.runtime_type.as_deref() {
+            let norm = t.trim().to_ascii_lowercase();
+            if !matches!(norm.as_str(), "docker" | "k8s" | "kubernetes") {
+                return Err(ConfigError::InvalidRuntimeType {
+                    namespace: namespace.to_string(),
+                    value: t.to_string(),
+                });
+            }
+        }
+
+        // Every env-overlay key must be a POSIX-portable identifier —
+        // this check is medium-agnostic, so it runs for both docker and
+        // k8s namespaces.
+        if let Some(map) = self.env.as_ref() {
+            for k in map.keys() {
+                if !is_valid_env_key(k) {
+                    return Err(ConfigError::InvalidEnvKey {
+                        namespace: namespace.to_string(),
+                        key: k.clone(),
+                    });
+                }
+            }
+        }
+
+        // A k8s namespace needs neither host nor user, and its SSH-only
+        // fields (key/auth/password/ttl) are inert. Nothing more to
+        // validate here — the context is checked at setup/test (K6).
+        if self.runtime_kind() == RuntimeKind::K8s {
+            return Ok(());
+        }
+
+        // ---- Docker (default) medium: the pre-K2 SSH validation. ----
         if self.host.is_none() {
             return Err(ConfigError::MissingField {
                 namespace: namespace.to_string(),
@@ -178,22 +272,7 @@ impl NamespaceConfig {
         if self.key_path.is_some() && self.key_inline.is_some() {
             return Err(ConfigError::ConflictingKeySources);
         }
-        // Every env-overlay key must be a POSIX-portable
-        // identifier ([A-Za-z_][A-Za-z0-9_]*). Reject anything else
-        // here so a typo'd config does not silently produce a remote
-        // command line that the shell parses as something else
-        // (`KEY-NAME=val` would split on `-` in some shells, or be
-        // taken as a flag to `env`).
-        if let Some(map) = self.env.as_ref() {
-            for k in map.keys() {
-                if !is_valid_env_key(k) {
-                    return Err(ConfigError::InvalidEnvKey {
-                        namespace: namespace.to_string(),
-                        key: k.clone(),
-                    });
-                }
-            }
-        }
+        // (env-overlay key validation runs medium-agnostically above.)
         // Auth must be exactly `key` or `password` when
         // set; password_env requires auth=password to make sense;
         // session_ttl must parse and be ≤ 24h.
@@ -323,6 +402,20 @@ mod tests {
             auth: None,
             password_env: None,
             session_ttl: None,
+            runtime_type: None,
+            kubeconfig: None,
+            context: None,
+            k8s_namespace: None,
+        }
+    }
+
+    /// Build a `type = "k8s"` namespace config with no host/user.
+    fn k8s_cfg(context: Option<&str>, k8s_ns: Option<&str>) -> NamespaceConfig {
+        NamespaceConfig {
+            runtime_type: Some("k8s".into()),
+            context: context.map(String::from),
+            k8s_namespace: k8s_ns.map(String::from),
+            ..Default::default()
         }
     }
 
@@ -567,5 +660,93 @@ mod tests {
         assert_eq!(merged.auth.as_deref(), Some("password"));
         assert_eq!(merged.password_env.as_deref(), Some("ENV_PASS"));
         assert_eq!(merged.session_ttl.as_deref(), Some("12h"));
+    }
+
+    // ---- K2 (v0.1.4): kubernetes namespace config -----------------------
+
+    #[test]
+    fn k2_k8s_namespace_parses_without_host_user() {
+        // A k8s namespace validates with neither host nor user — it is
+        // addressed by its kubeconfig context (checked at setup/test, K6).
+        let c = k8s_cfg(Some("staging"), Some("default"));
+        assert!(c.host.is_none() && c.user.is_none());
+        assert!(c.validate("staging-k8s").is_ok());
+        assert_eq!(c.runtime_kind(), RuntimeKind::K8s);
+    }
+
+    #[test]
+    fn k2_docker_namespace_still_requires_host_user() {
+        // Absent `type` ⇒ docker ⇒ the pre-K2 host+user requirement holds.
+        let missing_user = cfg(Some("h"), None, None);
+        assert!(matches!(
+            missing_user.validate("ns"),
+            Err(ConfigError::MissingField { field: "user", .. })
+        ));
+        let missing_host = cfg(None, Some("u"), None);
+        assert!(matches!(
+            missing_host.validate("ns"),
+            Err(ConfigError::MissingField { field: "host", .. })
+        ));
+        // An explicit `type = "docker"` keeps the same requirement.
+        let mut typed_docker = cfg(None, None, None);
+        typed_docker.runtime_type = Some("docker".into());
+        assert!(typed_docker.validate("ns").is_err());
+    }
+
+    #[test]
+    fn k2_type_defaults_to_docker_when_absent() {
+        let c = cfg(Some("h"), Some("u"), None);
+        assert!(c.runtime_type.is_none());
+        assert_eq!(c.runtime_kind(), RuntimeKind::Docker);
+        // "kubernetes" is an accepted alias for k8s.
+        let mut alias = k8s_cfg(None, None);
+        alias.runtime_type = Some("kubernetes".into());
+        assert_eq!(alias.runtime_kind(), RuntimeKind::K8s);
+    }
+
+    #[test]
+    fn k2_rejects_unknown_runtime_type() {
+        // A typo'd `type` must surface loudly, not silently run docker.
+        let mut c = k8s_cfg(None, None);
+        c.runtime_type = Some("kube".into());
+        assert!(matches!(
+            c.validate("ns"),
+            Err(ConfigError::InvalidRuntimeType { value, .. }) if value == "kube"
+        ));
+    }
+
+    #[test]
+    fn k2_k8s_ssh_fields_inert_but_env_keys_still_validated() {
+        // SSH-only fields set on a k8s namespace are inert (no error) …
+        let mut c = k8s_cfg(Some("ctx"), None);
+        c.auth = Some("password".into());
+        c.session_ttl = Some("999h".into()); // would fail the 24h cap on docker
+        c.key_path = Some("/tmp/k".into());
+        c.key_inline = Some("base64==".into()); // would conflict on docker
+        assert!(c.validate("staging-k8s").is_ok());
+        // … but the medium-agnostic env-key check still fires.
+        let mut bad_env = k8s_cfg(Some("ctx"), None);
+        let mut env = BTreeMap::new();
+        env.insert("BAD-KEY".to_string(), "v".to_string());
+        bad_env.env = Some(env);
+        assert!(matches!(
+            bad_env.validate("staging-k8s"),
+            Err(ConfigError::InvalidEnvKey { .. })
+        ));
+    }
+
+    #[test]
+    fn k2_merge_preserves_k8s_fields() {
+        let file = k8s_cfg(Some("staging"), Some("default"));
+        let env = NamespaceConfig::default();
+        let merged = file.merge_over(&env);
+        assert_eq!(merged.runtime_type.as_deref(), Some("k8s"));
+        assert_eq!(merged.context.as_deref(), Some("staging"));
+        assert_eq!(merged.k8s_namespace.as_deref(), Some("default"));
+        // env override wins on collision.
+        let mut env2 = NamespaceConfig::default();
+        env2.context = Some("prod".into());
+        let merged2 = file.merge_over(&env2);
+        assert_eq!(merged2.context.as_deref(), Some("prod"));
     }
 }
