@@ -101,10 +101,16 @@ pub enum ConfigError {
 
     #[error(
         "invalid runtime type '{value}' for namespace '{namespace}': expected \
-         \"docker\" (default) or \"k8s\"; fix the `type` field in \
-         ~/.inspect/servers.toml"
+         \"docker\" (default) or \"k8s\"; fix the `type` field in {path}"
     )]
-    InvalidRuntimeType { namespace: String, value: String },
+    InvalidRuntimeType {
+        namespace: String,
+        value: String,
+        // WA-1 (v0.1.4): resolved servers.toml path, not a hardcoded
+        // `~/.inspect/...`, so the fix-here hint points at the real file
+        // under INSPECT_HOME.
+        path: String,
+    },
 
     #[error(
         "namespace '{namespace}': password_env is only meaningful with \

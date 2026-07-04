@@ -98,20 +98,38 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
     servers.namespaces.insert(args.namespace.clone(), cfg);
     file::save(&servers).context("writing servers.toml")?;
 
+    // WA-1 (v0.1.4): report the RESOLVED servers.toml path, not a literal
+    // `~/.inspect/servers.toml`. When `INSPECT_HOME` relocates config, the
+    // hardcoded string lied about where the write landed — a silent
+    // "what I said" vs "what I did" divergence that traps an agent going to
+    // edit the file. `servers_toml_display()` shows the real path.
     println!(
-        "SUMMARY: namespace '{}' {} in ~/.inspect/servers.toml",
+        "SUMMARY: namespace '{}' {} in {}",
         args.namespace,
-        if exists { "updated" } else { "added" }
+        if exists { "updated" } else { "added" },
+        crate::paths::servers_toml_display()
     );
     if is_k8s {
         println!("DATA:    type=k8s; context, kubeconfig, namespace stored (kubeconfig inherits kubectl auth)");
     } else {
         println!("DATA:    host, user, port, key_path stored (passphrases never on disk)");
     }
-    println!(
-        "NEXT:    inspect test {} && inspect connect {}",
-        args.namespace, args.namespace
-    );
+    // WA-3 (v0.1.4): the NEXT hint must be runtime-aware. A k8s namespace
+    // is sessionless (kubeconfig is stateless) — suggesting `inspect
+    // connect` there is a mindtrap: `connect` requires an SSH host and
+    // fails with `namespace has no host` (exit 2). Only docker namespaces
+    // get the `connect` step.
+    if is_k8s {
+        println!(
+            "NEXT:    inspect test {} (k8s is sessionless — no `connect` step)",
+            args.namespace
+        );
+    } else {
+        println!(
+            "NEXT:    inspect test {} && inspect connect {}",
+            args.namespace, args.namespace
+        );
+    }
     Ok(ExitKind::Success)
 }
 

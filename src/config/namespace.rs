@@ -207,6 +207,7 @@ impl NamespaceConfig {
                 return Err(ConfigError::InvalidRuntimeType {
                     namespace: namespace.to_string(),
                     value: t.to_string(),
+                    path: crate::paths::servers_toml_display(),
                 });
             }
         }

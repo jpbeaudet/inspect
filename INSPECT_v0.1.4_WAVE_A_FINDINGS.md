@@ -10,7 +10,7 @@ Status legend: `🟥 Open crit-bug · 🟧 In progress · ✅ Fixed · 📝 cove
 
 ---
 
-## WA-1 — `inspect add` success message reports the WRONG config path (mindtrap) 🟥
+## WA-1 — `inspect add` success message reports the WRONG config path (mindtrap) ✅ Fixed
 
 **Surfaced:** K2 live test, 2026-07-04. `INSPECT_HOME=/tmp/k2-livetest inspect
 add maker --type k8s …` printed:

@@ -34,14 +34,18 @@ pub fn run(args: RemoveArgs) -> anyhow::Result<ExitKind> {
         }
         servers.namespaces.remove(&args.namespace);
         file::save(&servers)?;
+        // WA-1 (v0.1.4): name the RESOLVED servers.toml path so an agent
+        // knows exactly which file changed (honors INSPECT_HOME).
         println!(
-            "SUMMARY: namespace '{}' removed from servers.toml",
-            args.namespace
+            "SUMMARY: namespace '{}' removed from {}",
+            args.namespace,
+            crate::paths::servers_toml_display()
         );
     } else {
         println!(
-            "SUMMARY: namespace '{}' is not in servers.toml (file-side no-op)",
-            args.namespace
+            "SUMMARY: namespace '{}' is not in {} (file-side no-op)",
+            args.namespace,
+            crate::paths::servers_toml_display()
         );
     }
 

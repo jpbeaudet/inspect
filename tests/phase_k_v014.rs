@@ -91,3 +91,90 @@ fn k2_unknown_type_is_rejected() {
         .failure()
         .stderr(contains("invalid runtime type").or(contains("kube")));
 }
+
+/// K2 (WA-2): the *negative* half of the type-conditional validate — a
+/// `type = "docker"` namespace with no host/user must still FAIL, exactly
+/// as before K2. The k8s branch drops the host+user gate; the docker
+/// branch must keep it.
+#[test]
+fn k2_docker_namespace_still_requires_host_user() {
+    inspect()
+        .env("INSPECT_DOCKERBAD_TYPE", "docker")
+        .args(["show", "dockerbad"])
+        .assert()
+        .failure()
+        .stderr(contains("host").or(contains("user")));
+}
+
+/// K2 (WA-2): an absent `type` field resolves to the docker runtime — the
+/// no-change guarantee for existing configs. A namespace with host/user
+/// and no `type` renders as docker.
+#[test]
+fn k2_type_defaults_to_docker_when_absent() {
+    inspect()
+        .env("INSPECT_DOCKDEFAULT_HOST", "h.example.internal")
+        .env("INSPECT_DOCKDEFAULT_USER", "u")
+        .args(["show", "dockdefault"])
+        .assert()
+        .success()
+        .stdout(contains("docker"));
+}
+
+/// K2 (WA-2): the servers.toml schema is bumped to 2 for the k8s fields.
+/// Black-box acceptance: a freshly-written config records
+/// `schema_version = 2`. (INSPECT_HOME isolates the write to a tempdir.)
+#[test]
+fn k2_schema_version_bumped() {
+    let home = std::env::temp_dir().join(format!("inspect-k2schema-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    inspect()
+        .env("INSPECT_HOME", &home)
+        .args([
+            "add", "k", "--type", "k8s", "--context", "c", "--non-interactive", "--force",
+        ])
+        .assert()
+        .success();
+    let contents =
+        std::fs::read_to_string(home.join("servers.toml")).expect("servers.toml was written");
+    assert!(
+        contents.contains("schema_version = 2"),
+        "expected `schema_version = 2` in written config, got:\n{contents}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ---- WA-1 (v0.1.4): resolved-config-path anti-mindtrap ---------------
+
+/// WA-1: `inspect add` must report the RESOLVED servers.toml path, not a
+/// hardcoded `~/.inspect/servers.toml`. When INSPECT_HOME relocates
+/// config, the old message lied about where the write landed — an agent
+/// following the reported path would find nothing there. The success
+/// output must name the real path and must NOT contain the literal
+/// `~/.inspect/servers.toml`.
+#[test]
+fn wa1_add_reports_resolved_config_path_under_inspect_home() {
+    let home = std::env::temp_dir().join(format!("inspect-wa1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let servers = home.join("servers.toml");
+    inspect()
+        .env("INSPECT_HOME", &home)
+        .args([
+            "add",
+            "foo",
+            "--type",
+            "k8s",
+            "--context",
+            "z2-maker",
+            "--namespace",
+            "inspect-livetest",
+            "--non-interactive",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            contains(servers.display().to_string())
+                .and(contains("~/.inspect/servers.toml").not()),
+        );
+    let _ = std::fs::remove_dir_all(&home);
+}
