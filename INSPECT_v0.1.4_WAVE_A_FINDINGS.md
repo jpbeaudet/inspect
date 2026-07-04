@@ -60,7 +60,48 @@ tests. Low effort.
 
 ---
 
+## WA-3 — `inspect show <k8s-ns>` hard-fails on absent kubectl, breaking the config-read JSON contract 🟧 (design-review; K6-gated)
+
+**Surfaced:** K3 live test, 2026-07-04. K3 wired the kubectl preflight into
+`inspect show` (the only k8s-reachable surface before K6). Live behavior:
+- kubectl present → `inspect show maker` exit 0, renders `kubectl: v1.36.2`. ✅
+- kubectl absent → `inspect show maker` **exit 2**, four-question error on stderr,
+  **empty stdout**. Same for `inspect show maker --json`.
+
+**The concern (borderline mindtrap, --json case):** `show` is fundamentally a
+*config read* ("show a namespace's resolved configuration"). Hard-failing it when
+the kubectl **backend** is absent conflates two concerns — *display the config I
+wrote* vs *is the backend ready*. Under `--json`, an agent doing
+`inspect show maker --json | jq .context` to read the configured context gets
+**empty stdout + exit 2 + a non-JSON stderr blob** — the JSON contract for a pure
+config read is broken by an unrelated backend check. The config is right there on
+disk; refusing to display it is surprising.
+
+**Why not a crit-bug (and why it's not fixed this turn):** the error itself is
+loud, specific, actionable, correct-exit (not misleading) — and `show` was the
+*only* k8s-reachable surface in K3 (setup/test/read verbs land in K6+). The
+hard-fail-somewhere requirement (`k3_k8s_verb_fails_loud_when_kubectl_absent`)
+needed a reachable verb this turn; `show` was the pragmatic choice.
+
+**Recommended resolution (named unblock = K6):** when K6 lands `test`/`setup`
+(the natural preflight verbs), **move the hard four-question fail there**, and
+make `show` **always display the config + a `kubectl: <version>` / `kubectl: NOT
+FOUND — <fix hint>` readiness line** — never hard-fail a pure config read, and
+never break `--json`. `show` reports readiness; `test`/`setup`/read/write verbs
+enforce it. Tracked to K6 (a real, named unblock — not a silent deferral);
+surfaced to root/JP for the call.
+
+---
+
 ## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K3 kubectl backend probe** live-passes against maker via the installed binary:
+  present → `inspect show maker` reports `kubectl: v1.36.2` (exit 0); absent
+  (`PATH=/usr/bin:/bin`) → **exit 2** with the four-question error (what/where/why/
+  fix + the install URL + `kubectl version --client` verify command) — **no raw OS
+  error, correct exit class**. The probe is a **local** spawn (`kubectl version
+  --client -o json`), never over SSH (surface map §10). Docker namespaces are
+  unaffected. (One design-review caveat filed as WA-3 above.)
 
 - **K2 config surface** live-passes against maker: `inspect add maker --type k8s
   --context z2-maker --kubeconfig ~/.kube/maker.yaml --namespace inspect-livetest`

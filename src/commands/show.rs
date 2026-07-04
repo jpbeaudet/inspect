@@ -19,6 +19,27 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
 
     let is_k8s = r.config.runtime_kind() == RuntimeKind::K8s;
 
+    // K3 (v0.1.4): a k8s namespace drives the kubectl shell-out backend,
+    // so `show` doubles as the reachable backend-preflight surface. Probe
+    // kubectl LOCALLY (never over SSH — surface map §10). If it is absent,
+    // fail loud/specific/actionable (the four-question error) before
+    // emitting any config, so an agent gets an exit-2 preflight failure
+    // rather than a k8s config that looks ready but has no backend. Docker
+    // namespaces never reach this probe.
+    let k8s_probe = if is_k8s {
+        Some(crate::exec::kubectl::probe_kubectl())
+    } else {
+        None
+    };
+    if let Some(p) = &k8s_probe {
+        if !p.available {
+            anyhow::bail!(crate::exec::kubectl::not_found_message(
+                &r.name,
+                &p.path_searched
+            ));
+        }
+    }
+
     if args.format.is_json() {
         // K2 (v0.1.4): schema 2 adds `type` + the k8s addressing fields.
         // SSH-only fields serialize as their real value (null for a k8s
@@ -28,7 +49,8 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
              \"user\":{user},\"port\":{port},\"key_path\":{key_path},\
              \"key_passphrase_env\":{kpe},\"key_inline\":{inline},\"auth\":{auth},\
              \"password_env\":{pe},\"session_ttl\":{ttl},\"kubeconfig\":{kubeconfig},\
-             \"context\":{context},\"namespace\":{k8sns},\"source\":{src}}}",
+             \"context\":{context},\"namespace\":{k8sns},\
+             \"kubectl_available\":{kavail},\"kubectl_version\":{kver},\"source\":{src}}}",
             name = json_string(&r.name),
             ty = json_string(if is_k8s { "k8s" } else { "docker" }),
             host = json_opt_string(&r.config.host),
@@ -52,6 +74,16 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             kubeconfig = json_opt_string(&r.config.kubeconfig),
             context = json_opt_string(&r.config.context),
             k8sns = json_opt_string(&r.config.k8s_namespace),
+            // K3 (v0.1.4): kubectl backend readiness. For k8s namespaces
+            // the preflight above guarantees availability (absent bails),
+            // so this is `true` with the detected client version; docker
+            // namespaces carry `false`/null (the field is inert there).
+            kavail = if is_k8s { "true" } else { "false" },
+            kver = k8s_probe
+                .as_ref()
+                .and_then(|p| p.version.as_ref())
+                .map(|v| json_string(v))
+                .unwrap_or_else(|| "null".to_string()),
             src = json_string(describe_source(r.source)),
         );
         println!("{body}");
@@ -86,6 +118,15 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             "  namespace:           {}",
             r.config.k8s_namespace.as_deref().unwrap_or("<default>")
         );
+        // K3 (v0.1.4): the kubectl backend readiness line. Reaching here
+        // means the preflight passed (absent kubectl bailed above), so
+        // this always reports a present binary + its client version.
+        if let Some(p) = &k8s_probe {
+            match &p.version {
+                Some(v) => println!("  kubectl:             {v}"),
+                None => println!("  kubectl:             present (version unknown)"),
+            }
+        }
         for field in [
             "host",
             "user",
@@ -101,6 +142,12 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             // fields above so the DATA block reads as one consistent
             // key/value list (no colon on some rows = an agent trap).
             println!("  {:<21}N/A (k8s)", format!("{field}:"));
+        }
+        // K3 (v0.1.4): a below-floor kubectl warns (never fails) — every
+        // k8s verb inspect drives works far below the floor; this is a
+        // heads-up, not a gate.
+        if let Some(w) = k8s_probe.as_ref().and_then(|p| p.floor_warning()) {
+            println!("WARNING: {w}");
         }
         println!("NEXT:    inspect test {0}   inspect setup {0}", r.name);
         return Ok(ExitKind::Success);

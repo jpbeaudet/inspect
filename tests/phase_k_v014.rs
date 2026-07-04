@@ -143,6 +143,77 @@ fn k2_schema_version_bumped() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+// ---- K3 (v0.1.4): kubectl backend probe + preflight ------------------
+//
+// `show <k8s-ns>` is the reachable preflight surface this wave: it probes
+// the LOCAL kubectl (surface map §10 — k8s transport is local, not SSH)
+// and reports it, or fails loud when kubectl is absent. The pure
+// version-floor + parse logic is exercised by the in-module unit tests in
+// `src/exec/kubectl.rs` (`k3_kubectl_version_floor_enforced`,
+// `k3_parse_*`, `k3_not_found_message_answers_four_questions`) — the crate
+// is bin-only so black-box tests cannot import those APIs (same precedent
+// as the in-module K1 tests). These three cover the user-facing surface.
+
+/// K3: with kubectl on PATH, `show` on a k8s namespace detects it and
+/// reports the client version on a `kubectl:` line (never `ABSENT`).
+/// Skips when kubectl is not installed in the test environment.
+#[test]
+fn k3_kubectl_probe_detects_presence_and_version() {
+    let kubectl_present = std::process::Command::new("kubectl")
+        .args(["version", "--client"])
+        .output()
+        .is_ok();
+    if !kubectl_present {
+        eprintln!("skipping k3_kubectl_probe_detects_presence_and_version: kubectl not on PATH");
+        return;
+    }
+    inspect()
+        .env("INSPECT_K3PRESENT_TYPE", "k8s")
+        .env("INSPECT_K3PRESENT_CONTEXT", "z2-maker")
+        .args(["show", "k3present"])
+        .assert()
+        .success()
+        .stdout(contains("kubectl:").and(contains("ABSENT").not()));
+}
+
+/// K3: with kubectl NOT findable (empty PATH), `show` on a k8s namespace
+/// fails with the four-question preflight error (what / where / why /
+/// fix) and exits 2 — NOT a raw OS error, NOT a silent success.
+#[test]
+fn k3_k8s_verb_fails_loud_when_kubectl_absent() {
+    inspect()
+        .env("PATH", "/nonexistent-inspect-k3-probe")
+        .env("INSPECT_K3ABSENT_TYPE", "k8s")
+        .env("INSPECT_K3ABSENT_CONTEXT", "z2-maker")
+        .args(["show", "k3absent"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(
+            contains("kubectl not found")
+                .and(contains("what:"))
+                .and(contains("where:"))
+                .and(contains("why:"))
+                .and(contains("fix:")),
+        );
+}
+
+/// K3: a docker namespace is unaffected by kubectl absence — it never
+/// probes kubectl, so with an empty PATH `show` still succeeds and emits
+/// no kubectl preflight error.
+#[test]
+fn k3_docker_namespace_unaffected_by_kubectl_absence() {
+    inspect()
+        .env("PATH", "/nonexistent-inspect-k3-probe")
+        .env("INSPECT_K3DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K3DOCK_USER", "u")
+        .args(["show", "k3dock"])
+        .assert()
+        .success()
+        .stdout(contains("docker"))
+        .stderr(contains("kubectl not found").not());
+}
+
 // ---- WA-1 (v0.1.4): resolved-config-path anti-mindtrap ---------------
 
 /// WA-1: `inspect add` must report the RESOLVED servers.toml path, not a

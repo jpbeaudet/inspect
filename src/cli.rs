@@ -140,10 +140,23 @@ const LONG_SHOW: &str = "\
 Print a namespace's resolved configuration with secrets redacted. Use \
 `--profile` to see the cached discovery profile.
 
+KUBERNETES BACKEND PREFLIGHT (K3, v0.1.4)
+  For a `type = \"k8s\"` namespace, `show` also probes the local \
+  `kubectl` binary (k8s namespaces drive a kubectl shell-out backend, \
+  run LOCALLY against the kubeconfig — not over SSH) and reports it on a \
+  `kubectl:` line (client version) or as `ABSENT`. When kubectl is not \
+  on PATH the command FAILS with a four-question preflight error (what / \
+  where / why / fix) and exits 2 — because no k8s verb can run without \
+  it. kubectl is the one prerequisite for k8s namespaces; docker \
+  namespaces are unaffected. A kubectl older than the documented floor \
+  (v1.19) warns but does not fail. (The `inspect help kubernetes` topic \
+  consolidating this lands in K24.)
+
 EXAMPLES
   $ inspect show arte
   $ inspect show arte --json
-  $ inspect show arte --profile";
+  $ inspect show arte --profile
+  $ inspect show staging-k8s          # includes the kubectl: readiness line";
 
 const LONG_FLEET: &str = "\
 Run an inner verb across multiple namespaces selected by `--ns` (glob, \
