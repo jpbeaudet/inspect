@@ -572,6 +572,190 @@ opaque failure that burns agent turns.
 
 ---
 
+## 5C. WAVE C — k8s-native reads (K10–K14) — fully specified
+
+Wave C lands the diagnostics that have no docker analogue — the verbs that make
+inspect *better* than raw kubectl for "what's wrong here." `why` is the flagship.
+
+### K10 — `why` (Popeye content model + exit-reason table + severity rollup + `--previous` auto-hint)
+
+| Field | Value |
+|---|---|
+| **ID** | K10 |
+| **Status** | ⏸ Proposed (Q1, Q5) |
+| **Priority** | HIGH (the flagship diagnostic; highest-leverage) |
+| **Source** | SM §5.1; w1-D3, w3-D1/P3 (Popeye reference), Lens-Prism signal |
+| **Depends-on** | K1–K8 |
+
+**Problem.** Manual kubectl triage across pods/events/status doesn't scale
+(w1-D10 refs); the market is moving to AI "why did this fail + how to fix"
+copilots (Lens Prism). inspect's shell-native answer is a JSON `why` bundle +
+chained `hint:`. Popeye is the reference design for *what belongs* in that
+answer.
+
+**Design.** `why <ns>/<workload>` assembles the k8s deep-diagnostic bundle into
+the envelope `data`, with a worst-severity **rollup** in `summary`/`state` (w3-D1
+severity model, Popeye OK/Info/Warn/Error). Bundle contents:
+- Pod conditions + phase; **per-container `restartCount` + `lastState.terminated.
+  {exitCode,reason}`** table (137 OOMKilled / 143 / 139) — the jsonpath everyone
+  copy-pastes, done for the operator (w1-D3, w3-P3).
+- **Events** for the object (K12), newest-first, joined in.
+- **Probe presence + status** (readiness/liveness) — a *missing* probe is a
+  finding (w3-D1).
+- **Resource requests/limits presence** and **image-tag hygiene**
+  (`:latest`/no-digest) — Popeye classes (w3-D1).
+- **Dependency probing** (Service→Endpoint reachability, K14).
+- **`--previous` auto-hint** when any container `restartCount>0` (w1-D2/w3-P3).
+- Chained `hint:` to the next action (e.g. `inspect logs … --previous`,
+  `inspect describe …`, the `auth can-i` command on RBAC gaps).
+
+**Acceptance.**
+- `k10_why_bundles_conditions_events_restarts_probes`,
+  `k10_why_surfaces_exit_code_and_reason_table`,
+  `k10_why_reports_missing_probe_and_missing_limits`,
+  `k10_why_flags_latest_image_tag`,
+  `k10_why_worst_severity_rollup_in_summary`,
+  `k10_why_auto_hints_previous_on_restart`,
+  `k10_why_chains_next_action_hint`.
+- CHANGELOG; help (`LONG_WHY` k8s deep-bundle section); MANUAL "Kubernetes why"
+  section; RUNBOOK bundle internals. **5-surface sweep** all five.
+
+**Research refs.** SM §5.1; w1-D3; w3-D1/P3; Lens-Prism (w3-A.2). ⏸ Q1, Q5.
+
+---
+
+### K11 — `describe`
+
+| Field | Value |
+|---|---|
+| **ID** | K11 |
+| **Status** | ⏸ Proposed (Q1, Q5) |
+| **Priority** | MEDIUM-HIGH |
+| **Source** | SM §5.2 (NEW); w1-D4 |
+| **Depends-on** | K1–K6 |
+
+**Problem.** kubectl `describe` — the richest human view (spec + conditions +
+events) — has **no `-o json`** (w1-D4); scripts/agents must fall back to `get -o
+json` + manual event correlation. Reshaping describe into the envelope is a
+genuine improvement, not just parity.
+
+**Design.** `describe <ns>/<workload>` → `kubectl get <obj> -o json` (+ events)
+reshaped into `data` (spec + conditions + events + status), envelope-standard,
+`--select`-projectable. Covers the common kinds (pods/deploy/svc + the Q5 set);
+`search` covers arbitrary kinds. **Secrets always redacted** through the
+redaction family (Q5 mandate).
+
+**Acceptance.**
+- `k11_describe_reshapes_spec_conditions_events_into_data`,
+  `k11_describe_json_is_envelope_and_selectable`,
+  `k11_describe_redacts_secret_values`,
+  `k11_describe_common_kinds_pods_deploy_svc`.
+- CHANGELOG; help (`describe` `LONG_*` — note the "better than kubectl: JSON +
+  `--select`" selling point); MANUAL. **5-surface sweep** all five.
+
+**Research refs.** SM §5.2; w1-D4/D5. ⏸ Q1, Q5.
+
+---
+
+### K12 — `events` (newest-first · auto-scoped · fed to `why`)
+
+| Field | Value |
+|---|---|
+| **ID** | K12 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM-HIGH |
+| **Source** | SM §5.2 (NEW); w3-P7 |
+| **Depends-on** | K1–K6 |
+
+**Problem.** `kubectl get events` is **not chronologically ordered by default**
+(w3-P7, the #1 events complaint) — it needs a brittle `--sort-by='{...}'`
+incantation (which even shipped a wrong example, k8s#21018). Events also expire
+(~1h) and are hard to correlate.
+
+**Design.** `events <ns> [/<workload>]` — **always newest-first** (documented in
+`LONG_EVENTS`, same discipline as `LONG_AUDIT_LS`), **auto-scoped to the object**
+(does the field-selector for the operator), fed into `why` (K10). Hint when the
+~1h retention window may have expired. Standard envelope.
+
+**Acceptance.**
+- `k12_events_always_newest_first`,
+  `k12_events_auto_scope_to_object`,
+  `k12_events_feed_into_why`,
+  `k12_events_hint_on_retention_expiry`.
+- CHANGELOG; help (`LONG_EVENTS` ORDERING section, `audit ls` style); MANUAL.
+  **5-surface sweep** all five.
+
+**Research refs.** SM §5.2; w3-P7. ⏸ Q1.
+
+---
+
+### K13 — `top` (degrade → `metrics_unavailable`)
+
+| Field | Value |
+|---|---|
+| **ID** | K13 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM |
+| **Source** | SM §5.2 (NEW); w3-P6 |
+| **Depends-on** | K1–K6 (metrics probe from K6) |
+
+**Problem.** `kubectl top` requires metrics-server, **absent by default on many
+clusters (EKS)** (w3-P6); its error looks like a kubectl bug, not a missing
+component, and it fails transiently for ~1min after install.
+
+**Design.** `top <ns> [/<workload>]` → `kubectl top pods/nodes`. On absence,
+degrade with `failure_class = "metrics_unavailable"` (K4), **distinguishing
+absent vs just-started** (`retry ~60s`), giving the install command — never a raw
+kubectl error. Uses the K6 metrics-server probe to pre-answer. `--sort-by`
+cpu/memory (verb-owned, so agents never touch the brace form).
+
+**Acceptance.**
+- `k13_top_reports_cpu_mem_when_metrics_available`,
+  `k13_top_degrades_metrics_unavailable_with_install_hint`,
+  `k13_top_distinguishes_absent_vs_warming`,
+  `k13_top_sort_by_cpu_memory`.
+- CHANGELOG; help (`top` `LONG_*` + the degrade class); MANUAL. **5-surface
+  sweep** all five.
+
+**Research refs.** SM §5.2; w3-P6. ⏸ Q1.
+
+---
+
+### K14 — `ports` / `network` / `volumes` / `images` (k8s mappings)
+
+| Field | Value |
+|---|---|
+| **ID** | K14 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM |
+| **Source** | SM §5.1 (REUSE+) |
+| **Depends-on** | K1–K6 |
+
+**Problem.** These four inventory verbs are docker-shaped today; k8s has
+different backing objects (Services/Endpoints/NetworkPolicies, PVCs, pod-spec
+images) that must map into the same verb contracts.
+
+**Design.**
+- `ports` — Service ports + container ports from `kubectl get svc`/pod spec
+  (declarative), plus in-pod `ss` where exec is allowed.
+- `network` — Services + Endpoints + NetworkPolicies (declarative) rather than
+  docker networks; feeds `why`'s dependency probing (K10) and `connectivity`.
+- `volumes` — PVCs / mounted volumes from pod spec + `kubectl get pvc`.
+- `images` — container images from pod specs (`kubectl get pods -o jsonpath`).
+- All envelope-standard; `-n`/`-A`; `meta` context (K5).
+
+**Acceptance.**
+- `k14_ports_maps_service_and_container_ports`,
+  `k14_network_lists_services_endpoints_netpol`,
+  `k14_volumes_maps_pvc_and_mounts`,
+  `k14_images_from_pod_specs`.
+- CHANGELOG; help (each verb `LONG_*` k8s notes); MANUAL. **5-surface sweep**
+  all five.
+
+**Research refs.** SM §5.1. ⏸ Q1.
+
+---
+
 ## 6. Release-readiness gate (skeleton — filled as waves complete)
 
 Mirrors the v0.1.3 all-green-to-tag gate. To be expanded per item as Waves B–E
