@@ -382,6 +382,196 @@ immunity-to-context-pong advantage. ⏸ on Q1.
 
 ---
 
+## 5B. WAVE B — Discovery + read core (K6–K9) — fully specified
+
+Wave B is the **daily driver**: it makes a k8s namespace discoverable and lands
+the read verbs an operator/agent hits in the first minutes of every session.
+Everything here rides K1 (runtime), K2 (config), K3 (probe), K4 (failure
+classes), K5 (context pinning). No k8s write ships in Wave B.
+
+### K6 — k8s `setup` / `test` (inventory + `auth can-i` self-test + metrics-server probe)
+
+| Field | Value |
+|---|---|
+| **ID** | K6 |
+| **Status** | ⏸ Proposed (Q1, Q6) |
+| **Priority** | HIGH (nothing reads until the namespace is discovered) |
+| **Source** | SM §5.4, §7; w3-P2 (`auth can-i` pre-empts RBAC), w3-P6 (metrics probe) |
+| **Depends-on** | K1, K2, K3, K4, K5 |
+
+**Problem.** A docker namespace is discovered via `docker ps`/`inspect`; a k8s
+namespace has no equivalent path. Worse, an operator only learns mid-task that
+they lack RBAC for a verb (w3-P2) or that the cluster has no metrics-server
+(w3-P6). Discovery must front-load those answers.
+
+**Design.**
+- k8s `setup`/`discover`: `kubectl get pods,services,deployments,configmaps -o
+  json` (one API round-trip — the docker per-object `inspect` timeout-batching is
+  not needed, SM §7) → the cached profile `Service` model (pod →
+  container-equivalent; Deployment/ReplicaSet → grouping; Service → ports).
+- **`auth can-i` self-test** — run `kubectl auth can-i <verb> <resource>` for the
+  verbs inspect will use (the *actual* set, not a superset — w1-D8(3) / bible
+  security-scope-narrower) and record the gaps, so `setup` reports missing perms
+  *before* a mid-task forbidden.
+- **metrics-server probe** — record availability (+ warming state) so K13 `top`
+  can pre-answer "this cluster has no metrics."
+- **`test`**: `kubectl config get-contexts` + API reachability + the `auth can-i`
+  matrix + kubectl version floor (K3).
+- **Q6 resolution:** `connect`/`disconnect`/`connections` on a k8s namespace emit
+  a clear **"N/A for k8s — kubeconfig is stateless; the target is resolved
+  per-verb from config, so there is no sticky-context footgun"** note (a stated
+  safety property, w2-D7/w3-Q6), not a silent no-op.
+
+**Acceptance.**
+- `k6_setup_inventories_pods_svc_deploy_cm`,
+  `k6_setup_records_auth_cani_gaps`,
+  `k6_setup_probes_metrics_server_presence`,
+  `k6_test_reports_context_reachability_and_rbac_matrix`,
+  `k6_connect_is_na_for_k8s_with_safety_note`.
+- CHANGELOG entries (k8s discovery; `connect` N/A note).
+- Help: `inspect setup --help` k8s behavior; `inspect help kubernetes` discovery
+  + RBAC-self-test + metrics-probe paragraphs; `connect`'s `LONG_*` N/A note.
+- MANUAL/RUNBOOK: "Kubernetes discovery" (MANUAL) + the inventory/`auth can-i`/
+  metrics internals (RUNBOOK).
+- **5-surface sweep** all five.
+
+**Research refs.** SM §5.4/§7; w3-P2/P6; w2-D7; w1-D8(3). ⏸ Q1, Q6.
+
+---
+
+### K7 — `status` / `ps` / `health` (k8s)
+
+| Field | Value |
+|---|---|
+| **ID** | K7 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | HIGH (the first verb of every session) |
+| **Source** | SM §5.1 (REUSE); w3-D1 (severity rollup) |
+| **Depends-on** | K1–K6 |
+
+**Problem.** `status`/`ps`/`health` are the "what's running and is it healthy"
+rollup. They must present pods/deployments through the *same* health model docker
+uses, so an agent that knows `inspect status arte` drives `inspect status
+staging-k8s` identically.
+
+**Design.**
+- `status` — `kubectl get pods,deploy -o json` → the existing health rollup: pod
+  phase + readiness + **restart counts** feed the same `state`/`summary`
+  discriminators. Worst-severity **rollup** in `summary` (w3-D1 severity model).
+- `ps` — lists pods (the container-equivalent) with the existing columns mapped
+  (name, ready, status, restarts, age).
+- `health` — pod readiness/liveness probe status from pod conditions; a **missing
+  probe** is itself a reported finding (w3-D1 probe-presence).
+- All emit the standard envelope; `meta` carries the resolved context+namespace
+  (K5). `-n`/`-A` honored (w2-D9).
+
+**Acceptance.**
+- `k7_status_rollup_maps_pod_phase_readiness_restarts`,
+  `k7_status_worst_severity_rollup_in_summary`,
+  `k7_ps_lists_pods_with_mapped_columns`,
+  `k7_health_reports_probe_status_and_missing_probe`,
+  `k7_meta_carries_resolved_context` (K5 wiring),
+  `k7_dash_n_and_dash_A_scope_reads`.
+- CHANGELOG; help (`status`/`ps`/`health` `LONG_*` k8s notes + `-n`/`-A`); MANUAL
+  k8s status section. **5-surface sweep** all five.
+
+**Research refs.** SM §5.1; w3-D1; w2-D9. ⏸ Q1.
+
+---
+
+### K8 — `logs` (`-c` auto-pick+hint · `--previous` · `--merged` tagging + heartbeat · `-A`)
+
+| Field | Value |
+|---|---|
+| **ID** | K8 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | HIGH (top-3 field pain; the most footgun-laden read verb) |
+| **Source** | SM §5.1; w1-D1/D2, w2-D1/D2/D3/D4, w3-P3/P8 |
+| **Depends-on** | K1–K6 |
+
+**Problem.** `kubectl logs` is the single most footgun-laden read verb: it errors
+on multi-container pods without `-c` (w1-D1), hides crash logs behind an
+undiscoverable `--previous` (w1-D2), can't fan out across replicas (the reason
+stern/kail exist — w2-D1), silently picks the wrong pod of a rolling deployment
+(w3-P8), and stalls silently on long tails (w2-D4). This is where inspect most
+visibly out-does kubectl.
+
+**Design.**
+- **`-c`/`--container`** with **auto-pick of the first/app container + a chained
+  hint listing the others + their restart counts** on a multi-container pod —
+  do the auto-pick kubectl refused (w1-D1, w3-P3). Never error like kubectl.
+- **`--previous`** for the last terminated container; `-h` states explicitly
+  "shows the **last terminated** container only" to avoid stern's ambiguity
+  (w2-D3). `logs`/`why` **auto-hint** "container X restarted N times — add
+  `--previous`" when `restartCount>0` (w1-D2, w3-P3).
+- **`--merged`** fans `kubectl logs -f` across all replicas of a
+  Deployment/ReplicaSet (w2-D1); **every merged line is tagged with its source
+  `{pod, container, revision, ts}`** in the `--json` stream (w2-D2, w3-P8) so
+  agents can tell replicas apart and spot the "old pod, old image" trap.
+- **Non-`--merged` deploy addressing** states which pod was selected and how many
+  replicas exist ("showing 1 of 3 replicas: pod `api-abc` revision 7; use
+  `--merged` for all") — never silently picks (w3-P8).
+- **Heartbeat / stream-health guard** on long `-f`/`--merged` tails: a documented
+  max-idle → a `failure_class` (or a heartbeat marker) rather than stern's silent
+  stall (w2-D4). Composes with the existing F16 streaming + SIGINT-forwarding.
+- **`--tail` / `--since` / `-A`** kubectl-parity flags.
+
+**Acceptance.**
+- `k8_multicontainer_autopicks_first_with_hint_listing_others`,
+  `k8_previous_reads_last_terminated_and_help_disambiguates`,
+  `k8_crashloop_auto_hints_previous_when_restartcount_positive`,
+  `k8_merged_tags_each_line_with_pod_container_revision`,
+  `k8_nonmerged_deploy_states_selected_pod_and_replica_count`,
+  `k8_long_tail_emits_heartbeat_or_failure_class_not_silent_stall`,
+  `k8_tail_since_A_flags_parity`.
+- CHANGELOG (behavior notes: auto-pick, merged tagging, heartbeat).
+- Help: `LONG_LOGS` k8s section (the `-c`/`--previous`/`--merged` semantics +
+  the disambiguation + the replica-selection statement); MANUAL "Kubernetes logs"
+  section; RUNBOOK merged-fan-out + heartbeat internals.
+- **5-surface sweep** all five.
+
+**Research refs.** SM §5.1; w1-D1/D2; w2-D1/D2/D3/D4; w3-P3/P8. ⏸ Q1.
+
+---
+
+### K9 — `cat` / `ls` / `grep` / `run` (+ no-shell detection)
+
+| Field | Value |
+|---|---|
+| **ID** | K9 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM-HIGH (in-pod read + exec surface) |
+| **Source** | SM §5.1 (REUSE); w3-P5 (distroless no-shell) |
+| **Depends-on** | K1–K6 |
+
+**Problem.** `cat`/`ls`/`grep`/`run` map to `kubectl exec <pod> -- <cmd>`. But
+they assume a shell / coreutils in the container — on distroless/minimal images
+`kubectl exec -- cat/ls/sh` **fails with a raw OCI error** (w3-P5), the kind of
+opaque failure that burns agent turns.
+
+**Design.**
+- `run` = read-only `kubectl exec <pod> [-c <ctr>] -- <cmd>` (no `/bin/bash`
+  wrapper — avoids the k9s Alpine-no-bash trap, w1-D8(3)); `cat`/`ls`/`grep`
+  build their commands the same way (`-- cat <path>` etc.).
+- **No-shell detection:** classify the distroless/minimal exec failure into
+  `failure_class = "no_shell_in_container"` (K4) with a hint pointing at
+  ephemeral-container debug — **not** a raw OCI error (w3-P5). A first-class
+  ephemeral-debug verb is a stated **v0.1.5+ boundary** (K-map C4), not a silent
+  gap; v0.1.4 ships detection + hint.
+- `-c`/`--container` for multi-container pods (same auto-pick+hint as K8).
+
+**Acceptance.**
+- `k9_run_execs_without_shell_wrapper`,
+  `k9_cat_ls_grep_build_exec_dash_dash_commands`,
+  `k9_distroless_no_shell_maps_failure_class_with_hint`,
+  `k9_container_flag_selects_and_autopicks_with_hint`.
+- CHANGELOG; help (`run`/`cat`/`ls`/`grep` `LONG_*` k8s notes + the no-shell
+  class); MANUAL in-pod-read section. **5-surface sweep** all five.
+
+**Research refs.** SM §5.1; w3-P5; w1-D8(3). ⏸ Q1.
+
+---
+
 ## 6. Release-readiness gate (skeleton — filled as waves complete)
 
 Mirrors the v0.1.3 all-green-to-tag gate. To be expanded per item as Waves B–E
