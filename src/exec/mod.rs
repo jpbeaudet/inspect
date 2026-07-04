@@ -25,6 +25,7 @@ pub mod parsers;
 pub mod pipeline;
 pub mod reader;
 pub mod record;
+pub mod runtime;
 
 #[allow(unused_imports)]
 pub use engine::LogResult;
