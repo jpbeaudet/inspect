@@ -987,22 +987,227 @@ error):
 
 ---
 
-## 6. Release-readiness gate (skeleton — filled as waves complete)
+## 5E. WAVE E — Integration + polish (K21–K25) — fully specified
 
-Mirrors the v0.1.3 all-green-to-tag gate. To be expanded per item as Waves B–E
-are specified. Fixed structure:
-- Every K-item has a passing `k<n>_*` test in `tests/phase_k_v014.rs`.
+Wave E ties the medium into the cross-cutting surfaces (fleet, search, bundles),
+lands the help topic that makes the whole thing agent-legible, and closes the
+release with a real-cluster smoke runbook.
+
+### K21 — `fleet` mixed docker + k8s rollup
+
+| Field | Value |
+|---|---|
+| **ID** | K21 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM |
+| **Source** | SM §5.4, roadmap "mixed fleet"; §1 no-change-for-docker |
+| **Depends-on** | K1–K7 |
+
+**Problem.** An operator with both docker and k8s namespaces wants one rollup, not
+two tools. `fleet status` must show both mediums together (roadmap first-class
+requirement).
+
+**Design.** `fleet` iterates all configured namespaces regardless of `type`,
+dispatching each through its Runtime (K1), and merges the health rollups into one
+envelope — docker rows and k8s rows side by side, each tagged with its medium in
+`meta`. No new flags; the medium is transparent.
+
+**Acceptance.**
+- `k21_fleet_status_merges_docker_and_k8s`,
+  `k21_fleet_rows_tagged_with_medium`,
+  `k21_fleet_unaffected_for_all_docker_config` (docker-only fleet unchanged).
+- CHANGELOG; help (`fleet` `LONG_*` mixed-medium note); MANUAL. **5-surface
+  sweep** all five.
+
+**Research refs.** SM §5.4; roadmap mixed-fleet. ⏸ Q1.
+
+---
+
+### K22 — `search` across mediums
+
+| Field | Value |
+|---|---|
+| **ID** | K22 |
+| **Status** | ⏸ Proposed (Q1, Q5) |
+| **Priority** | MEDIUM |
+| **Source** | SM §5.1, §8; roadmap cross-medium search |
+| **Depends-on** | K1–K8 |
+
+**Problem.** LogQL `search` (`{server=~".*", source="logs"} |= "error"`) is
+runtime-agnostic by design; it must span k8s log/state mediums too, and — per Q5
+— `search` is the coverage path for resource kinds `describe` doesn't enumerate.
+
+**Design.** The LogQL executor dispatches per-namespace through the Runtime (K1),
+so a `{server=~".*"}` query fans across docker and k8s namespaces. k8s log/state
+mediums plug into the existing `Medium` matching (the `source=` axis is unchanged
+— k8s is the *runtime* axis, orthogonal). Secrets redacted (Q5).
+
+**Acceptance.**
+- `k22_search_spans_docker_and_k8s_namespaces`,
+  `k22_search_k8s_logs_medium`,
+  `k22_search_redacts_secrets`.
+- CHANGELOG; help (`search` cross-medium note); MANUAL. **5-surface sweep** all
+  five.
+
+**Research refs.** SM §5.1/§8. ⏸ Q1, Q5.
+
+---
+
+### K23 — Bundle runtime-aware seam
+
+| Field | Value |
+|---|---|
+| **ID** | K23 |
+| **Status** | ⏸ Proposed (Q3) |
+| **Priority** | MEDIUM |
+| **Source** | SM §11; v0.1.4 charter (bundle integration); w3-D9 |
+| **Depends-on** | K1–K6, K15–K19 |
+
+**Problem.** The v0.1.4 charter wants bundle integration to make cross-medium
+k8s+docker bundles *possible*; the v0.1.3 backlog puts mixed *composition* at
+v0.2.0. The seam (a bundle step can target a k8s namespace) is the v0.1.4 line.
+
+**Design.** Make the bundle executor **runtime-aware**: a bundle step resolves its
+target namespace's Runtime (K1) and dispatches k8s verbs with per-step audit +
+F11 revert, exactly like docker steps. **Boundary (stated, not silent):** a
+single bundle file *mixing* docker and k8s steps (true cross-medium composition)
+is **v0.2.0+** (SM §11, w3-D9); v0.1.4 ships the seam so a k8s-only bundle works
+and the mixing is a small later step. **Q8 note:** if JP's field base is
+mid-migration, mixed-composition priority rises — surfaced, not decided here.
+
+**Acceptance.**
+- `k23_bundle_step_targets_k8s_namespace`,
+  `k23_bundle_k8s_step_audited_and_revertible`,
+  `k23_mixed_medium_composition_is_bounded_to_v020` (a test/doc-asserted
+  boundary, not a silent gap).
+- CHANGELOG; help (`bundle` `LONG_*` k8s-step note); MANUAL/RUNBOOK bundle-seam
+  internals. **5-surface sweep** all five.
+
+**Research refs.** SM §11; w3-D9. ⏸ Q3 (+ Q8 informational).
+
+---
+
+### K24 — `kubernetes.md` help topic + `LONG_*` sweep
+
+| Field | Value |
+|---|---|
+| **ID** | K24 |
+| **Status** | ⏸ Proposed (all Q) |
+| **Priority** | HIGH (help is first-class agent API — the load-bearing surface) |
+| **Source** | CLAUDE.md help-discoverability; SM §8; every wave's help debt |
+| **Depends-on** | K1–K23 |
+
+**Problem.** Agents learn the CLI from `-h` first. The k8s medium adds selectors,
+flags, failure classes, immutability refusals, and the anti-footgun property —
+all must be self-describing, or the shell-is-the-integration-layer thesis breaks.
+
+**Design.** New editorial topic `src/help/content/kubernetes.md` covering: the
+`type="k8s"` config stanza; the 2-seg selector + `-n`/`-A`/`--context`; the
+no-wrong-cluster guarantee (K5, sell it); the failure-class table (K4); pod
+immutability + REFUSE idioms (K20); `--select` > jsonpath and `--color`/`NO_COLOR`
+(w1-D5, w2-D8); `top` metrics dependency; the CrashLoop `--previous` workflow.
+Plus the per-verb `LONG_*` k8s additions each wave item declared. **Raise the
+help-search index cap** in `src/help/search.rs` if prose pushes it over
+(precedent 50→64→80 KB — never trim docs).
+
+**Acceptance.**
+- `k24_help_kubernetes_topic_exists_and_indexed`,
+  `k24_every_k8s_verb_long_has_k8s_section`,
+  `k24_help_search_finds_k8s_contracts`,
+  `k24_help_contract_test_passes_for_expanded_surface`.
+- CHANGELOG; help (the topic itself); MANUAL cross-links. **5-surface sweep** all
+  five (this item *is* mostly surface 5).
+
+**Research refs.** CLAUDE.md help discipline; SM §8; w1-D5; w2-D8. ⏸ all Q.
+
+---
+
+### K25 — Smoke runbook vs a real cluster (`SMOKE_v0.1.4.md`)
+
+| Field | Value |
+|---|---|
+| **ID** | K25 |
+| **Status** | ⏸ Proposed (all Q) |
+| **Priority** | HIGH (the field-validation gate — the tag blocker) |
+| **Source** | v0.1.3 smoke precedent; the P1–P8 field scenarios |
+| **Depends-on** | K1–K24 |
+
+**Problem.** Unit tests use synthetic fixtures; the v0.1.3 precedent is a real-host
+smoke that reproduces the actual field scenarios. v0.1.4 needs the analogue
+against a **real k8s cluster** (kind/minikube/EKS) before tag.
+
+**Design.** `SMOKE_v0.1.4.md` — a phased runbook (P1→Pn, mirroring
+`SMOKE_v0.1.3.md`) that reproduces the research pain scenarios end-to-end:
+wrong-context **immunity** (K5), RBAC-forbidden **hint** (K4/K6), CrashLoop
+`--previous` **auto-hint** (K8), `--merged` **replica tagging** (K8), `top`
+metrics-absent **degrade** (K13), `events` **ordering** (K12), `scale`/`restart`
+**revert round-trip** (K15/K16), distroless **no-shell class** (K9/K19), `delete
+pod` **outage guard** (K18). All writes labelled/scoped to a smoke namespace;
+cleanup idempotent (v0.1.3 smoke-scope discipline).
+
+**Acceptance.** The runbook is the artifact; its P-phases are the acceptance.
+Gate: a clean P1→Pn PASS against a real cluster (the field-validation gate in §6).
+CHANGELOG note (smoke runbook added). **5-surface sweep:** doc-centric; RUNBOOK
+cross-link.
+
+**Research refs.** all of P1–P8; v0.1.3 smoke precedent. ⏸ all Q.
+
+---
+
+## 6. Release-readiness gate (all must be green to tag v0.1.4)
+
+Mirrors the v0.1.3 all-green-to-tag gate, retargeted to the k8s surface.
+
+**Test + code gates**
+- All 25 K-items (K1–K25) have a passing `k<n>_*` test (or bundle) in
+  `tests/phase_k_v014.rs`.
 - `tests/no_dead_code.rs` + `tests/help_contract.rs` pass against the expanded
-  verb surface (each new verb/flag/JSON-field/exit-class/`failure_class` value
-  enumerated inline, v0.1.3-gate style).
-- The **docker regression suite stays 100% green** (K1 is a behavior-preserving
-  refactor) — the additive-purity gate.
-- MANUAL + RUNBOOK sections enumerated per item; one CHANGELOG bullet per item.
-- **Field-validation gate:** end-to-end smoke (`SMOKE_v0.1.4.md`, K25) against a
-  **real k8s cluster** reproducing the P1–P8 scenarios (wrong-context immunity,
-  RBAC-forbidden hint, CrashLoop `--previous` auto-hint, `--merged` replica
-  tagging, `top` metrics-absent degrade, `events` ordering, `scale`/`rollout`
-  revert round-trip, distroless no-shell class).
+  surface, with each addition enumerated inline (v0.1.3-gate style): the new
+  verbs (`describe`, `events`, `top`, `scale`, `rollout` tree, `delete pod`);
+  the new flags (`-c`/`--container`, `--previous`, `--merged`, `-n`/`--namespace`,
+  `-A`/`--all-namespaces`, `--context`, `--kubeconfig`, `--current-replicas`,
+  `--to-revision`, `--color`); the config fields (`type`/`kubeconfig`/`context`/
+  `namespace`, `schema_version` bump); the `AuditEntry` additive fields
+  (`context`/`k8s_namespace`); the new `failure_class` value family
+  (`rbac_forbidden`/`no_shell_in_container`/`metrics_unavailable`/k8s-transport);
+  the k8s transport exit-code mapping.
+- The **docker regression suite stays 100% green** — K1 is a behavior-preserving
+  refactor; this is the **additive-purity gate** (docker users see zero change,
+  per §1 and bible "purely additive").
+- `cargo fmt --check` + `cargo clippy --all-targets -D warnings` + full `cargo
+  test` green on every commit; the deferral-scan grep clean.
+
+**Doc + help gates**
+- One CHANGELOG bullet per K-item under a v0.1.4 `Added` section; behavior /
+  audit-schema / exit-code / config-schema changes explicitly flagged (K2 config
+  schema; K4 failure-class values; K5 audit fields; K8 logs behavior; K15/K16/K18
+  revert kinds).
+- `docs/MANUAL.md` sections enumerated per item (Kubernetes namespaces + config;
+  addressing + the no-wrong-cluster guarantee; k8s status/logs/why/describe/
+  events/top; the k8s write surface + revert; REFUSE idioms). `docs/RUNBOOK.md`
+  updated for the runtime-abstraction, failure-classifier, merged-fan-out +
+  heartbeat, and bundle-seam internals.
+- `inspect help kubernetes` (K24) exists + indexed; every k8s verb's `LONG_*`
+  carries its k8s section; help-search index cap raised if needed (never trim).
+
+**Field-validation gate (distinct from unit tests — the real-cluster smoke)**
+- `SMOKE_v0.1.4.md` (K25) P1→Pn PASS against a **real k8s cluster**, reproducing:
+  wrong-context **immunity** (K5); RBAC-forbidden **four-question hint** (K4/K6);
+  CrashLoop `--previous` **auto-hint** (K8); `--merged` **replica tagging** (K8);
+  `top` metrics-absent **degrade** (K13); `events` **newest-first ordering**
+  (K12); `scale` + `restart` **revert round-trip** (K15/K16); distroless
+  **no-shell class** (K9/K19); `delete pod` **outage guard** (K18); a k8s-only
+  **bundle step** audited + revertible (K23).
+- **You** (Claude Code, release session) drive this smoke against a real cluster
+  at release time — per the bible operating-context, any bug shipped is one you
+  step on personally.
+
+**Process gate**
+- JP has ratified Q1–Q8 (all ⏸ Proposed items promoted to their final status);
+  no item ships against an unratified question.
+- Cleaning Duty run (strip `K<n>`/`(v0.1.4)` markers to industry-grade prose;
+  test names + CHANGELOG keep theirs); archive sweep (planning docs →
+  `archives/v0.1.4/`); README freshness; CLAUDE.md pivot to v0.1.5.
 
 ---
 
