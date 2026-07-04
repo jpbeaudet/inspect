@@ -13,6 +13,19 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
 ### Added
 
+- **K3 — kubectl backend probe + four-question preflight.** k8s
+  namespaces drive a **local** `kubectl` shell-out backend (never over
+  SSH). A local probe (`kubectl version --client -o json`) detects
+  presence + client version and checks a documented floor (v1.19,
+  warn-not-fail). `inspect show <k8s-ns>` reports `kubectl: <version>`
+  when present; when kubectl is absent it fails with a loud,
+  CI-gate-quality **four-question** error (what / where / why / fix,
+  incl. the install URL) and exit code 2 — never a raw OS
+  `executable file not found`. Docker namespaces are unaffected. (A
+  design-review note tracked to K6: `show` should become
+  display-plus-readiness-line rather than hard-fail once `test`/`setup`
+  provide the natural preflight surface.)
+
 - **K2 — namespace `type` / kubeconfig config + type-conditional
   validation.** `servers.toml` gains four optional fields for the
   kubernetes runtime medium — `type` (`docker` default | `k8s`),

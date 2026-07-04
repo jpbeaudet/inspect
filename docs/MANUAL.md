@@ -149,6 +149,15 @@ context    = "staging"                # the context inspect pins on every call
 namespace  = "default"                # optional — the in-cluster k8s namespace
 ```
 
+**Prerequisite — `kubectl` on PATH (K3, v0.1.4).** A k8s namespace drives
+a **local** `kubectl` shell-out backend, so `kubectl` must be installed and
+on your `PATH` (inspect probes it locally, never over SSH). `inspect show
+<k8s-ns>` reports the detected `kubectl:` version; if `kubectl` is missing,
+k8s verbs fail with a loud four-question error (what / where / why / fix)
+and exit code 2 rather than a raw OS error. inspect warns (does not fail)
+if `kubectl` is below the documented floor (v1.19). Auth still inherits
+your kubeconfig — inspect adds no new credential surface.
+
 Or interactively / non-interactively:
 
 ```sh
