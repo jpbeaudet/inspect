@@ -756,6 +756,237 @@ images) that must map into the same verb contracts.
 
 ---
 
+## 5D. WAVE D — Conservative audited writes (K15–K20) — fully specified
+
+Wave D lands the k8s write surface — dry-run-by-default, `--apply`-gated,
+F11-revert-captured, audited, and **every write echoes the resolved
+context+namespace+workload** (K5 anti-footgun, w3-P1). The set is deliberately
+narrow (Q4); the community explicitly warns against the ops we exclude
+(delete-pod-as-restart, scale-cycling) and endorses the ops we include (w3-P4).
+Immutable-pod operations REFUSE with hints.
+
+### K15 — `scale`
+
+| Field | Value |
+|---|---|
+| **ID** | K15 |
+| **Status** | ⏸ Proposed (Q1, Q4) |
+| **Priority** | HIGH (cleanest revertible write; the write-surface template) |
+| **Source** | SM §5.3; w1-D10, w3-P4 |
+| **Depends-on** | K1–K6, F11 revert contract |
+
+**Problem.** Scaling a workload is a daily write; done wrong (scale-to-0 then up)
+it causes an outage window (w3-P4). It must be revertible and outage-aware.
+
+**Design.** `scale <ns>/<workload> --replicas=N` → `kubectl scale deploy/<w>
+--replicas=N`. **Revert = `command_pair`:** capture prior replica count →
+inverse `kubectl scale --replicas=<prior>` (dispatchable locally against the
+context — a valid `command_pair`, not `unsupported`). Adopt kubectl's
+`--current-replicas=N` **optimistic-concurrency guard** for a safer apply.
+Dry-run preview + confirmation echo the resolved target (K5). **Outage guard:**
+if the op would drop ready replicas below threshold (e.g. `--replicas=0`),
+escalate the confirmation and warn about the outage window (w3-P4/D5).
+
+**Acceptance.**
+- `k15_scale_applies_and_audits`,
+  `k15_scale_revert_command_pair_restores_prior_replicas`,
+  `k15_scale_dryrun_and_prompt_echo_resolved_target`,
+  `k15_scale_current_replicas_guard`,
+  `k15_scale_to_zero_escalates_confirmation_with_outage_warning`.
+- CHANGELOG (new write verb + revert kind); help (`LONG_*` incl. revert +
+  outage guard); MANUAL "Kubernetes writes" + RUNBOOK revert-capture. **5-surface
+  sweep** all five.
+
+**Research refs.** SM §5.3; w1-D10; w3-P4/D5. ⏸ Q1, Q4.
+
+---
+
+### K16 — `restart` (rollout restart + `rollout undo` revert)
+
+| Field | Value |
+|---|---|
+| **ID** | K16 |
+| **Status** | ⏸ Proposed (Q1, Q4) |
+| **Priority** | HIGH (the correct "restart" idiom) |
+| **Source** | SM §5.3; w1-D10, w3-P4 |
+| **Depends-on** | K1–K6, K17, F11 |
+
+**Problem.** Operators reach for `delete pod` to "restart," causing an outage;
+the community-correct idiom is `rollout restart` (rolling, zero-downtime)
+(w3-P4). inspect's `restart` on a k8s namespace must map to that, not delete-pod.
+
+**Design.** `restart <ns>/<workload>` → `kubectl rollout restart deploy/<w>`.
+**Revert = `command_pair`** (resolves SM §5.3 open Q): capture the current
+`rollout history` revision **before** restart → inverse `kubectl rollout undo
+--to-revision=<captured>` (w1-D10, w3-P4). Dispatchable locally, so it's a valid
+`command_pair`, not `unsupported`. Preview/prompt/audit echo the resolved target
+(K5). Composes with K17.
+
+**Acceptance.**
+- `k16_restart_maps_to_rollout_restart_not_delete_pod`,
+  `k16_restart_revert_captures_revision_then_undo`,
+  `k16_restart_dryrun_and_prompt_echo_resolved_target`,
+  `k16_restart_audit_records_revision_for_revert`.
+- CHANGELOG (behavior: `restart`=rollout restart on k8s; revert kind); help
+  (`LONG_*`); MANUAL/RUNBOOK. **5-surface sweep** all five.
+
+**Research refs.** SM §5.3; w1-D10; w3-P4. ⏸ Q1, Q4.
+
+---
+
+### K17 — `rollout undo` (first-class safety verb)
+
+| Field | Value |
+|---|---|
+| **ID** | K17 |
+| **Status** | ⏸ Proposed (Q1, Q4-add) |
+| **Priority** | HIGH (fastest rollback of a bad deploy) |
+| **Source** | w1-D10 (Q4 add-candidate); w3-P4 (community safety net) |
+| **Depends-on** | K1–K6, F11 |
+
+**Problem.** `rollout undo` is the community's documented safety net for a bad
+deploy (w3-P4) — an operator's fastest rollback — but it's not in the original
+conservative set. Research surfaced it as a first-class add (w1-D10): low-risk
+(moves to an existing prior revision), audit-clean, and its own inverse is
+another `rollout undo`.
+
+**Design.** `rollout undo <ns>/<workload> [--to-revision=N]` → `kubectl rollout
+undo`. **Revert = `command_pair`:** capture the pre-undo revision → inverse is
+`rollout undo --to-revision=<pre-undo>`. `rollout status`/`rollout history`
+surfaced as read sub-forms (or folded into `why`/`describe` — Phase-4 shape note:
+keep `rollout` a small subcommand tree `undo`/`status`/`history` for kubectl
+parity). Preview/prompt/audit echo resolved target (K5). **JP add-gate:** this
+verb exists only if JP ratifies the Q4-add.
+
+**Acceptance.**
+- `k17_rollout_undo_moves_to_prior_or_named_revision`,
+  `k17_rollout_undo_revert_returns_to_pre_undo_revision`,
+  `k17_rollout_status_and_history_read_forms`,
+  `k17_rollout_undo_dryrun_and_prompt_echo_resolved_target`.
+- CHANGELOG (new verb); help (`LONG_ROLLOUT`); MANUAL/RUNBOOK. **5-surface
+  sweep** all five.
+
+**Research refs.** w1-D10; w3-P4. ⏸ Q1 + **Q4-add ratification required**.
+
+---
+
+### K18 — `delete pod` (narrow; `unsupported` revert + outage guard)
+
+| Field | Value |
+|---|---|
+| **ID** | K18 |
+| **Status** | ⏸ Proposed (Q1, Q4) |
+| **Priority** | MEDIUM (narrow, guarded) |
+| **Source** | SM §5.3; w1-D10, w3-P4/P1 |
+| **Depends-on** | K1–K6, F11 |
+
+**Problem.** `delete pod` is powerful and *not* undoable — deleting a
+controller-owned pod triggers recreation (looks like a restart); the mental-model
+mismatch is a footgun (w1 pain #9). It must be narrow, guarded, and honest about
+irreversibility.
+
+**Design.** `delete pod <ns>/<pod>` → `kubectl delete pod <p>` (narrow — pods
+only, not controllers). **Revert = `Unsupported`** with the preview stating "the
+controller will recreate this pod; deletion itself is not undoable" (w1-D10 —
+CLI/non-dispatchable inverse ⇒ `Unsupported`, per the CLAUDE.md F11 capture-site
+rule). **Outage guard:** if deleting the pod would drop ready replicas below the
+deployment threshold (or it's a naked pod with no controller), **escalate the
+confirmation** and warn (w3-P4/D5). Preview/prompt/audit echo resolved target
+(K5) — the #1-horror-class guard (w3-P1).
+
+**Acceptance.**
+- `k18_delete_pod_is_narrow_pods_only`,
+  `k18_delete_pod_revert_unsupported_with_recreation_note`,
+  `k18_delete_pod_below_threshold_escalates_confirmation`,
+  `k18_delete_naked_pod_warns_no_controller`,
+  `k18_delete_pod_prompt_echoes_resolved_target`.
+- CHANGELOG (new write verb + `unsupported` revert); help (`LONG_*` — the
+  irreversibility + outage guard); MANUAL/RUNBOOK. **5-surface sweep** all five.
+
+**Research refs.** SM §5.3; w1-D10; w3-P4/P1. ⏸ Q1, Q4.
+
+---
+
+### K19 — `exec --apply` (audited in-pod writes)
+
+| Field | Value |
+|---|---|
+| **ID** | K19 |
+| **Status** | ⏸ Proposed (Q1) |
+| **Priority** | MEDIUM-HIGH (the escape hatch for legit in-pod debug writes) |
+| **Source** | SM §5.1 (REUSE+ write); w3-P5 |
+| **Depends-on** | K1–K6, K9, F11 |
+
+**Problem.** Legit debugging sometimes needs a writing command inside a running
+pod. `run` (K9) is read-only; the writing path must be `--apply`-gated + audited,
+and it must still handle the distroless no-shell case (w3-P5).
+
+**Design.** `exec <ns>/<pod> --apply -- <cmd>` → writing `kubectl exec` under the
+`--apply` gate, audited (`AuditEntry` with resolved context/namespace, K5).
+**Revert:** in-pod fs mutations are ephemeral/non-dispatchable ⇒ typically
+`Unsupported` with a manual-inverse preview (or `state_snapshot` where a
+meaningful before-state exists — Phase-4 leaves the per-command shape to the
+capture site, per the F11 capture-site-authoritative rule). No-shell detection
+(K4/K9) applies. Confirmation echoes resolved target (K5).
+
+**Acceptance.**
+- `k19_exec_apply_gated_and_audited`,
+  `k19_exec_apply_records_resolved_context_in_audit`,
+  `k19_exec_apply_revert_shape_per_capture_site`,
+  `k19_exec_apply_no_shell_class_on_distroless`.
+- CHANGELOG (write path + audit fields); help (`LONG_EXEC` k8s write note);
+  MANUAL/RUNBOOK. **5-surface sweep** all five.
+
+**Research refs.** SM §5.1; w3-P5; CLAUDE.md F11 capture-site contract. ⏸ Q1.
+
+---
+
+### K20 — REFUSE mappings (immutable-pod ops) + `port-forward`
+
+| Field | Value |
+|---|---|
+| **ID** | K20 |
+| **Status** | ⏸ Proposed (Q1, Q7) |
+| **Priority** | MEDIUM (safety guardrails; each a chained hint) |
+| **Source** | SM §5.3; w1-D11/D12, w3-P5 |
+| **Depends-on** | K1–K6 |
+
+**Problem.** Several docker write verbs have no safe k8s analogue: pod
+filesystems are ephemeral/immutable, and some kubectl ops (`port-forward`,
+`cp`) are fragile or anti-pattern. Silently accepting them would produce
+non-persistent or broken results. Each must REFUSE with a chained hint pointing
+at the correct idiom.
+
+**Design.** On a k8s namespace, these REFUSE with a specific hint (never a raw
+error):
+- `edit` → "pods are immutable; edit the ConfigMap/Secret and `inspect restart
+  <deploy>`" (rollout restart).
+- `cp`/`put`/`get` → refuse; hint at ConfigMap/Volume or `kubectl cp` (which
+  itself needs `tar` in-container, w1-D12) for the rare legit case.
+- `chmod`/`chown`/`mkdir`/`touch`/`rm` → refuse with the immutability hint
+  (in-pod fs mutation is an anti-pattern; `exec --apply` (K19) remains for legit
+  debugging).
+- `stop`/`start` → refuse; hint at `scale --replicas=0` (the documented idiom,
+  with the outage warning) (w3-P4/D5).
+- **`port-forward` (Q7)** → refuse-with-hint pointing at raw `kubectl
+  port-forward` (documented-fragile: single connection, idle-drop, no reconnect —
+  a poor fit for a headless audited verb) (w1-D11). Revisit as an owned verb only
+  on field signal.
+
+**Acceptance.**
+- `k20_edit_refuses_with_configmap_hint`,
+  `k20_cp_put_get_refuse_with_hint`,
+  `k20_fs_mutation_verbs_refuse_with_immutability_hint`,
+  `k20_stop_start_refuse_hint_scale_zero`,
+  `k20_port_forward_refuses_with_kubectl_hint`.
+- CHANGELOG (REFUSE mappings); help (each verb's `LONG_*` k8s REFUSE note +
+  `inspect help kubernetes` immutability section); MANUAL. **5-surface sweep**
+  all five.
+
+**Research refs.** SM §5.3; w1-D11/D12; w3-P4/P5. ⏸ Q1, Q7.
+
+---
+
 ## 6. Release-readiness gate (skeleton — filled as waves complete)
 
 Mirrors the v0.1.3 all-green-to-tag gate. To be expanded per item as Waves B–E
