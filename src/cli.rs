@@ -84,22 +84,32 @@ const SEE_ALSO_COMPOSE: &str =
 // ---------------------------------------------------------------------------
 
 const LONG_ADD: &str = "\
-Register or update a namespace's SSH credentials. Idempotent: running \
-`add` again with new flags rewrites the entry (pass `--force` to \
-overwrite an existing entry without re-prompting).
+Register or update a namespace. Idempotent: running `add` again with \
+new flags rewrites the entry (pass `--force` to overwrite an existing \
+entry without re-prompting).
 
-`--non-interactive` requires every value to be supplied on the \
-command line — `--host`, `--user`, `--key-path` are the minimum; \
-`--port` defaults to 22; `--key-passphrase-env` is optional. The \
-verb errors with `missing required value for '<field>'` instead of \
-prompting when a required field is absent. There is NO env-var \
-form (`INSPECT_<NS>_HOST=...` is not consulted); pass values as \
-flags.
+A namespace is one of two runtime types (`--type`):
+  • `docker` (default) — reached over SSH; `--host` + `--user` + \
+    `--key-path` are the minimum, `--port` defaults to 22, \
+    `--key-passphrase-env` is optional.
+  • `k8s` — a Kubernetes cluster reached via kubeconfig; needs NEITHER \
+    host nor user. Set `--context` (the kubeconfig context inspect pins \
+    on every call — it never reads your ambient current-context), and \
+    optionally `--kubeconfig` (a path; else kubectl's default) and \
+    `--namespace` (the in-cluster k8s namespace). Auth inherits your \
+    kubeconfig; inspect adds no new credential surface.
+
+`--non-interactive` requires every required value on the command line \
+and errors with `missing required value for '<field>'` instead of \
+prompting. There is NO env-var form for `add` flags themselves \
+(`INSPECT_<NS>_HOST=...` overrides at resolve time, not at `add` time); \
+pass values as flags.
 
 EXAMPLES
   $ inspect add arte
   $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod
-  $ inspect add staging --non-interactive --host s.example --user ops --key-path ~/.ssh/s --force";
+  $ inspect add staging --non-interactive --host s.example --user ops --key-path ~/.ssh/s --force
+  $ inspect add staging-k8s --type k8s --context staging --kubeconfig ~/.kube/staging.yaml --namespace default";
 
 const LONG_LIST: &str = "\
 Print every configured namespace with its host, user, and last-known \

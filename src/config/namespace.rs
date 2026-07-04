@@ -744,8 +744,10 @@ mod tests {
         assert_eq!(merged.context.as_deref(), Some("staging"));
         assert_eq!(merged.k8s_namespace.as_deref(), Some("default"));
         // env override wins on collision.
-        let mut env2 = NamespaceConfig::default();
-        env2.context = Some("prod".into());
+        let env2 = NamespaceConfig {
+            context: Some("prod".into()),
+            ..Default::default()
+        };
         let merged2 = file.merge_over(&env2);
         assert_eq!(merged2.context.as_deref(), Some("prod"));
     }

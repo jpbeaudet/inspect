@@ -97,7 +97,10 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             "password_env",
             "session_ttl",
         ] {
-            println!("  {field:<19} N/A (k8s)");
+            // Match the `field:` colon + column alignment of the k8s
+            // fields above so the DATA block reads as one consistent
+            // key/value list (no colon on some rows = an agent trap).
+            println!("  {:<21}N/A (k8s)", format!("{field}:"));
         }
         println!("NEXT:    inspect test {0}   inspect setup {0}", r.name);
         return Ok(ExitKind::Success);

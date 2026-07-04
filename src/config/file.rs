@@ -159,10 +159,8 @@ mod tests {
     fn k2_schema_version_bumped() {
         // K2 (v0.1.4) bumps the servers.toml schema to 2 for the new
         // `type` / `kubeconfig` / `context` / `namespace` k8s fields.
-        assert!(
-            SCHEMA_VERSION >= 2,
-            "SCHEMA_VERSION must be >= 2 after the K2 k8s-config additions"
-        );
+        // K2 (v0.1.4) bumped the servers.toml schema 1 -> 2.
+        assert_eq!(SCHEMA_VERSION, 2);
         assert_eq!(ServersFile::default().schema_version, SCHEMA_VERSION);
     }
 
