@@ -318,16 +318,69 @@ The actual `--select` flag implementation is a v0.1.5 backlog item; this entry r
 ## Naming + scope
 
 - `F<n>` items are field-feedback (operator pain). `L<n>` items are
-  pre-existing limitations from the roadmap. **Do not conflate**
-  the prefixes — they live in different sections of the backlog and
-  ship in different orders. Test names use the lowercase prefix
-  (`f14_*`, `l7_*`).
+  pre-existing limitations from the roadmap. `S<n>` are stabilization,
+  `P<n>` post-tag patches, `K<n>` the v0.1.4 Kubernetes medium. **Do
+  not conflate** the prefixes — they live in different sections of the
+  backlog and ship in different orders. Test names use the lowercase
+  prefix (`f14_*`, `l7_*`, `k1_*`).
 - v0.1.3 is **OPEN, FROZEN** — final scope is the 25 items in
   `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md`. Don't expand mid-implementation;
   surface scope creep as a question to the user.
 - v0.1.4 = Kubernetes only. v0.1.5 = stabilization sweep. v0.2.0 =
   contract freeze. Anything docker/compose/SSH that doesn't ship in
   v0.1.3 will not be touched again until v0.1.5+.
+
+## Kubernetes medium (v0.1.4)
+
+v0.1.4 introduces the **Kubernetes runtime medium** — purely additive;
+`type = "docker"` (default) users see zero change. The design lives in
+`INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md` + `INSPECT_v0.1.4_SURFACE_MAP.md`,
+validated by the research dossiers in `INSPECT_v0.1.4_RESEARCH/`
+(kubectl/k9s/stern/kubectx/popeye/lens + the P1–P8 practitioner
+pain-hunt) and consolidated in `INSPECT_v0.1.4_RESEARCH_SYNTHESIS.md`.
+The load-bearing invariants a future agent must not violate:
+
+- **Runtime axis ≠ `Medium` axis.** `Medium` (`src/exec/medium.rs`) is
+  the `source=` **locator** parser (logs / file / dir / …) and is
+  **unchanged**. Docker-vs-k8s is a new orthogonal **runtime** axis
+  selected by the namespace `type`, behind a `Runtime` trait
+  (`DockerRuntime` refactored behind it with **zero** behavior change;
+  the docker test suite is the additive-purity regression gate). Do not
+  conflate the two axes.
+- **Backend = `kubectl` shell-out for v0.1.4** (Dependency Policy clean —
+  no new crate; probe `kubectl` on PATH exactly like `docker`). A future
+  `kube-rs` swap is an **explicit ADR/decision**, never a silent add; the
+  `Runtime` trait keeps the swap mechanical.
+- **Selector stays 2-segment.** `<inspect-ns>/<workload>`; the kubeconfig
+  **context** + k8s **namespace** live in config (like the SSH host does
+  for docker), with a kubectl-parity `-n`/`--namespace` + `-A` override.
+  The runtime **pins `--context` explicitly on every kubectl call** and
+  **never reads or mutates the ambient `current-context`** — this is the
+  anti-footgun property (config-per-context is immune to the
+  kubectl "context-pong" that is the #1 kubectl destruction class).
+- **Every k8s write echoes the resolved `{context, k8s_namespace,
+  workload}`** in the dry-run preview, the confirmation prompt, the
+  `AuditEntry`, and the envelope `meta`. This is a k8s write-verb contract
+  alongside the F11 revert contract.
+- **`AuditEntry` extends additively** (no schema break): `context` /
+  `k8s_namespace` are new `Option<T>` + `skip_serializing_if` fields;
+  `failure_class` (already `Option<String>`, F13) gains new **values**
+  (`rbac_forbidden`, `no_shell_in_container`, `metrics_unavailable`, and
+  the k8s transport classes) — a value-space extension, not a field add.
+- **k8s transport reuses the F13 exit-code class band by semantic class**
+  (unreachable / auth / other), with `failure_class` carrying the
+  medium-specific detail — the exit code is the coarse class an agent
+  branches on, the JSON field the fine detail. (Does not reuse a code for
+  a *new* meaning — the meaning is "transport failure, class X", medium-
+  agnostic.)
+- **Conservative write set, F11-captured:** `scale` (command_pair revert),
+  `restart`=rollout-restart (command_pair via captured `rollout undo
+  --to-revision`), `rollout undo`, `delete pod` (unsupported revert +
+  outage guard), `exec --apply`. Immutable-pod ops (`edit`/`cp`/fs-mutation/
+  `stop`/`start`/`port-forward`) **REFUSE with a chained idiom hint** — a
+  raw kubectl/OCI error reaching the agent is a bug.
+- **All 25 K-items ⏸ Proposed** pending JP ratification of Q1–Q8 (recorded
+  in the plan §2); no Proposed item ships until ratified.
 
 ## Working with mid-state working trees
 
