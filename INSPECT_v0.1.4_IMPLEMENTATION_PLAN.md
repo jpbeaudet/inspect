@@ -1205,6 +1205,16 @@ Mirrors the v0.1.3 all-green-to-tag gate, retargeted to the k8s surface.
 **Process gate**
 - JP has ratified Q1–Q8 (all ⏸ Proposed items promoted to their final status);
   no item ships against an unratified question.
+- **Full-sweep audit gate (JP-scheduled, ROOT-dispatched).** After Wave E and
+  this release-readiness gate both pass with every kube verb live-tested, the
+  program undergoes a **full cross-repo sweep audit** per
+  `/home/jpbeaudet/luminary/docs/audits/CROSS_REPO_AUDIT_TEMPLATE.md` (including
+  the sacred **S**=sovereign / **C**=capability-first / **O**=no-overfit
+  dimensions), dispatched by ROOT (not the sub-coordinator). **v0.1.4 does NOT
+  tag/release before that audit reaches 0-Critical / 0-High.** The
+  sub-coordinator's role is to declare **PROGRAM-READY-FOR-AUDIT** once the
+  preconditions hold (Waves A–E complete, every verb live-tested, all Wave-A..E
+  findings closed, gates green); ROOT then dispatches the audit.
 - Cleaning Duty run (strip `K<n>`/`(v0.1.4)` markers to industry-grade prose;
   test names + CHANGELOG keep theirs); archive sweep (planning docs →
   `archives/v0.1.4/`); README freshness; CLAUDE.md pivot to v0.1.5.
