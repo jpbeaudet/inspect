@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use crate::cli::LifecycleArgs;
 use crate::error::ExitKind;
+use crate::exec::runtime::{runtime_for, LifecycleAction, RuntimeKind};
 use crate::profile::schema::ServiceKind;
 use crate::safety::gate::ConfirmResult;
 use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
@@ -187,7 +188,6 @@ fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Stri
     // (the unit name). For containers we operate on the real
     // container name to defeat the v0.1.0 phantom-service bug.
     let svc_q = shquote(svc);
-    let cont_q = shquote(container);
     match (kind, act) {
         // systemd unit → systemctl
         (ServiceKind::Systemd, Action::Restart) => format!("systemctl restart {svc_q}"),
@@ -198,13 +198,21 @@ fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Stri
         (ServiceKind::HostListener, Action::Reload) => {
             format!("pkill -HUP -f {svc_q} || true")
         }
-        // container default
-        (_, Action::Restart) => format!("docker restart {cont_q}"),
-        (_, Action::Stop) => format!("docker stop {cont_q}"),
-        (_, Action::Start) => format!("docker start {cont_q}"),
-        (_, Action::Reload) => {
-            // Best-effort SIGHUP into the container.
-            format!("docker kill -s HUP {cont_q}")
+        // Container default — dispatched through the runtime executor
+        // seam (K1, v0.1.4). `from_type(None)` selects docker today;
+        // K2 wires the namespace `type` config field so a k8s namespace
+        // routes to `rollout restart`/`scale` instead. Byte-identical
+        // to the prior inline `docker restart|stop|start|kill -s HUP`
+        // strings (HostListener Restart/Stop/Start still fall through
+        // here, unchanged).
+        (_, act) => {
+            let action = match act {
+                Action::Restart => LifecycleAction::Restart,
+                Action::Stop => LifecycleAction::Stop,
+                Action::Start => LifecycleAction::Start,
+                Action::Reload => LifecycleAction::Reload,
+            };
+            runtime_for(RuntimeKind::from_type(None)).build_lifecycle(action, container)
         }
     }
 }

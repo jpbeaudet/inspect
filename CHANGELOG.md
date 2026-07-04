@@ -5,6 +5,35 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — Unreleased
+
+The **Kubernetes release** — introduces the k8s runtime medium purely
+additively (docker users see zero change). Work lands in `K<n>` items
+per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
+
+### Added
+
+- **K1 — internal Runtime executor abstraction.** New `Runtime` trait
+  (`src/exec/runtime.rs`) that abstracts runtime-specific command
+  building behind an object-safe seam, with a `RuntimeKind`
+  (`Docker` | `K8s`) selector (`from_type()` maps the future namespace
+  `type` config field) and a `runtime_for(kind) -> Box<dyn Runtime>`
+  factory. Two implementations: `DockerRuntime` (the existing docker
+  command building, extracted behind the trait with **zero behavior
+  change** — the inventory / in-container-exec / lifecycle command
+  strings are byte-identical, and the docker command sites in
+  `discovery/drift.rs` + `bundle/{exec,checks}.rs` +
+  `verbs/write/lifecycle.rs` now dispatch through it), and `K8sRuntime`
+  (kubectl shell-out backend scaffold, context-pinned per the K5
+  anti-footgun invariant). No user-facing k8s surface ships in K1 —
+  runtime selection defaults to docker and the namespace `type` field
+  that selects k8s arrives in K2; the k8s verbs land across Waves B–D.
+  Internal change only (no new flag / JSON field / exit code).
+  Acceptance: `k1_docker_runtime_parity_*`,
+  `k1_runtime_selected_by_namespace_type`, `k1_runtime_trait_object_safe`
+  (in `src/exec/runtime.rs`) + `tests/phase_k_v014.rs` black-box
+  additive-purity smoke.
+
 ## [0.1.3] — 2026-05-10
 
 Closes the v0.1.3 patch backlog (`INSPECT_v0.1.3_BACKLOG.md`): 30 of

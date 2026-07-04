@@ -1345,11 +1345,71 @@ inversions).
 
 ---
 
+## 18. Runtime abstraction — docker vs k8s dispatch (v0.1.4, K1)
+
+v0.1.4 introduces the **Kubernetes runtime medium**. Before it, the
+docker runtime was assumed *structurally*: `discovery/probes.rs` /
+`discovery/drift.rs` built `docker ps` / `docker inspect` inline, and
+the write/read verbs built `docker exec|restart|stop|start|kill`
+inline. There was no seam at which a different runtime (`kubectl`)
+could be swapped in.
+
+**The seam.** `src/exec/runtime.rs` defines an object-safe `Runtime`
+trait that abstracts the *command-building* concern (distinct from the
+`RemoteRunner` *transport* concern in `src/verbs/runtime.rs`, and from
+the `Medium` `source=` *locator* axis in `src/exec/medium.rs` — three
+orthogonal axes, do not conflate):
+
+- `inventory_cmd()` — the "what is running here" discovery probe.
+- `build_read_exec(target, cmd)` / `build_write_exec(target, cmd)` —
+  in-container/in-pod command execution (read-only vs audited-write).
+- `build_lifecycle(action, target)` — `restart`/`stop`/`start`/`reload`.
+
+Two implementations:
+
+- **`DockerRuntime`** — the existing docker command building, extracted
+  behind the trait. The strings it emits are **byte-identical** to the
+  prior inline `format!("docker …")` sites; the migration is
+  behavior-preserving. The docker command sites now dispatch through it:
+  `discovery/drift.rs` (inventory), `bundle/exec.rs` (step exec →
+  `build_write_exec`), `bundle/checks.rs` (SQL health-check exec →
+  `build_read_exec`), `verbs/write/lifecycle.rs` (container lifecycle).
+- **`K8sRuntime`** — the kubectl shell-out backend (Q2). It carries the
+  resolved kubeconfig `context` + k8s `namespace` and pins `--context`
+  (and `-n`) on **every** command it builds, never reading the ambient
+  `current-context` (the K5 anti-footgun invariant seed). In K1 it is a
+  command-assembly scaffold exercised only by unit tests — no user path
+  constructs it yet.
+
+**Selection.** `RuntimeKind` (`Docker` | `K8s`) + `runtime_for(kind)
+-> Box<dyn Runtime>`. `RuntimeKind::from_type(Option<&str>)` maps the
+namespace `type` config field (absent / `"docker"` → docker; `"k8s"` /
+`"kubernetes"` → k8s; unknown → docker, staying total so selection
+never panics on a malformed config). K1 defaults every call site to
+docker via `from_type(None)`; **K2** wires the real `type` field so a
+k8s namespace routes to `K8sRuntime`.
+
+**The additive-purity gate.** The whole docker test suite is the
+regression gate for this refactor: because `DockerRuntime` reproduces
+the exact command strings, the suite must stay 100% green (it does).
+`k1_docker_runtime_parity_*` (in `src/exec/runtime.rs`) pins the
+byte-equality directly; `tests/phase_k_v014.rs` is the black-box smoke
+proving the binary still builds and exposes no half-wired k8s surface.
+
+**What grows the trait later (each with its consuming verb, not
+deferred):** the `logs` command builder lands in K8 (byte-exact with
+the `verbs/logs.rs` follow/timestamps/reconnect ordering); the k8s
+stderr→`failure_class` classifier in K4; the `kind()` discriminator +
+`resolve_target` in K2 (namespace-`type` selection + config).
+
+---
+
 *Source: this runbook implements Phase 12 of the original implementation
 plan in `archives/IMPLEMENTATION_PLAN.md`. §8 was added in v0.1.3 (F2)
 to lock in the three-bucket discipline; §9 in F12 (env overlay); §10
 in F13 (auto-reauth + transport exit class); §11 in F14 (script
 mode); §12 in F15 (file transfer); §13 in F16 (streaming executor);
 §14 in F17 (multi-step runner); §15 in L5 (audit gc + lazy trigger);
-§16 in F18 (session transcripts); §17 in L6 (per-branch rollback).
+§16 in F18 (session transcripts); §17 in L6 (per-branch rollback);
+§18 in v0.1.4 K1 (runtime abstraction — docker vs k8s dispatch).
 Any deviation between this runbook and the bible is a runbook bug.*

@@ -6,10 +6,15 @@
 //! logs|exec|restart|…` inline. There was no seam at which a different
 //! runtime (kubernetes via `kubectl`) could be swapped in.
 //!
-//! This module introduces that seam. [`Runtime`] abstracts the three
-//! runtime-specific concerns the surface map §2 enumerates — command
-//! building, inventory, and failure classification — behind an
-//! object-safe trait with two implementations:
+//! This module introduces that seam. [`Runtime`] abstracts the
+//! runtime-specific command-building + inventory concerns the surface
+//! map §2 enumerates, behind an object-safe trait with two
+//! implementations. K1 lands the byte-clean builders wired this item
+//! (`inventory_cmd`, `build_read_exec`, `build_write_exec`,
+//! `build_lifecycle`); the methods needing later-wave context grow the
+//! trait with their consuming verb (the `logs` builder in K8, the k8s
+//! stderr→`failure_class` classifier in K4, the `kind()` discriminator
+//! + `resolve_target` in K2).
 //!
 //! - [`DockerRuntime`] — reproduces the **exact** command strings the
 //!   docker verbs already build today. It is a behavior-preserving
@@ -30,20 +35,12 @@
 //! **This is not the transport layer.** [`crate::verbs::runtime::
 //! RemoteRunner`] remains the transport abstraction (how a command
 //! string is *dispatched* — SSH master socket vs mock). `Runtime` is
-//! the orthogonal *command-building* + *inventory* + *classification*
-//! axis (what command string to build for a given runtime). The two
+//! the orthogonal *command-building* + *inventory* axis (what command
+//! string to build for a given runtime). The two
 //! compose: a verb asks its `Runtime` for a command string, then hands
 //! that string to a `RemoteRunner` (docker) or dispatches it locally
 //! (k8s — no SSH; a later Wave-A item wires the k8s transport path).
 
-// K1 introduces this seam; its non-test consumers land in the very next
-// item (K2 wires `RuntimeKind` to the namespace `type` config field and
-// selects the runtime at dispatch). In K1 the API is exercised only by
-// the in-module unit tests, so the normal (non-test) build sees it as
-// unused. This allowance is removed the moment K2 wires the call sites.
-#![allow(dead_code)]
-
-use crate::ssh::transport::{classify, TransportClass};
 use crate::verbs::quote::shquote;
 
 /// Which runtime backs a namespace. Selected from the namespace `type`
@@ -63,17 +60,13 @@ impl RuntimeKind {
     /// parse time; this helper stays total so runtime selection can
     /// never panic on a malformed config.
     pub fn from_type(type_field: Option<&str>) -> Self {
-        match type_field.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        match type_field
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             Some("k8s") | Some("kubernetes") => RuntimeKind::K8s,
             _ => RuntimeKind::Docker,
-        }
-    }
-
-    /// Stable label for the `meta.runtime` envelope field and audit.
-    pub fn label(self) -> &'static str {
-        match self {
-            RuntimeKind::Docker => "docker",
-            RuntimeKind::K8s => "k8s",
         }
     }
 }
@@ -90,31 +83,19 @@ pub enum LifecycleAction {
     Reload,
 }
 
-/// Options for a logs invocation, runtime-agnostic. The docker impl
-/// maps these onto `docker logs [-f] [--since X] [--tail N]`; the k8s
-/// impl maps them onto `kubectl logs [-f] [--since X] [--tail N]`
-/// (the `-c` / `--previous` / `--merged` flags land in K8).
-#[derive(Debug, Clone, Default)]
-pub struct LogsSpec {
-    /// `-f` / `--follow`.
-    pub follow: bool,
-    /// `--since <value>` (docker duration or absolute per today's
-    /// logs verb); `None` omits the flag.
-    pub since: Option<String>,
-    /// `--tail <n>`; `None` omits the flag.
-    pub tail: Option<usize>,
-    /// When `true`, prefix `stdbuf -oL -eL` so `-f` output is
-    /// line-buffered — the docker follow path does this (see
-    /// `verbs/logs.rs` field pitfall §5.1). Ignored by the k8s impl.
-    pub line_buffered: bool,
-}
-
 /// The runtime executor seam. Object-safe (`Box<dyn Runtime>`), so
 /// selection is a runtime value, not a generic parameter.
+///
+/// K1 lands the byte-clean command builders that migrate off inline
+/// `docker …` construction with zero behavior change: `inventory_cmd`,
+/// `build_read_exec`, `build_write_exec`, `build_lifecycle` — each
+/// wired to its real docker call site this item. The methods that need
+/// later-wave context grow the trait with their consuming verb: the
+/// `logs` builder lands in K8 (byte-exact with `verbs/logs.rs`
+/// follow/timestamps/reconnect ordering), the k8s stderr classifier in
+/// K4 (`classify_failure`), and the `kind()` discriminator +
+/// `resolve_target` in K2 (namespace `type` selection + config).
 pub trait Runtime: Send + Sync {
-    /// Which runtime this is.
-    fn kind(&self) -> RuntimeKind;
-
     /// The inventory command — the "what is running here" probe that
     /// discovery runs to populate the cached profile. Docker →
     /// `docker ps …`; k8s → `kubectl get pods,services,deployments,
@@ -131,20 +112,9 @@ pub trait Runtime: Send + Sync {
     /// write path can be audited/gated independently (K19).
     fn build_write_exec(&self, target: &str, cmd: &str) -> String;
 
-    /// Build the logs command for `target` per `spec`.
-    fn build_logs(&self, target: &str, spec: &LogsSpec) -> String;
-
     /// Build a lifecycle command (`restart`/`stop`/`start`/`reload`)
     /// for `target`.
     fn build_lifecycle(&self, action: LifecycleAction, target: &str) -> String;
-
-    /// Classify a failure from its stderr + exit code into a
-    /// transport/failure class an agent can branch on. The docker impl
-    /// delegates to the existing SSH transport classifier; the k8s
-    /// body (RBAC-forbidden / not-found / no-shell / metrics-
-    /// unavailable / k8s transport) lands in K4 — K1 only defines the
-    /// trait method + the docker impl.
-    fn classify_failure(&self, stderr: &str, exit_code: i32) -> Option<TransportClass>;
 }
 
 /// Docker runtime — the behavior-preserving extraction of today's
@@ -153,16 +123,13 @@ pub trait Runtime: Send + Sync {
 pub struct DockerRuntime;
 
 impl Runtime for DockerRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Docker
-    }
-
     fn inventory_cmd(&self) -> String {
         // Reproduces the discovery ps probe (see
         // `discovery/drift.rs`). Container inventory batches a
         // follow-up `docker inspect` per id in `discovery/probes.rs`;
         // that fan-out stays in the probe layer.
-        "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Ports}}' 2>/dev/null".to_string()
+        "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Ports}}' 2>/dev/null"
+            .to_string()
     }
 
     fn build_read_exec(&self, target: &str, cmd: &str) -> String {
@@ -175,29 +142,6 @@ impl Runtime for DockerRuntime {
         format!("docker exec {} sh -c {}", shquote(target), shquote(cmd))
     }
 
-    fn build_logs(&self, target: &str, spec: &LogsSpec) -> String {
-        // Reproduces `verbs/logs.rs` one-invocation shape: optional
-        // stdbuf line-buffer prefix, then --since/--tail/-f, then the
-        // quoted container.
-        let mut s = if spec.line_buffered {
-            String::from("stdbuf -oL -eL docker logs")
-        } else {
-            String::from("docker logs")
-        };
-        if let Some(since) = &spec.since {
-            s.push_str(&format!(" --since {}", shquote(since)));
-        }
-        if let Some(tail) = spec.tail {
-            s.push_str(&format!(" --tail {tail}"));
-        }
-        if spec.follow {
-            s.push_str(" -f");
-        }
-        s.push(' ');
-        s.push_str(&shquote(target));
-        s
-    }
-
     fn build_lifecycle(&self, action: LifecycleAction, target: &str) -> String {
         // Byte-identical to the container arm of
         // `verbs/write/lifecycle.rs::build_cmd`.
@@ -208,12 +152,6 @@ impl Runtime for DockerRuntime {
             LifecycleAction::Start => format!("docker start {q}"),
             LifecycleAction::Reload => format!("docker kill -s HUP {q}"),
         }
-    }
-
-    fn classify_failure(&self, stderr: &str, _exit_code: i32) -> Option<TransportClass> {
-        // Today's docker path classifies purely on stderr text; the
-        // exit code is not consulted. Preserve that.
-        classify(stderr)
     }
 }
 
@@ -239,11 +177,6 @@ pub struct K8sRuntime {
 }
 
 impl K8sRuntime {
-    /// Construct with an explicit context + namespace.
-    pub fn new(context: Option<String>, namespace: Option<String>) -> Self {
-        Self { context, namespace }
-    }
-
     /// Emit the `--context <ctx> -n <ns>` scoping flags this runtime
     /// pins on every kubectl invocation (K5 invariant seed).
     fn scope_flags(&self) -> String {
@@ -259,10 +192,6 @@ impl K8sRuntime {
 }
 
 impl Runtime for K8sRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::K8s
-    }
-
     fn inventory_cmd(&self) -> String {
         // K6 consumes this for discovery; one API round-trip.
         format!(
@@ -293,23 +222,6 @@ impl Runtime for K8sRuntime {
         )
     }
 
-    fn build_logs(&self, target: &str, spec: &LogsSpec) -> String {
-        // K8 adds `-c` auto-pick / `--previous` / `--merged`.
-        let mut s = format!("kubectl {}logs", self.scope_flags());
-        if let Some(since) = &spec.since {
-            s.push_str(&format!(" --since={}", shquote(since)));
-        }
-        if let Some(tail) = spec.tail {
-            s.push_str(&format!(" --tail={tail}"));
-        }
-        if spec.follow {
-            s.push_str(" -f");
-        }
-        s.push(' ');
-        s.push_str(&shquote(target));
-        s
-    }
-
     fn build_lifecycle(&self, action: LifecycleAction, target: &str) -> String {
         // The community-correct idioms (K15/K16): restart →
         // rollout restart; stop/start map to scale (refined in the
@@ -325,19 +237,11 @@ impl Runtime for K8sRuntime {
             LifecycleAction::Start => format!("kubectl {scope}scale deploy/{q} --replicas=1"),
         }
     }
-
-    fn classify_failure(&self, _stderr: &str, _exit_code: i32) -> Option<TransportClass> {
-        // K4 fills the k8s stderr classifier (rbac_forbidden /
-        // not_found / no_shell_in_container / metrics_unavailable / the
-        // k8s transport classes). K1 leaves it unclassified — no user
-        // path reaches it yet.
-        None
-    }
 }
 
 /// Factory: the runtime-selection mechanism. Returns a boxed trait
-/// object for `kind`. Wiring `kind` to the namespace `type` config
-/// field is K2; K1 makes selection testable via an explicit
+/// object for `kind`. Wiring [`RuntimeKind`] to the namespace `type`
+/// config field is K2; K1 makes selection testable via an explicit
 /// [`RuntimeKind`] and defaults callers to docker so docker behavior
 /// is unchanged.
 pub fn runtime_for(kind: RuntimeKind) -> Box<dyn Runtime> {
@@ -401,108 +305,68 @@ mod tests {
     }
 
     #[test]
-    fn k1_docker_runtime_parity_logs() {
-        let rt = DockerRuntime;
-        assert_eq!(
-            rt.build_logs("api", &LogsSpec::default()),
-            format!("docker logs {}", shquote("api"))
-        );
-        let spec = LogsSpec {
-            follow: true,
-            since: Some("30m".to_string()),
-            tail: Some(100),
-            line_buffered: true,
-        };
-        assert_eq!(
-            rt.build_logs("api", &spec),
-            format!(
-                "stdbuf -oL -eL docker logs --since {} --tail 100 -f {}",
-                shquote("30m"),
-                shquote("api")
-            )
-        );
-    }
-
-    #[test]
     fn k1_docker_runtime_parity_inventory_is_docker_ps() {
         let cmd = DockerRuntime.inventory_cmd();
-        assert!(cmd.starts_with("docker ps"), "got: {cmd}");
-        assert!(cmd.contains("--format"));
-    }
-
-    #[test]
-    fn k1_docker_runtime_parity_kind_and_label() {
-        assert_eq!(DockerRuntime.kind(), RuntimeKind::Docker);
-        assert_eq!(RuntimeKind::Docker.label(), "docker");
-        assert_eq!(RuntimeKind::K8s.label(), "k8s");
+        // Byte-identical to the discovery ps probe (`discovery/drift.rs`).
+        assert_eq!(
+            cmd,
+            "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Ports}}' 2>/dev/null"
+        );
     }
 
     // ---- k1_runtime_selected_by_namespace_type
+    //
+    // Discriminates by the runtime's *observable behavior* (the command
+    // string it builds) rather than a label — a stronger check that the
+    // factory routed to the right impl. `from_type` maps the (future,
+    // K2) namespace `type` field to a runtime; None/"docker" → docker,
+    // "k8s"/"kubernetes" → k8s, unknown → docker (selection stays total).
+
+    fn restart_cmd(type_field: Option<&str>) -> String {
+        runtime_for(RuntimeKind::from_type(type_field))
+            .build_lifecycle(LifecycleAction::Restart, "w")
+    }
 
     #[test]
     fn k1_runtime_selected_by_namespace_type() {
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some("k8s"))).kind(),
-            RuntimeKind::K8s
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some("kubernetes"))).kind(),
-            RuntimeKind::K8s
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some("K8S"))).kind(),
-            RuntimeKind::K8s
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some(" k8s "))).kind(),
-            RuntimeKind::K8s
-        );
-        // docker / absent / unknown all default to docker — the
-        // no-change guarantee; selection stays total.
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some("docker"))).kind(),
-            RuntimeKind::Docker
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(None)).kind(),
-            RuntimeKind::Docker
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some(""))).kind(),
-            RuntimeKind::Docker
-        );
-        assert_eq!(
-            runtime_for(RuntimeKind::from_type(Some("nope"))).kind(),
-            RuntimeKind::Docker
-        );
+        // k8s `type` routes to K8sRuntime (kubectl rollout restart).
+        for t in ["k8s", "kubernetes", "K8S", " k8s "] {
+            let cmd = restart_cmd(Some(t));
+            assert!(
+                cmd.starts_with("kubectl") && cmd.contains("rollout restart deploy/"),
+                "type {t:?} should route to k8s, got: {cmd}"
+            );
+        }
+        // docker / absent / empty / unknown all route to DockerRuntime.
+        for t in [Some("docker"), None, Some(""), Some("nope")] {
+            let cmd = restart_cmd(t);
+            assert_eq!(
+                cmd, "docker restart 'w'",
+                "type {t:?} should route to docker"
+            );
+        }
     }
 
     // ---- k1_runtime_trait_object_safe
 
     #[test]
     fn k1_runtime_trait_object_safe() {
-        // If `Runtime` were not object-safe this would not compile.
+        // If `Runtime` were not object-safe none of this would compile:
+        // it is held behind `Box<dyn Runtime>` and dispatched virtually.
         let runtimes: Vec<Box<dyn Runtime>> = vec![
             Box::new(DockerRuntime),
             Box::new(K8sRuntime::default()),
             runtime_for(RuntimeKind::Docker),
             runtime_for(RuntimeKind::K8s),
         ];
-        let kinds: Vec<RuntimeKind> = runtimes.iter().map(|r| r.kind()).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                RuntimeKind::Docker,
-                RuntimeKind::K8s,
-                RuntimeKind::Docker,
-                RuntimeKind::K8s
-            ]
-        );
-        let rt: Box<dyn Runtime> = Box::new(DockerRuntime);
-        assert_eq!(
-            rt.build_lifecycle(LifecycleAction::Restart, "c"),
-            "docker restart 'c'"
-        );
+        let cmds: Vec<String> = runtimes
+            .iter()
+            .map(|r| r.build_lifecycle(LifecycleAction::Restart, "w"))
+            .collect();
+        assert_eq!(cmds[0], "docker restart 'w'");
+        assert!(cmds[1].starts_with("kubectl"));
+        assert_eq!(cmds[2], "docker restart 'w'");
+        assert!(cmds[3].starts_with("kubectl"));
     }
 
     // ---- k8s runtime scaffold (unit-level; no user path reaches it in K1)
@@ -511,20 +375,26 @@ mod tests {
     fn k1_k8s_runtime_pins_context_and_namespace() {
         // K5 invariant seed: every kubectl command carries an explicit
         // --context and -n; the ambient current-context is never used.
-        let rt = K8sRuntime::new(Some("prod-eks".to_string()), Some("payments".to_string()));
+        let rt = K8sRuntime {
+            context: Some("prod-eks".to_string()),
+            namespace: Some("payments".to_string()),
+        };
         let inv = rt.inventory_cmd();
         assert!(inv.contains("--context 'prod-eks'"), "got: {inv}");
         assert!(inv.contains("-n 'payments'"), "got: {inv}");
         assert!(inv.contains("kubectl"));
         // restart maps to the community-correct rollout restart, not delete-pod.
         let restart = rt.build_lifecycle(LifecycleAction::Restart, "api");
-        assert!(restart.contains("rollout restart deploy/"), "got: {restart}");
+        assert!(
+            restart.contains("rollout restart deploy/"),
+            "got: {restart}"
+        );
         assert!(restart.contains("--context 'prod-eks'"));
-    }
-
-    #[test]
-    fn k1_k8s_runtime_classify_is_unwired_in_k1() {
-        // K4 fills the k8s classifier; K1 leaves it None (no user path).
-        assert_eq!(K8sRuntime::default().classify_failure("Forbidden", 1), None);
+        // in-pod exec pins scope + uses `--` (no /bin/bash wrapper).
+        let ex = rt.build_read_exec("pod-x", "cat /etc/hostname");
+        assert!(
+            ex.contains("--context 'prod-eks'") && ex.contains(" -- cat"),
+            "got: {ex}"
+        );
     }
 }

@@ -43,6 +43,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 
 use crate::error::ExitKind;
+use crate::exec::runtime::{DockerRuntime, Runtime};
 use crate::safety::{AuditEntry, AuditStore};
 use crate::ssh::exec::RunOpts;
 use crate::verbs::dispatch::{iter_steps, plan as resolve_plan};
@@ -711,12 +712,10 @@ fn run_single_branch(
                 ));
             }
             let rstep = &resolved[0];
+            // Built through the runtime executor seam (K1, v0.1.4). Docker
+            // today; byte-identical to the prior inline `docker exec …`.
             let cmd = match rstep.container() {
-                Some(container) => format!(
-                    "docker exec {} sh -c {}",
-                    shquote(container),
-                    shquote(&body)
-                ),
+                Some(container) => DockerRuntime.build_write_exec(container, &body),
                 None => body.clone(),
             };
 
