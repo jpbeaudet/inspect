@@ -283,6 +283,76 @@ impl KubectlFailure {
     }
 }
 
+/// Result of running a command inside a pod via `kubectl exec` (K9). On
+/// failure, `failure` carries the classified class (which yields both the
+/// exit code via `exit_code()` and the hint) — so the raw stderr/exit are not
+/// re-exposed here.
+pub struct K8sExecOut {
+    pub stdout: String,
+    /// `Some` when the exec failed — the classified failure (K4), so the
+    /// caller can branch (e.g. `no_shell_in_container` → exit 16, WA-4).
+    pub failure: Option<KubectlFailure>,
+}
+
+/// Build the context-pinned `kubectl exec <pod> [-c <c>] --` prefix (K5: the
+/// context is always explicit, never the ambient current-context). The caller
+/// appends the in-pod argv. No `/bin/sh` wrapper — the command runs directly,
+/// avoiding the k9s Alpine-no-bash trap (research w1-D8).
+pub fn exec_base(
+    cfg: &crate::config::namespace::NamespaceConfig,
+    pod: &str,
+    container: Option<&str>,
+) -> Command {
+    let mut c = Command::new("kubectl");
+    if let Some(ctx) = cfg.context.as_deref() {
+        c.args(["--context", ctx]);
+    }
+    if let Some(kc) = cfg.kubeconfig.as_deref() {
+        c.args(["--kubeconfig", &expand_tilde_kc(kc)]);
+    }
+    if let Some(n) = cfg.k8s_namespace.as_deref() {
+        c.args(["-n", n]);
+    }
+    c.arg("exec").arg(pod);
+    if let Some(cn) = container {
+        c.args(["-c", cn]);
+    }
+    c.arg("--");
+    c
+}
+
+/// Run `argv` inside a pod and return a classified result (K9). Used by
+/// `cat`/`ls`/`grep`/`run` for their in-pod read commands.
+pub fn exec_in_pod(
+    cfg: &crate::config::namespace::NamespaceConfig,
+    pod: &str,
+    container: Option<&str>,
+    argv: &[&str],
+) -> std::io::Result<K8sExecOut> {
+    let mut c = exec_base(cfg, pod, container);
+    c.args(argv);
+    let out = c.output()?;
+    let failure = if out.status.success() {
+        None
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Some(classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1)))
+    };
+    Ok(K8sExecOut {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        failure,
+    })
+}
+
+fn expand_tilde_kc(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = crate::paths::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 /// Classify a kubectl failure from its stderr + exit code into a stable
 /// [`KubectlFailure`]. Ordering matters: the most specific markers are tested
 /// before the generic ones so, e.g., a Forbidden is never swallowed by a
