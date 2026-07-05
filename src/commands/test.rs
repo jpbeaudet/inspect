@@ -285,6 +285,13 @@ fn k8s_rbac_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
             }
         }
     }
+    rbac_verdict(&denied_reads, &denied_writes)
+}
+
+/// Pure verdict from the RBAC probe results (extracted so it is unit-testable
+/// without a live cluster): denied reads → fail (can't diagnose); denied
+/// writes only → warn (diagnostics still work); none → pass.
+fn rbac_verdict(denied_reads: &[String], denied_writes: &[String]) -> Check {
     if !denied_reads.is_empty() {
         Check {
             name: "rbac",
@@ -312,6 +319,31 @@ fn k8s_rbac_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
             status: CheckStatus::Pass,
             detail: "all inspect verbs permitted (reads + writes)".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod k6_tests {
+    use super::*;
+
+    #[test]
+    fn k6_rbac_verdict_denied_reads_fail() {
+        let v = rbac_verdict(&["get pods".into()], &[]);
+        assert_eq!(v.status, CheckStatus::Fail);
+        assert!(v.detail.contains("get pods"));
+    }
+
+    #[test]
+    fn k6_rbac_verdict_denied_writes_only_warn() {
+        let v = rbac_verdict(&[], &["patch deployments".into(), "delete pods".into()]);
+        assert_eq!(v.status, CheckStatus::Warn);
+        assert!(v.detail.contains("patch deployments"));
+    }
+
+    #[test]
+    fn k6_rbac_verdict_all_permitted_pass() {
+        let v = rbac_verdict(&[], &[]);
+        assert_eq!(v.status, CheckStatus::Pass);
     }
 }
 

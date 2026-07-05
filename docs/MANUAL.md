@@ -167,6 +167,13 @@ that causes wrong-cluster incidents). Every k8s **write** also records the
 resolved `context` + `k8s_namespace` in its audit entry, so the log names
 exactly which cluster and namespace were touched.
 
+**k8s is sessionless — no `connect` step (K6/Q6, v0.1.4).** Unlike a docker
+namespace (which opens a persistent SSH master), a k8s namespace resolves
+its kubeconfig context per-verb from config. `inspect connect <k8s-ns>` and
+`inspect disconnect <k8s-ns>` therefore report **N/A** and exit 0 — there is
+no session to open or close, and no sticky `current-context` to leak. Go
+straight from `inspect add` to `inspect test` / `inspect setup`.
+
 **Validating a k8s namespace — `inspect test <ns>` (K4, v0.1.4).** For a
 k8s namespace, `test` runs k8s-appropriate checks — config validity, the
 `kubectl` backend probe (K3), and a **context-pinned** API-reachability
