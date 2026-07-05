@@ -150,6 +150,16 @@ pub struct AuditEntry {
     /// the verb terminated with a transport failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
+    /// K5 (v0.1.4): the resolved kubeconfig **context** a k8s verb ran
+    /// against. Part of the anti-footgun contract — the audit record
+    /// names exactly which cluster was touched, never leaving it to an
+    /// ambient `current-context`. `None` for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// K5 (v0.1.4): the resolved in-cluster **k8s namespace** a k8s verb
+    /// ran against. `None` for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
     /// When this verb invocation was script-mode (`inspect run
     /// --file <path>`), the absolute local path the script was
     /// read from. `None` for `--stdin-script` and for
@@ -427,6 +437,8 @@ impl AuditEntry {
             retry_of: None,
             reauth_id: None,
             failure_class: None,
+            context: None,
+            k8s_namespace: None,
             script_path: None,
             script_sha256: None,
             script_bytes: None,
