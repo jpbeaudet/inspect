@@ -166,9 +166,259 @@ pub fn not_found_message(namespace: &str, path_searched: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// K4 (v0.1.4): k8s failure-class taxonomy + stderr classifier.
+//
+// kubectl collapses NotFound / Forbidden / Unreachable / metrics-absent all
+// into a single non-zero exit with the distinction only in stderr *prose*.
+// inspect's job is to parse that prose into a stable, agent-branchable
+// `failure_class` string + a CI-gate-quality hint, so an agent never has to
+// scrape kubectl's English. The exit code stays the coarse class (transport
+// reuses the F13 12–14 band by semantic class); `failure_class` is the fine
+// detail. Fixtures in the test module are REAL strings harvested from the
+// live maker/hub clusters (the harvest commands are recorded there).
+// ---------------------------------------------------------------------------
+
+/// A classified k8s failure. The `failure_class()` string is the stable
+/// agent-branch discriminator.
+///
+/// **Exit-code policy (K4 decision; the `exit_code()` accessor lands in K6
+/// with its first consumer — a verb exit path — so it is not written unused
+/// here):** transport reuses the F13 12–14 band by *semantic class*
+/// (unreachable → 13, auth → 14; k8s has no "stale" so 12 is unused);
+/// `rbac_forbidden` is an authorization failure → 14 (the `failure_class`
+/// distinguishes it from a credential expiry); `not_found` → 1 (no-match,
+/// inspect's existing semantics); `metrics_unavailable` / `no_shell_in_container`
+/// / `unknown` → 1 (general non-match, with the precise `failure_class`
+/// carrying the detail). A dedicated code for the operational classes is an
+/// open decision flagged to JP (WA-4). Likewise the `TransportClass` bridge
+/// for the dispatch/retry layer lands in K6 when a k8s verb goes through
+/// `dispatch_with_reauth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KubectlFailure {
+    /// RBAC denied the action (API reachable, authenticated, but not
+    /// authorized). kubectl: `Error from server (Forbidden): ...`.
+    RbacForbidden,
+    /// The addressed object does not exist. kubectl: `(NotFound)`.
+    NotFound,
+    /// exec landed in a container with no shell / coreutils (distroless).
+    NoShellInContainer,
+    /// `kubectl top` with no metrics-server (or it is still warming up).
+    MetricsUnavailable,
+    /// The API server is unreachable (DNS / route / refused / bad context).
+    TransportUnreachable,
+    /// Token / client-cert expired or auth rejected at the API.
+    TransportAuthExpired,
+    /// Unrecognized stderr — never misclassified into a wrong branch.
+    Unknown,
+}
+
+impl KubectlFailure {
+    /// The stable `failure_class` JSON/SUMMARY string. Transport classes
+    /// reuse the F13 `TransportClass` strings so the value space is uniform
+    /// across mediums.
+    pub fn failure_class(self) -> &'static str {
+        match self {
+            KubectlFailure::RbacForbidden => "rbac_forbidden",
+            KubectlFailure::NotFound => "not_found",
+            KubectlFailure::NoShellInContainer => "no_shell_in_container",
+            KubectlFailure::MetricsUnavailable => "metrics_unavailable",
+            KubectlFailure::TransportUnreachable => "transport_unreachable",
+            KubectlFailure::TransportAuthExpired => "transport_auth_failed",
+            KubectlFailure::Unknown => "unknown",
+        }
+    }
+
+    /// The chained, CI-gate-quality hint (what went wrong + the next action).
+    /// `resource_hint` is a short `<verb> <resource> -n <ns>` fragment the
+    /// caller can supply so the RBAC hint embeds the literal `auth can-i`.
+    pub fn hint(self, resource_hint: &str) -> String {
+        match self {
+            KubectlFailure::RbacForbidden => format!(
+                "RBAC denied this action. Check the exact grant with \
+                 `kubectl auth can-i {rh}` (add `--as <user>` to test another \
+                 identity); ask your cluster admin for the missing Role/Binding.",
+                rh = if resource_hint.is_empty() {
+                    "<verb> <resource>"
+                } else {
+                    resource_hint
+                }
+            ),
+            KubectlFailure::NotFound =>
+                "the addressed object does not exist in this namespace/context — \
+                 check the name and `-n`/`--namespace`."
+                    .into(),
+            KubectlFailure::NoShellInContainer =>
+                "this container has no shell / coreutils (distroless or minimal image); \
+                 in-pod exec cannot run. Use an ephemeral debug container \
+                 (`kubectl debug`) — a first-class debug verb is planned for v0.1.5+."
+                    .into(),
+            KubectlFailure::MetricsUnavailable =>
+                "metrics are unavailable — metrics-server is not installed (or still \
+                 warming up, ~60s after install). Install metrics-server, or retry \
+                 shortly; this is a cluster-component gap, not a workload failure."
+                    .into(),
+            KubectlFailure::TransportUnreachable =>
+                "the Kubernetes API server is unreachable — check the context, the \
+                 kubeconfig, and network reachability to the cluster."
+                    .into(),
+            KubectlFailure::TransportAuthExpired =>
+                "authentication to the API server failed — your token or client \
+                 certificate may be expired; refresh your kubeconfig credentials \
+                 (`kubectl` handles re-auth; inspect does not cache k8s credentials)."
+                    .into(),
+            KubectlFailure::Unknown =>
+                "kubectl returned an error inspect did not recognize — see the raw \
+                 stderr below and `kubectl` docs."
+                    .into(),
+        }
+    }
+}
+
+/// Classify a kubectl failure from its stderr + exit code into a stable
+/// [`KubectlFailure`]. Ordering matters: the most specific markers are tested
+/// before the generic ones so, e.g., a Forbidden is never swallowed by a
+/// broad "unable to connect" fallback.
+pub fn classify_kubectl_failure(stderr: &str, _exit_code: i32) -> KubectlFailure {
+    let s = stderr.to_ascii_lowercase();
+    // RBAC — "(Forbidden)" / "is forbidden" / "forbidden:".
+    if s.contains("(forbidden)") || s.contains("is forbidden") || s.contains("forbidden:") {
+        return KubectlFailure::RbacForbidden;
+    }
+    // Distroless / no-shell exec — the OCI exec error shapes. Before NotFound
+    // because its "no such file or directory" contains no "not found", but its
+    // exec markers must win over a generic fallback.
+    if (s.contains("exec") || s.contains("oci runtime"))
+        && (s.contains("no such file or directory")
+            || s.contains("executable file not found")
+            || s.contains("/bin/sh")
+            || s.contains("/bin/bash"))
+    {
+        return KubectlFailure::NoShellInContainer;
+    }
+    // Metrics-server absent.
+    if s.contains("metrics api not available")
+        || s.contains("metrics.k8s.io")
+        || (s.contains("metrics") && s.contains("not available"))
+    {
+        return KubectlFailure::MetricsUnavailable;
+    }
+    // Auth-expired at the API (distinct from RBAC-forbidden above).
+    if s.contains("unauthorized")
+        || (s.contains("certificate") && (s.contains("expired") || s.contains("invalid")))
+        || s.contains("token is expired")
+        || s.contains("must be logged in")
+    {
+        return KubectlFailure::TransportAuthExpired;
+    }
+    // API server unreachable — connection + bad-context shapes. MUST be tested
+    // BEFORE NotFound: kubectl's bad-context error is "context was not found",
+    // whose "not found" would otherwise be misread as an object NotFound.
+    if s.contains("unable to connect to the server")
+        || s.contains("the connection to the server")   // "... was refused ..."
+        || s.contains("was refused")
+        || s.contains("connection refused")
+        || s.contains("no route to host")
+        || s.contains("i/o timeout")
+        || s.contains("context was not found")
+        || (s.contains("context") && s.contains("does not exist")) // real kubectl bad-context
+        || s.contains("error in configuration")
+        || s.contains("dial tcp")
+    {
+        return KubectlFailure::TransportUnreachable;
+    }
+    // Object NotFound — the server-side "(NotFound)" shape. Guarded so a stray
+    // "not found" in some other message does not misclassify (config/context
+    // "not found" is already handled above as unreachable).
+    if s.contains("(notfound)") || (s.contains("not found") && s.contains("from server")) {
+        return KubectlFailure::NotFound;
+    }
+    KubectlFailure::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // K4 acceptance — REAL kubectl stderr harvested from the live clusters
+    // (maker/hub) on 2026-07-04, so the classifier is validated against
+    // genuine output, not invented strings (no-synthetic-verification rule):
+    //   notfound   : kubectl get pod does-not-exist -n inspect-livetest
+    //   forbidden  : kubectl get secrets -n kube-system \
+    //                  --as=system:serviceaccount:default:default
+    //   unreachable: kubectl --context no-such-ctx get pods
+    #[test]
+    fn k4_classify_forbidden_to_rbac_with_cani_hint() {
+        let real = "Error from server (Forbidden): secrets is forbidden: User \
+            \"system:serviceaccount:default:default\" cannot list resource \
+            \"secrets\" in API group \"\" in the namespace \"kube-system\"";
+        let c = classify_kubectl_failure(real, 1);
+        assert_eq!(c, KubectlFailure::RbacForbidden);
+        assert_eq!(c.failure_class(), "rbac_forbidden");
+        assert!(c.hint("list secrets -n kube-system").contains("auth can-i"));
+    }
+
+    #[test]
+    fn k4_classify_notfound() {
+        let real = "Error from server (NotFound): pods \"does-not-exist\" not found";
+        let c = classify_kubectl_failure(real, 1);
+        assert_eq!(c, KubectlFailure::NotFound);
+        assert_eq!(c.failure_class(), "not_found");
+    }
+
+    #[test]
+    fn k4_classify_no_shell_in_container() {
+        let real = "OCI runtime exec failed: exec failed: unable to start container \
+            process: exec: \"/bin/sh\": stat /bin/sh: no such file or directory";
+        let c = classify_kubectl_failure(real, 126);
+        assert_eq!(c, KubectlFailure::NoShellInContainer);
+        assert_eq!(c.failure_class(), "no_shell_in_container");
+        assert!(c.hint("").contains("debug"));
+    }
+
+    #[test]
+    fn k4_classify_metrics_unavailable() {
+        let real = "error: Metrics API not available";
+        let c = classify_kubectl_failure(real, 1);
+        assert_eq!(c, KubectlFailure::MetricsUnavailable);
+        assert_eq!(c.failure_class(), "metrics_unavailable");
+    }
+
+    #[test]
+    fn k4_classify_transport_unreachable() {
+        // REAL string from `kubectl --context no-such-ctx version` against the
+        // live maker kubeconfig (2026-07-04) — the live test caught that the
+        // message is `context "X" does not exist`, not the config-error shape
+        // originally assumed.
+        let real = "error: context \"no-such-ctx\" does not exist";
+        let c = classify_kubectl_failure(real, 1);
+        assert_eq!(c, KubectlFailure::TransportUnreachable);
+        assert_eq!(c.failure_class(), "transport_unreachable");
+        // The older config-error shape also classifies (kept for coverage).
+        let cfg_err = "Error in configuration: context was not found for \
+            specified context: no-such-ctx";
+        assert_eq!(
+            classify_kubectl_failure(cfg_err, 1),
+            KubectlFailure::TransportUnreachable
+        );
+    }
+
+    #[test]
+    fn k4_classify_transport_unreachable_connection_refused() {
+        let real = "The connection to the server 127.0.0.1:1 was refused - \
+            did you specify the right host or port?";
+        // "connection refused" lower-cases into the unreachable marker set.
+        let c = classify_kubectl_failure(real, 1);
+        assert_eq!(c, KubectlFailure::TransportUnreachable);
+    }
+
+    #[test]
+    fn k4_unknown_stderr_falls_back_safely() {
+        // An unrecognized error must NOT be misclassified into a wrong branch.
+        let c = classify_kubectl_failure("some brand new kubectl error nobody has seen", 1);
+        assert_eq!(c, KubectlFailure::Unknown);
+        assert_eq!(c.failure_class(), "unknown");
+    }
 
     // K3 acceptance (unit-level). The crate is bin-only (no `[lib]`),
     // so the `tests/phase_k_v014.rs` integration file is black-box and

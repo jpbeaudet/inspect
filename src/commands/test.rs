@@ -54,6 +54,27 @@ pub fn run(args: TestArgs) -> anyhow::Result<ExitKind> {
     let r = resolver::resolve(&args.namespace)?;
     let cfg = &r.config;
 
+    // K4 (v0.1.4): a k8s namespace is reached via kubectl locally, not SSH.
+    // Its `test` runs k8s-appropriate checks (config, kubectl backend, API
+    // reachability) and skips the SSH key/tcp checks that are nonsensical for
+    // a kubeconfig target (running them would report bogus "no key_path" /
+    // "no host" failures — itself a mindtrap). API failures are classified
+    // through the K4 taxonomy so an agent gets a stable `failure_class` + a
+    // chained hint rather than raw kubectl prose.
+    if cfg.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        let checks = k8s_checks(cfg, &r.name);
+        let overall = overall_status(&checks);
+        if args.format.is_json() {
+            emit_json(&r.name, &checks, overall);
+        } else {
+            emit_text_k8s(&r.name, &checks, overall);
+        }
+        return Ok(match overall {
+            CheckStatus::Pass | CheckStatus::Warn => ExitKind::Success,
+            _ => ExitKind::Error,
+        });
+    }
+
     let mut checks: Vec<Check> = Vec::new();
 
     // 1. Required fields
@@ -123,6 +144,109 @@ pub fn run(args: TestArgs) -> anyhow::Result<ExitKind> {
         CheckStatus::Pass | CheckStatus::Warn => ExitKind::Success,
         _ => ExitKind::Error,
     })
+}
+
+/// K4 (v0.1.4): the k8s check set — config, kubectl backend presence, and a
+/// context-pinned API-reachability probe. Any kubectl failure is routed
+/// through the K4 classifier so the reported detail is
+/// `[<failure_class>] <hint>` rather than raw kubectl stderr.
+fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Vec<Check> {
+    use crate::exec::kubectl;
+    let mut checks: Vec<Check> = Vec::new();
+
+    // 1. Config validity (type-conditional; k8s needs no host/user).
+    match cfg.validate(name) {
+        Ok(()) => checks.push(Check {
+            name: "config",
+            status: CheckStatus::Pass,
+            detail: "k8s addressing present".into(),
+        }),
+        Err(e) => checks.push(Check {
+            name: "config",
+            status: CheckStatus::Fail,
+            detail: e.to_string(),
+        }),
+    }
+
+    // 2. kubectl backend presence (K3). Without it, no API probe is possible.
+    let probe = kubectl::probe_kubectl();
+    if probe.available {
+        let mut detail = probe.version.clone().unwrap_or_else(|| "present".into());
+        if let Some(w) = probe.floor_warning() {
+            detail = format!("{detail} — {w}");
+        }
+        checks.push(Check {
+            name: "kubectl",
+            status: if probe.floor_warning().is_some() {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
+            },
+            detail,
+        });
+    } else {
+        checks.push(Check {
+            name: "kubectl",
+            status: CheckStatus::Fail,
+            detail: "kubectl not found on PATH (k8s backend) — install kubectl \
+                     (https://kubernetes.io/docs/tasks/tools/)"
+                .into(),
+        });
+        return checks; // no point probing the API without kubectl
+    }
+
+    // 3. API reachability — context-pinned per the K5 anti-footgun invariant
+    //    (never the ambient current-context). Failures are classified (K4).
+    let mut cmd = std::process::Command::new("kubectl");
+    if let Some(ctx) = cfg.context.as_deref() {
+        cmd.args(["--context", ctx]);
+    }
+    if let Some(kc) = cfg.kubeconfig.as_deref() {
+        cmd.args(["--kubeconfig", &expand_tilde(kc)]);
+    }
+    cmd.args(["version", "--output=json", "--request-timeout=5s"]);
+    match cmd.output() {
+        Ok(out) if out.status.success() => checks.push(Check {
+            name: "api",
+            status: CheckStatus::Pass,
+            detail: "API server reachable".into(),
+        }),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let fc = kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+            checks.push(Check {
+                name: "api",
+                status: CheckStatus::Fail,
+                detail: format!("[{}] {}", fc.failure_class(), fc.hint("")),
+            });
+        }
+        Err(e) => checks.push(Check {
+            name: "api",
+            status: CheckStatus::Fail,
+            detail: format!("could not spawn kubectl: {e}"),
+        }),
+    }
+    checks
+}
+
+/// k8s-specific text output — no `host:port` line, and a sessionless NEXT
+/// hint (k8s has no `connect` step — Q6/WA safety property).
+fn emit_text_k8s(name: &str, checks: &[Check], overall: CheckStatus) {
+    println!("SUMMARY: namespace '{name}' (k8s) -> {}", overall.label());
+    println!("DATA:");
+    for c in checks {
+        println!("  [{:<4}] {:<10} {}", c.status.label(), c.name, c.detail);
+    }
+    match overall {
+        CheckStatus::Pass | CheckStatus::Warn => {
+            println!(
+                "NEXT:    inspect setup {name}   (k8s is sessionless — no connect step)"
+            );
+        }
+        _ => {
+            println!("NEXT:    fix the failed checks above; rerun inspect test {name}");
+        }
+    }
 }
 
 fn key_file_detail(path: &Path) -> Check {

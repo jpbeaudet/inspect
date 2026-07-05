@@ -158,6 +158,17 @@ and exit code 2 rather than a raw OS error. inspect warns (does not fail)
 if `kubectl` is below the documented floor (v1.19). Auth still inherits
 your kubeconfig — inspect adds no new credential surface.
 
+**Validating a k8s namespace — `inspect test <ns>` (K4, v0.1.4).** For a
+k8s namespace, `test` runs k8s-appropriate checks — config validity, the
+`kubectl` backend probe (K3), and a **context-pinned** API-reachability
+probe — and skips the SSH key/tcp checks. Any kubectl failure is reported
+with a stable `failure_class` tag and a chained hint rather than raw
+kubectl prose. The taxonomy an agent can branch on: `rbac_forbidden`
+(with the exact `kubectl auth can-i` to run), `not_found`,
+`no_shell_in_container`, `metrics_unavailable`, `transport_unreachable`,
+`transport_auth_failed`, `unknown`. k8s is sessionless, so `test`'s
+success hint points at `inspect setup`, not `inspect connect`.
+
 Or interactively / non-interactively:
 
 ```sh

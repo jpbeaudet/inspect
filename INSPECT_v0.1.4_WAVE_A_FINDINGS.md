@@ -93,7 +93,46 @@ surfaced to root/JP for the call.
 
 ---
 
+## WA-4 — k8s operational-failure exit codes (open decision, flagged to JP) 📝
+
+**Surfaced:** K4 design, 2026-07-04. The K4 exit-code policy (recorded on
+`KubectlFailure`): transport reuses the F13 band by semantic class
+(`transport_unreachable` → 13, `transport_auth_failed` → 14);
+`rbac_forbidden` → 14 (authorization failure; `failure_class` distinguishes
+it from a credential expiry); `not_found` → 1 (no-match). The **open
+decision**: `metrics_unavailable` / `no_shell_in_container` currently map
+to a coarse exit 1 (general non-match) with the precise `failure_class`
+carrying the detail. Whether these operational classes deserve a
+**dedicated exit code** (vs exit-1-plus-failure_class) is a contract
+decision for JP. The `exit_code()` accessor itself lands in K6 with its
+first verb-exit consumer; the policy is recorded now so the decision isn't
+lost. **Not a blocker.**
+
+## WA-5 — `inspect test` ran SSH-only checks on a k8s namespace (mindtrap) ✅ Fixed
+
+**Surfaced + fixed in K4, 2026-07-04.** Before K4, `inspect test <k8s-ns>`
+ran the docker/SSH check set (key_file, tcp) and would report a k8s
+namespace as failing with "no key_path configured" / "no host configured"
+— nonsensical, misleading noise for a kubeconfig target. K4 added a k8s
+branch (config + kubectl backend + context-pinned API reachability) and a
+k8s-specific text emit (no `host:port` line; sessionless NEXT hint). Fixed
+in the same item that needed `test` as its classifier consumer.
+
+---
+
 ## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K4 failure classifier + `inspect test` k8s branch** live-passes against
+  maker: `inspect test maker` → all checks pass (`config`, `kubectl v1.36.2`,
+  `api API server reachable`), exit 0, sessionless NEXT hint; `inspect test`
+  with a **bad context** → `[transport_unreachable]` + the reachability
+  hint, exit 2. **The real-cluster fixtures caught two genuine classifier
+  bugs the synthetic assumptions missed:** (1) kubectl's bad-context message
+  is `context "X" does not exist`, not the `Error in configuration …` shape
+  first assumed; (2) `context was not found` was being misread as an object
+  `NotFound` (fixed by ordering transport before NotFound + guarding
+  NotFound on `from server`). This is the no-synthetic-verification rule
+  earning its keep.
 
 - **K3 kubectl backend probe** live-passes against maker via the installed binary:
   present → `inspect show maker` reports `kubectl: v1.36.2` (exit 0); absent

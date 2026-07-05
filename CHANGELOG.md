@@ -13,6 +13,23 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
 ### Added
 
+- **K4 — k8s failure-class taxonomy + stderr classifier.** kubectl
+  collapses NotFound / Forbidden / unreachable / metrics-absent into a
+  single non-zero exit with the distinction only in stderr prose;
+  `classify_kubectl_failure` parses it into a stable, agent-branchable
+  `failure_class` (`rbac_forbidden`, `not_found`, `no_shell_in_container`,
+  `metrics_unavailable`, `transport_unreachable`, `transport_auth_failed`,
+  `unknown`) plus a chained CI-gate-quality hint (the RBAC hint embeds the
+  literal `kubectl auth can-i`). Transport reuses the F13 12–14 band by
+  semantic class. First consumer: `inspect test <k8s-ns>` now runs
+  k8s-appropriate checks — config, kubectl backend, and a context-pinned
+  API-reachability probe — instead of the SSH key/tcp checks (which for a
+  k8s namespace reported bogus "no key_path" / "no host" failures, itself a
+  mindtrap); API failures are classified and reported as
+  `[<failure_class>] <hint>`. The `exit_code()` accessor and the
+  `TransportClass` dispatch bridge land in K6 with their first consumers;
+  the exit-code policy is recorded now.
+
 - **K3 — kubectl backend probe + four-question preflight.** k8s
   namespaces drive a **local** `kubectl` shell-out backend (never over
   SSH). A local probe (`kubectl version --client -o json`) detects
