@@ -13,6 +13,17 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
 ### Added
 
+- **K6 (part 1) — `inspect test <k8s-ns>` RBAC self-test + metrics probe.**
+  On top of the K4 config/kubectl/API checks, `test` now runs `kubectl auth
+  can-i` for the exact verbs inspect uses (`get pods`, `get pods/log`,
+  `create pods/exec`, `patch deployments`, `delete pods` — not a superset)
+  and a metrics-server probe, so an operator/agent learns about a missing
+  RBAC grant or absent metrics-server *before* hitting a mid-task Forbidden
+  or a `top` failure. Reads denied → fail; writes denied → warn (diagnostics
+  still work); metrics absent → warn (a cluster-component gap, not a failure).
+  (Discovery/inventory caching, the `connect` N/A note, and the WA-6 explicit-
+  context requirement are the remaining K6 parts.)
+
 - **K5 — context-pinning invariant + resolved-target audit fields
   (anti-footgun).** Wrong-context/namespace destruction is the #1 kubectl
   horror class. inspect is structurally immune: the k8s runtime pins

@@ -197,20 +197,17 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
 
     // 3. API reachability — context-pinned per the K5 anti-footgun invariant
     //    (never the ambient current-context). Failures are classified (K4).
-    let mut cmd = std::process::Command::new("kubectl");
-    if let Some(ctx) = cfg.context.as_deref() {
-        cmd.args(["--context", ctx]);
-    }
-    if let Some(kc) = cfg.kubeconfig.as_deref() {
-        cmd.args(["--kubeconfig", &expand_tilde(kc)]);
-    }
+    let mut cmd = k8s_kubectl_base(cfg);
     cmd.args(["version", "--output=json", "--request-timeout=5s"]);
-    match cmd.output() {
-        Ok(out) if out.status.success() => checks.push(Check {
-            name: "api",
-            status: CheckStatus::Pass,
-            detail: "API server reachable".into(),
-        }),
+    let api_ok = match cmd.output() {
+        Ok(out) if out.status.success() => {
+            checks.push(Check {
+                name: "api",
+                status: CheckStatus::Pass,
+                detail: "API server reachable".into(),
+            });
+            true
+        }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let fc = kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
@@ -219,14 +216,138 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
                 status: CheckStatus::Fail,
                 detail: format!("[{}] {}", fc.failure_class(), fc.hint("")),
             });
+            false
         }
-        Err(e) => checks.push(Check {
-            name: "api",
-            status: CheckStatus::Fail,
-            detail: format!("could not spawn kubectl: {e}"),
-        }),
+        Err(e) => {
+            checks.push(Check {
+                name: "api",
+                status: CheckStatus::Fail,
+                detail: format!("could not spawn kubectl: {e}"),
+            });
+            false
+        }
+    };
+
+    // 4-5. RBAC self-test + metrics-server probe (K6) — only meaningful once
+    //      the API is reachable. `auth can-i` pre-empts a mid-task Forbidden
+    //      (research w3-P2); the metrics probe pre-answers `top` (w3-P6).
+    if api_ok {
+        checks.push(k8s_rbac_check(cfg));
+        checks.push(k8s_metrics_check(cfg));
     }
     checks
+}
+
+/// A context-pinned (K5) kubectl base command — `--context` + `--kubeconfig`
+/// from config, never the ambient current-context. The k8s namespace `-n`
+/// scope is added per-call where relevant (not on cluster-scoped calls).
+fn k8s_kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> std::process::Command {
+    let mut cmd = std::process::Command::new("kubectl");
+    if let Some(ctx) = cfg.context.as_deref() {
+        cmd.args(["--context", ctx]);
+    }
+    if let Some(kc) = cfg.kubeconfig.as_deref() {
+        cmd.args(["--kubeconfig", &expand_tilde(kc)]);
+    }
+    cmd
+}
+
+/// K6 RBAC self-test: run `kubectl auth can-i` for the EXACT verbs inspect
+/// uses (not a superset — bible security-scope-narrower). Reads are essential
+/// (deny → fail); the writes are optional capabilities (deny → warn, you can
+/// still diagnose). Pre-empts the mid-task Forbidden that is the #1 RBAC pain.
+fn k8s_rbac_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
+    // (verb, resource, is_read)
+    let probes: [(&str, &str, bool); 5] = [
+        ("get", "pods", true),
+        ("get", "pods/log", true),
+        ("create", "pods/exec", false),
+        ("patch", "deployments", false),
+        ("delete", "pods", false),
+    ];
+    let ns = cfg.k8s_namespace.as_deref();
+    let mut denied_reads = Vec::new();
+    let mut denied_writes = Vec::new();
+    for (verb, res, is_read) in probes {
+        let mut cmd = k8s_kubectl_base(cfg);
+        cmd.args(["auth", "can-i", verb, res, "--request-timeout=5s"]);
+        if let Some(n) = ns {
+            cmd.args(["-n", n]);
+        }
+        // can-i exits 0 = allowed, non-zero = denied; stdout is yes/no.
+        let allowed = cmd.output().map(|o| o.status.success()).unwrap_or(false);
+        if !allowed {
+            let label = format!("{verb} {res}");
+            if is_read {
+                denied_reads.push(label);
+            } else {
+                denied_writes.push(label);
+            }
+        }
+    }
+    if !denied_reads.is_empty() {
+        Check {
+            name: "rbac",
+            status: CheckStatus::Fail,
+            detail: format!(
+                "missing essential read permission(s): {} — inspect cannot \
+                 diagnose this namespace. Grant a role covering `get pods` + \
+                 `get pods/log`.",
+                denied_reads.join(", ")
+            ),
+        }
+    } else if !denied_writes.is_empty() {
+        Check {
+            name: "rbac",
+            status: CheckStatus::Warn,
+            detail: format!(
+                "reads OK; write capability not granted: {} (diagnostics work; \
+                 scale/restart/exec/delete will be Forbidden)",
+                denied_writes.join(", ")
+            ),
+        }
+    } else {
+        Check {
+            name: "rbac",
+            status: CheckStatus::Pass,
+            detail: "all inspect verbs permitted (reads + writes)".into(),
+        }
+    }
+}
+
+/// K6 metrics-server probe: pre-answers whether `top` will work, so an agent
+/// isn't surprised by `metrics_unavailable` mid-task (research w3-P6). A
+/// missing metrics-server is a cluster-component gap (Warn), not a failure.
+fn k8s_metrics_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
+    let mut cmd = k8s_kubectl_base(cfg);
+    cmd.args(["top", "pods", "--request-timeout=5s"]);
+    if let Some(n) = cfg.k8s_namespace.as_deref() {
+        cmd.args(["-n", n]);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => Check {
+            name: "metrics",
+            status: CheckStatus::Pass,
+            detail: "metrics-server available (`inspect top` will work)".into(),
+        },
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let fc = crate::exec::kubectl::classify_kubectl_failure(
+                &stderr,
+                out.status.code().unwrap_or(1),
+            );
+            Check {
+                name: "metrics",
+                status: CheckStatus::Warn,
+                detail: format!("[{}] {}", fc.failure_class(), fc.hint("")),
+            }
+        }
+        Err(e) => Check {
+            name: "metrics",
+            status: CheckStatus::Warn,
+            detail: format!("could not spawn kubectl: {e}"),
+        },
+    }
 }
 
 /// k8s-specific text output — no `host:port` line, and a sessionless NEXT
