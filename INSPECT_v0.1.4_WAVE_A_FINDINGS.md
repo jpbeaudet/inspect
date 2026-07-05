@@ -60,7 +60,21 @@ tests. Low effort.
 
 ---
 
-## WA-3 — `inspect show <k8s-ns>` hard-fails on absent kubectl, breaking the config-read JSON contract 🟧 (design-review; K6-gated)
+## WA-3 — `inspect show <k8s-ns>` hard-fails on absent kubectl, breaking the config-read JSON contract ✅ RESOLVED (JP-2026-07-05)
+
+**JP DECISION (2026-07-05):** APPROVED as recommended — separate *display*
+from *enforce*. `inspect show` is a pure config read: it now ALWAYS displays
+the on-disk config + a kubectl **readiness line** (`kubectl: <version>` or
+`kubectl: NOT FOUND — <fix>`) and NEVER hard-fails / breaks `--json`. The
+hard four-question preflight moved to the ACTION verbs (`setup` enforces it
+before discovery; read/write verbs classify via K4). Fixes made: removed the
+`show` bail; `kubectl_available` in `--json` now reflects the REAL probe (was
+hardcoded `true` — a latent lie once the bail was gone); test
+`wa3_show_json_contract_holds_without_kubectl` locks the JSON-valid + exit-0 +
+`kubectl_available:false` contract when kubectl is absent. Live: `show k
+--json` (no kubectl) → valid JSON, exit 0; human shows the NOT-FOUND line.
+
+_Original finding:_
 
 **Surfaced:** K3 live test, 2026-07-04. K3 wired the kubectl preflight into
 `inspect show` (the only k8s-reachable surface before K6). Live behavior:

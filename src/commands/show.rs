@@ -19,26 +19,17 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
 
     let is_k8s = r.config.runtime_kind() == RuntimeKind::K8s;
 
-    // K3 (v0.1.4): a k8s namespace drives the kubectl shell-out backend,
-    // so `show` doubles as the reachable backend-preflight surface. Probe
-    // kubectl LOCALLY (never over SSH — surface map §10). If it is absent,
-    // fail loud/specific/actionable (the four-question error) before
-    // emitting any config, so an agent gets an exit-2 preflight failure
-    // rather than a k8s config that looks ready but has no backend. Docker
-    // namespaces never reach this probe.
+    // K3/WA-3 (v0.1.4, JP-2026-07-05): `show` is a pure CONFIG READ — it
+    // ALWAYS displays the on-disk config plus a kubectl *readiness line*, and
+    // NEVER hard-fails / breaks `--json` on an absent backend. Enforcement of
+    // "kubectl must be present" belongs to the ACTION verbs (test / setup /
+    // read / write), not to a read that reports state. Probe kubectl LOCALLY
+    // (never over SSH — surface map §10) only to REPORT its status.
     let k8s_probe = if is_k8s {
         Some(crate::exec::kubectl::probe_kubectl())
     } else {
         None
     };
-    if let Some(p) = &k8s_probe {
-        if !p.available {
-            anyhow::bail!(crate::exec::kubectl::not_found_message(
-                &r.name,
-                &p.path_searched
-            ));
-        }
-    }
 
     if args.format.is_json() {
         // K2 (v0.1.4): schema 2 adds `type` + the k8s addressing fields.
@@ -78,7 +69,12 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             // the preflight above guarantees availability (absent bails),
             // so this is `true` with the detected client version; docker
             // namespaces carry `false`/null (the field is inert there).
-            kavail = if is_k8s { "true" } else { "false" },
+            // WA-3: reflect the ACTUAL probe, not a hardcoded `true` — `show`
+            // no longer preflights, so kubectl may genuinely be absent.
+            kavail = k8s_probe
+                .as_ref()
+                .map(|p| if p.available { "true" } else { "false" })
+                .unwrap_or("false"),
             kver = k8s_probe
                 .as_ref()
                 .and_then(|p| p.version.as_ref())
@@ -118,13 +114,21 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             "  namespace:           {}",
             r.config.k8s_namespace.as_deref().unwrap_or("<default>")
         );
-        // K3 (v0.1.4): the kubectl backend readiness line. Reaching here
-        // means the preflight passed (absent kubectl bailed above), so
-        // this always reports a present binary + its client version.
+        // WA-3 (v0.1.4): the kubectl backend readiness line — reported, not
+        // enforced. Present → version; absent → NOT FOUND + the fix, so an
+        // operator sees exactly why an action verb will refuse without `show`
+        // itself failing.
         if let Some(p) = &k8s_probe {
-            match &p.version {
-                Some(v) => println!("  kubectl:             {v}"),
-                None => println!("  kubectl:             present (version unknown)"),
+            if p.available {
+                match &p.version {
+                    Some(v) => println!("  kubectl:             {v}"),
+                    None => println!("  kubectl:             present (version unknown)"),
+                }
+            } else {
+                println!(
+                    "  kubectl:             NOT FOUND — install kubectl \
+                     (https://kubernetes.io/docs/tasks/tools/) to run k8s verbs"
+                );
             }
         }
         for field in [

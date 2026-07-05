@@ -25,6 +25,17 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     // `kubectl get pods -o json` (never SSH). Divert before SshTarget, which
     // would fail on a hostless k8s config.
     if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        // WA-3 (JP-2026-07-05): enforcement lives in the ACTION verbs. `setup`
+        // needs kubectl to discover, so it fails loud/specific/actionable (the
+        // four-question error) when kubectl is absent — unlike `show`, which
+        // only reports readiness.
+        let probe = crate::exec::kubectl::probe_kubectl();
+        if !probe.available {
+            anyhow::bail!(crate::exec::kubectl::not_found_message(
+                &resolved.name,
+                &probe.path_searched
+            ));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let profile = crate::discovery::k8s::discover_k8s(&resolved.name, &resolved.config, &now)
             .with_context(|| format!("setup '{}' (k8s)", resolved.name))?;

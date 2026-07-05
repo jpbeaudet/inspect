@@ -287,3 +287,42 @@ fn k5_ambient_current_context_never_read_or_mutated() {
         hits.join("\n  ")
     );
 }
+
+/// WA-3 (JP-2026-07-05): `inspect show <k8s-ns> --json` is a pure config read
+/// — it must ALWAYS emit valid JSON and exit 0 even when kubectl is absent
+/// (an agent doing `inspect show maker --json | jq .context` must never get a
+/// non-JSON error). Enforcement of kubectl presence lives in the action verbs.
+#[test]
+fn wa3_show_json_contract_holds_without_kubectl() {
+    use assert_cmd::Command;
+    use std::io::Write;
+    let home = std::env::temp_dir().join(format!("inspect-wa3-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&home);
+    let servers = home.join("servers.toml");
+    let mut f = std::fs::File::create(&servers).unwrap();
+    writeln!(
+        f,
+        "schema_version = 2\n[namespaces.k]\ntype = \"k8s\"\ncontext = \"c\"\nnamespace = \"ns\""
+    )
+    .unwrap();
+    drop(f);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&servers, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    // PATH without kubectl (guaranteed absent).
+    let out = Command::cargo_bin("inspect")
+        .unwrap()
+        .env("INSPECT_HOME", &home)
+        .env("PATH", "/nonexistent-dir")
+        .args(["show", "k", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "show --json must exit 0 without kubectl");
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("show --json must emit valid JSON");
+    assert_eq!(v.get("context").and_then(|c| c.as_str()), Some("c"));
+    assert_eq!(v.get("kubectl_available").and_then(|b| b.as_bool()), Some(false));
+    let _ = std::fs::remove_dir_all(&home);
+}
