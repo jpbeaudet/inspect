@@ -420,6 +420,15 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     }
     let user_cmd = args.cmd.join(" ");
 
+    // K9 (v0.1.4): a k8s namespace runs the command via `kubectl exec <pod>`.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return run_k8s(&args, ns_name, &resolved.config, script_mode_requested);
+            }
+        }
+    }
+
     // Reason is informational for `run` (not audited). Validate length so the
     // operator gets a useful error before we dial out to remote hosts.
     let reason = crate::safety::validate_reason(args.reason.as_deref())?;
@@ -1217,4 +1226,66 @@ fn redact_rendered(cmd: &str, show_secrets: bool) -> String {
     } else {
         crate::redact::redact_for_audit(cmd).into_owned()
     }
+}
+
+/// K9 (v0.1.4): `inspect run <k8s-ns>/<pod> -- <cmd>` via `kubectl exec <pod>
+/// -- <cmd>` (read-only; context-pinned). Redacts output. A kubectl-level
+/// exec failure (distroless/no-shell, forbidden, unreachable) is classified
+/// (K4) and returns its WA-4 exit code; otherwise the in-pod command's own
+/// exit code passes through (the `run` inner-exit-code contract). Advanced
+/// modes (`--file`/`--stdin-script`) are not supported for pods — pass the
+/// command inline.
+fn run_k8s(
+    args: &crate::cli::RunArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+    script_mode: bool,
+) -> Result<ExitKind> {
+    use std::io::Write;
+    if script_mode {
+        crate::error::emit(
+            "run --file/--stdin-script is not supported for k8s pods — pass the \
+             command inline: `inspect run <ns>/<pod> -- <cmd>`",
+        );
+        return Ok(ExitKind::Error);
+    }
+    let rest = args.selector.split_once('/').map(|(_, r)| r).unwrap_or("");
+    let pod = rest.split(':').next().unwrap_or("");
+    if pod.is_empty() {
+        crate::error::emit("run: specify a pod — `inspect run <ns>/<pod> -- <cmd>`");
+        return Ok(ExitKind::Error);
+    }
+    let _ = ns;
+
+    let argv: Vec<&str> = args.cmd.iter().map(|s| s.as_str()).collect();
+    let mut cmd = crate::exec::kubectl::exec_base(cfg, pod, None);
+    cmd.args(&argv);
+    let out = cmd.output()?;
+    let code = out.status.code().unwrap_or(1);
+
+    // Distinguish a kubectl-LEVEL exec failure (no shell / forbidden /
+    // unreachable) from the in-pod command's own non-zero exit.
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let f = crate::exec::kubectl::classify_kubectl_failure(&stderr, code);
+        if !matches!(f, crate::exec::kubectl::KubectlFailure::Unknown) {
+            crate::tee_eprintln!("run: [{}] {}", f.failure_class(), f.hint(""));
+            return Ok(ExitKind::Inner(f.exit_code()));
+        }
+    }
+
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(m) = redactor.mask_line(line) {
+            println!("{m}");
+        }
+    }
+    let _ = std::io::stdout().flush();
+    for line in String::from_utf8_lossy(&out.stderr).lines() {
+        if let Some(m) = redactor.mask_line(line) {
+            crate::tee_eprintln!("{m}");
+        }
+    }
+    // Passthrough the in-pod command's exit code (run contract).
+    Ok(ExitKind::Inner(code as u8))
 }
