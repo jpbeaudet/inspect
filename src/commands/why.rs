@@ -31,6 +31,17 @@ use crate::verbs::runtime::{current_runner, resolve_target, RemoteRunner};
 pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
+    // K10 (v0.1.4): a k8s namespace assembles the diagnostic from kubectl
+    // (pod status + conditions + restart/exit reasons + recent events), not
+    // the SSH/compose walk.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return why_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     // When the selector resolves to zero services BUT
     // the inventory contains a running container with that exact name,
     // surface a chained hint pointing at logs / docker inspect / setup
@@ -830,4 +841,177 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// K10 (v0.1.4): `inspect why <k8s-ns>/<pod>` — the k8s deep diagnostic.
+/// Assembles pod phase + per-container readiness/restart/last-terminated
+/// reason + recent Events into the standard envelope with a severity rollup
+/// and chained next-action hints (e.g. `--previous` on a CrashLoop). Runs
+/// `kubectl get pod -o json` + `kubectl get events` (context-pinned).
+fn why_k8s(
+    args: &WhyArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let fmt = args.format.resolve()?;
+    let rest = args.selector.split_once('/').map(|(_, r)| r).unwrap_or("");
+    let pod = rest.split(':').next().unwrap_or("");
+    if pod.is_empty() {
+        crate::tee_eprintln!("why: specify a pod — `inspect why {ns}/<pod>`");
+        return Ok(ExitKind::Error);
+    }
+
+    // 1. Pod object.
+    let pod_out = crate::exec::kubectl::kubectl_base(cfg)
+        .args(["get", "pod", pod, "-o", "json"])
+        .output()?;
+    if !pod_out.status.success() {
+        let stderr = String::from_utf8_lossy(&pod_out.stderr);
+        let f = crate::exec::kubectl::classify_kubectl_failure(
+            &stderr,
+            pod_out.status.code().unwrap_or(1),
+        );
+        crate::tee_eprintln!("why: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+    let pod_json: serde_json::Value =
+        serde_json::from_slice(&pod_out.stdout).unwrap_or(serde_json::Value::Null);
+
+    let phase = pod_json
+        .pointer("/status/phase")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
+    let mut data_lines: Vec<String> = vec![format!("pod:    {pod}  (phase: {phase})")];
+    let mut failing = false;
+    let mut degraded = false;
+    let mut hints: Vec<(String, String)> = Vec::new();
+    let mut containers_json: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(cs) = pod_json
+        .pointer("/status/containerStatuses")
+        .and_then(|v| v.as_array())
+    {
+        for c in cs {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let ready = c.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+            let restarts = c.get("restartCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let waiting = c
+                .pointer("/state/waiting/reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let term_reason = c
+                .pointer("/lastState/terminated/reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let term_exit = c
+                .pointer("/lastState/terminated/exitCode")
+                .and_then(|v| v.as_i64());
+            if restarts > 0 {
+                degraded = true;
+            }
+            if !ready {
+                degraded = true;
+            }
+            let mut detail = format!(
+                "  container {name}: ready={ready} restarts={restarts}"
+            );
+            if !waiting.is_empty() {
+                detail.push_str(&format!(" waiting={waiting}"));
+                if waiting.contains("CrashLoop") || waiting.contains("Error") {
+                    failing = true;
+                    hints.push((
+                        format!("inspect logs {ns}/{pod} --previous"),
+                        "read the crashed instance's logs".into(),
+                    ));
+                } else if waiting.contains("ImagePull") || waiting.contains("ErrImage") {
+                    failing = true;
+                    hints.push((
+                        format!("inspect describe {ns}/{pod}"),
+                        "check the image name / registry credentials".into(),
+                    ));
+                }
+            }
+            if !term_reason.is_empty() {
+                detail.push_str(&format!(
+                    " last_terminated={term_reason}{}",
+                    term_exit.map(|e| format!(" (exit {e})")).unwrap_or_default()
+                ));
+                if term_exit.map(|e| e != 0).unwrap_or(false) {
+                    degraded = true;
+                }
+            }
+            data_lines.push(detail);
+            containers_json.push(serde_json::json!({
+                "name": name, "ready": ready, "restarts": restarts,
+                "waiting_reason": waiting, "last_terminated_reason": term_reason,
+                "last_terminated_exit": term_exit,
+            }));
+        }
+    }
+    if phase == "Failed" {
+        failing = true;
+    }
+
+    // 2. Recent events (newest-first).
+    let ev_out = crate::exec::kubectl::kubectl_base(cfg)
+        .args([
+            "get",
+            "events",
+            "--field-selector",
+            &format!("involvedObject.name={pod}"),
+            "--sort-by=.lastTimestamp",
+            "-o",
+            "json",
+        ])
+        .output();
+    let mut events_json: Vec<serde_json::Value> = Vec::new();
+    if let Ok(o) = ev_out {
+        if o.status.success() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                if let Some(items) = v.get("items").and_then(|i| i.as_array()) {
+                    data_lines.push(format!("events: {} recent", items.len().min(8)));
+                    for e in items.iter().rev().take(8) {
+                        let typ = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let reason = e.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        let msg = e.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        if typ == "Warning" {
+                            degraded = true;
+                        }
+                        data_lines.push(format!("  [{typ}] {reason}: {msg}"));
+                        events_json.push(serde_json::json!({
+                            "type": typ, "reason": reason, "message": msg,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let state = if failing {
+        "failing"
+    } else if degraded {
+        "degraded"
+    } else {
+        "ok"
+    };
+    let summary = format!("why {ns}/{pod}: {state} (phase {phase})");
+    let mut doc = OutputDoc::new(
+        summary,
+        serde_json::json!({
+            "pod": pod,
+            "phase": phase,
+            "state": state,
+            "containers": containers_json,
+            "events": events_json,
+        }),
+    )
+    .with_meta("selector", args.selector.clone())
+    .with_meta("runtime", "k8s".to_string())
+    .with_quiet(args.format.quiet);
+    for (cmd, why) in hints {
+        doc.push_next(crate::verbs::output::NextStep::new(cmd, why));
+    }
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }

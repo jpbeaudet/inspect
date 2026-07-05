@@ -294,6 +294,24 @@ pub struct K8sExecOut {
     pub failure: Option<KubectlFailure>,
 }
 
+/// A context-pinned `kubectl` base command (K5: `--context` always explicit,
+/// never the ambient current-context) with `--kubeconfig` + `-n` from config.
+/// The caller appends the subcommand (`get` / `describe` / `top` / `events`).
+/// Reused by K10 `why`, K11 `describe`, K12 `events`, K13 `top`, K14.
+pub fn kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> Command {
+    let mut c = Command::new("kubectl");
+    if let Some(ctx) = cfg.context.as_deref() {
+        c.args(["--context", ctx]);
+    }
+    if let Some(kc) = cfg.kubeconfig.as_deref() {
+        c.args(["--kubeconfig", &expand_tilde_kc(kc)]);
+    }
+    if let Some(n) = cfg.k8s_namespace.as_deref() {
+        c.args(["-n", n]);
+    }
+    c
+}
+
 /// Build the context-pinned `kubectl exec <pod> [-c <c>] --` prefix (K5: the
 /// context is always explicit, never the ambient current-context). The caller
 /// appends the in-pod argv. No `/bin/sh` wrapper — the command runs directly,
