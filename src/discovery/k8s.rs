@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 
 use crate::config::namespace::NamespaceConfig;
-use crate::profile::schema::{Profile, Service, ServiceKind};
+use crate::profile::schema::{HealthStatus, Profile, Service, ServiceKind};
 
 /// Run k8s discovery for a namespace and return a populated [`Profile`].
 /// The kubectl command pins `--context` (and `--kubeconfig`) explicitly — it
@@ -76,10 +76,7 @@ pub fn parse_pods(json: &str) -> Vec<Service> {
         if name.is_empty() {
             continue;
         }
-        let phase = pod
-            .pointer("/status/phase")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let (phase, health_status) = pod_health(pod);
         let image = pod
             .pointer("/spec/containers/0/image")
             .and_then(|v| v.as_str())
@@ -92,7 +89,7 @@ pub fn parse_pods(json: &str) -> Vec<Service> {
             image,
             ports: Vec::new(),
             health: phase,
-            health_status: None,
+            health_status,
             log_driver: None,
             log_readable_directly: false,
             mounts: Vec::new(),
@@ -102,6 +99,46 @@ pub fn parse_pods(json: &str) -> Vec<Service> {
         });
     }
     services
+}
+
+/// Map a pod's phase + container readiness into inspect's `HealthStatus`
+/// rollup, returning `(phase_string, status)`. A CrashLoopBackOff / Error
+/// waiting-reason on any container is Unhealthy even while the phase is still
+/// "Running" (the pod object lags the container state) — this is what an
+/// operator means by "unhealthy" and drives the `status` rollup + `why`.
+fn pod_health(pod: &serde_json::Value) -> (Option<String>, Option<HealthStatus>) {
+    let phase = pod
+        .pointer("/status/phase")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let statuses = pod
+        .pointer("/status/containerStatuses")
+        .and_then(|v| v.as_array());
+    let (all_ready, any_crashloop) = match statuses {
+        Some(arr) if !arr.is_empty() => {
+            let all_ready = arr
+                .iter()
+                .all(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false));
+            let any_crashloop = arr.iter().any(|c| {
+                c.pointer("/state/waiting/reason")
+                    .and_then(|r| r.as_str())
+                    .map(|r| r.contains("CrashLoop") || r.contains("Error") || r.contains("ImagePull"))
+                    .unwrap_or(false)
+            });
+            (all_ready, any_crashloop)
+        }
+        _ => (false, false),
+    };
+    let status = match phase.as_deref() {
+        _ if any_crashloop => HealthStatus::Unhealthy,
+        Some("Running") if all_ready => HealthStatus::Ok,
+        Some("Running") => HealthStatus::Starting, // running but not all containers ready
+        Some("Succeeded") => HealthStatus::Ok,      // completed job pod
+        Some("Pending") => HealthStatus::Starting,
+        Some("Failed") => HealthStatus::Unhealthy,
+        _ => HealthStatus::Unknown,
+    };
+    (phase, Some(status))
 }
 
 /// Local copy of the tilde expander (the config/test one is not public here).
@@ -142,6 +179,25 @@ mod tests {
             Some("rancher/mirrored-coredns-coredns:1.14.2")
         );
         assert_eq!(svcs[0].health.as_deref(), Some("Running"));
+        // ready:true + Running -> Ok
+        assert_eq!(svcs[0].health_status, Some(HealthStatus::Ok));
+    }
+
+    #[test]
+    fn k7_pod_health_rollup() {
+        // CrashLoopBackOff even while phase=Running -> Unhealthy.
+        let crash = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
+            "status":{"phase":"Running","containerStatuses":[
+              {"ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}"#;
+        assert_eq!(parse_pods(crash)[0].health_status, Some(HealthStatus::Unhealthy));
+        // Pending -> Starting.
+        let pending = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
+            "status":{"phase":"Pending"}}]}"#;
+        assert_eq!(parse_pods(pending)[0].health_status, Some(HealthStatus::Starting));
+        // Running but a container not ready (no crashloop) -> Starting.
+        let notready = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
+            "status":{"phase":"Running","containerStatuses":[{"ready":false}]}}]}"#;
+        assert_eq!(parse_pods(notready)[0].health_status, Some(HealthStatus::Starting));
     }
 
     #[test]
