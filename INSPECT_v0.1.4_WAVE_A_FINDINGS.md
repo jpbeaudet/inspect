@@ -120,7 +120,18 @@ in the same item that needed `test` as its classifier consumer.
 
 ---
 
-## WA-6 — a context-less k8s namespace falls through to the ambient context (footgun) 🟧 (K6-gated)
+## WA-6 — a context-less k8s namespace falls through to the ambient context (footgun) ✅ Fixed (K6)
+
+**FIXED in K6, 2026-07-05:** `NamespaceConfig::validate()` now requires a
+non-empty `context` for a k8s namespace (`ConfigError::MissingField{field:
+"context"}`), so `inspect add --type k8s` without `--context` is rejected at
+config time. Test `k6_k8s_namespace_requires_explicit_context`. Live: `add
+nocxt --type k8s` (no context) → exit 2, `missing required field 'context'`.
+Combined with the K5 invariant (scope_flags only ever emits a configured
+context, never the ambient one), a k8s verb can no longer run against an
+unpinned cluster.
+
+_Original finding:_
 
 **Surfaced:** K5, 2026-07-04. `K8sRuntime::scope_flags` only emits
 `--context` when a context is configured (`Some`). K2 made `context`

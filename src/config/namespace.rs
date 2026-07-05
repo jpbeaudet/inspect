@@ -227,10 +227,21 @@ impl NamespaceConfig {
         }
 
         // A k8s namespace needs neither host nor user, and its SSH-only
-        // fields (key/auth/password/ttl) are inert. Nothing more to
-        // validate here — the context is checked at setup/test (K6).
+        // fields (key/auth/password/ttl) are inert. But it MUST pin an
+        // explicit kubeconfig `context` (K5/WA-6 anti-footgun): without one,
+        // kubectl would fall through to the ambient `current-context` — the
+        // #1 wrong-cluster destruction class. The context's *reachability* is
+        // checked at setup/test (K6); its *presence* is required here.
         if self.runtime_kind() == RuntimeKind::K8s {
-            return Ok(());
+            match self.context.as_deref() {
+                Some(c) if !c.trim().is_empty() => return Ok(()),
+                _ => {
+                    return Err(ConfigError::MissingField {
+                        namespace: namespace.to_string(),
+                        field: "context",
+                    })
+                }
+            }
         }
 
         // ---- Docker (default) medium: the pre-K2 SSH validation. ----
@@ -703,6 +714,22 @@ mod tests {
         let mut alias = k8s_cfg(None, None);
         alias.runtime_type = Some("kubernetes".into());
         assert_eq!(alias.runtime_kind(), RuntimeKind::K8s);
+    }
+
+    #[test]
+    fn k6_k8s_namespace_requires_explicit_context() {
+        // WA-6 anti-footgun: a k8s namespace with no context is invalid —
+        // it would let kubectl fall through to the ambient current-context.
+        let no_ctx = k8s_cfg(None, Some("default"));
+        assert!(matches!(
+            no_ctx.validate("staging-k8s"),
+            Err(ConfigError::MissingField { field, .. }) if field == "context"
+        ));
+        // Empty/whitespace context is also rejected.
+        let blank = k8s_cfg(Some("   "), None);
+        assert!(blank.validate("staging-k8s").is_err());
+        // A real context validates.
+        assert!(k8s_cfg(Some("prod-eks"), None).validate("staging-k8s").is_ok());
     }
 
     #[test]
