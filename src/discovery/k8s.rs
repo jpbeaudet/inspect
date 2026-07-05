@@ -49,6 +49,7 @@ pub fn discover_k8s(name: &str, cfg: &NamespaceConfig, discovered_at: &str) -> R
     // `host` carries the cluster identity for a k8s profile (the context),
     // mirroring how a docker profile carries the SSH host.
     let mut profile = Profile::empty(name, context, discovered_at);
+    profile.runtime = Some("k8s".into());
     profile.services = services;
     Ok(profile)
 }

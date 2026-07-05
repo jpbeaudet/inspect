@@ -189,6 +189,26 @@ fn print_human(p: &Profile, status: &str) {
         p.namespace, containers, host_lst, units
     );
     println!("DATA:");
+    let is_k8s = p.runtime.as_deref() == Some("k8s");
+    if is_k8s {
+        // WA-7: a k8s profile has no remote SSH host to probe for
+        // rg/jq/docker — showing that docker-centric line is a mindtrap.
+        // Surface the k8s-relevant facts instead.
+        println!("  runtime:        kubernetes (context pinned: {})", p.host);
+        println!("  discovered_at:  {}", p.discovered_at);
+        println!(
+            "  pods:           {} (address by pod name — e.g. inspect status {}/<pod>)",
+            p.services.len(),
+            p.namespace
+        );
+        if !p.warnings.is_empty() {
+            println!("WARNINGS:");
+            for w in &p.warnings {
+                println!("  - {w}");
+            }
+        }
+        return;
+    }
     println!("  host:           {}", p.host);
     println!("  discovered_at:  {}", p.discovered_at);
     println!(

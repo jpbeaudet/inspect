@@ -152,7 +152,17 @@ for every *configured* context.
 
 ---
 
-## WA-7 — k8s `setup`/`profile` prints docker-centric `remote_tooling` line (mindtrap) 🟧 (K7-gated)
+## WA-7 — k8s `setup`/`profile` prints docker-centric `remote_tooling` line (mindtrap) ✅ Fixed (K7)
+
+**FIXED in K7, 2026-07-05:** added an additive `Profile.runtime` marker
+(`Some("k8s")` set by `discover_k8s`, `None` for docker). `print_human` now
+branches on it: a k8s profile shows `runtime: kubernetes (context pinned:
+<ctx>)` + `pods: N (address by pod name …)` and omits the `remote_tooling`
+line + the jq note (both SSH-host-only facts). Live: `inspect setup
+makersys` → clean k8s-relevant output, no `docker=n` mindtrap. The
+`runtime` marker is reused by status/why to know they're on k8s.
+
+_Original finding:_
 
 **Surfaced:** K6 discovery live test, 2026-07-05. `inspect setup <k8s-ns>`
 succeeds and discovers pods, but the human output includes
