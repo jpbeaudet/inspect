@@ -1557,6 +1557,9 @@ pub enum Command {
     /// (k8s, K13 v0.1.4) Pod CPU/memory usage via `kubectl top`. Degrades to
     /// `metrics_unavailable` (exit 15) when metrics-server is absent.
     Top(SimpleSelectorArgs),
+    /// (k8s, K12 v0.1.4) Cluster/object events, newest-first (`kubectl get
+    /// events`). Optionally scoped to a pod: `inspect events <ns>/<pod>`.
+    Events(SimpleSelectorArgs),
     /// List listening ports.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Ports(PortsArgs),
