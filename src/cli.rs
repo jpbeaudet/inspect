@@ -1560,6 +1560,9 @@ pub enum Command {
     /// (k8s, K12 v0.1.4) Cluster/object events, newest-first (`kubectl get
     /// events`). Optionally scoped to a pod: `inspect events <ns>/<pod>`.
     Events(SimpleSelectorArgs),
+    /// (k8s, K11 v0.1.4) Deep object dump for a pod reshaped into the JSON
+    /// envelope (kubectl describe has no -o json). `inspect describe <ns>/<pod>`.
+    Describe(SimpleSelectorArgs),
     /// List listening ports.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Ports(PortsArgs),

@@ -150,6 +150,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Network(args) => verbs::network::run(args),
         Command::Top(args) => verbs::top::run(args),
         Command::Events(args) => verbs::events::run(args),
+        Command::Describe(args) => verbs::describe::run(args),
         Command::Ports(args) => verbs::ports::run(args),
         Command::Search(args) => commands::search::run(args),
         Command::Restart(args) => verbs::write::lifecycle::restart(args),
