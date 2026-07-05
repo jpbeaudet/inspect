@@ -27,6 +27,17 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         parse_duration(s)?;
     }
 
+    // K9 (v0.1.4): k8s grep. File grep (`<ns>/<pod>:<path>`) runs
+    // `kubectl exec -- grep`; log grep (no `:path`) is served by
+    // `inspect logs <ns>/<pod> --match`.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return grep_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
 
     // --reset-cursor and --since-last mirror the logs verb.
@@ -283,5 +294,71 @@ fn pick_tool(profile: Option<&Profile>) -> Tool {
         Tool::Rg
     } else {
         Tool::Grep
+    }
+}
+
+/// K9 (v0.1.4): k8s grep. File grep runs `kubectl exec <pod> -- grep -E
+/// [-i] -e <pat> -- <path>`; grep's exit 1 (no-match) is NOT a failure.
+/// Log grep (no `:path`) redirects to `inspect logs <ns>/<pod> --match`.
+fn grep_k8s(
+    args: &GrepArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let rest = args.selector.split_once('/').map(|(_, r)| r).unwrap_or("");
+    let (pod, path) = match rest.split_once(':') {
+        Some((p, path)) if !path.is_empty() => (p, path),
+        _ => {
+            let pod = rest;
+            crate::tee_eprintln!(
+                "grep: for pod LOGS use `inspect logs {ns}/{pod} --match {pat}` \
+                 (server-side regex); for a FILE use `{ns}/{pod}:/path`.",
+                pod = if pod.is_empty() { "<pod>" } else { pod },
+                pat = args.pattern,
+            );
+            return Ok(ExitKind::Error);
+        }
+    };
+    if pod.is_empty() {
+        crate::tee_eprintln!("grep: specify a pod — `inspect grep <pat> {ns}/<pod>:/path`");
+        return Ok(ExitKind::Error);
+    }
+
+    let ci = resolve_case(args);
+    let mut argv: Vec<&str> = vec!["grep", "-E"];
+    if ci {
+        argv.push("-i");
+    }
+    argv.push("-e");
+    argv.push(&args.pattern);
+    argv.push("--");
+    argv.push(path);
+
+    let mut cmd = crate::exec::kubectl::exec_base(cfg, pod, None);
+    cmd.args(&argv);
+    let out = cmd.output()?;
+    let code = out.status.code().unwrap_or(2);
+    match code {
+        0 => {
+            let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
+            let as_json = args.format.is_json();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(masked) = redactor.mask_line(line) {
+                    if as_json {
+                        println!("{}", serde_json::json!({ "line": masked }));
+                    } else {
+                        println!("{masked}");
+                    }
+                }
+            }
+            Ok(ExitKind::Success)
+        }
+        1 => Ok(ExitKind::NoMatches), // grep: no lines matched
+        _ => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let f = crate::exec::kubectl::classify_kubectl_failure(&stderr, code);
+            crate::tee_eprintln!("grep: [{}] {}", f.failure_class(), f.hint(""));
+            Ok(ExitKind::Inner(f.exit_code()))
+        }
     }
 }
