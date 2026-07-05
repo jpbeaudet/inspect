@@ -17,6 +17,16 @@ use crate::verbs::output::OutputDoc;
 use crate::verbs::quote::shquote;
 
 pub fn run(args: HealthArgs) -> Result<ExitKind> {
+    // K7 (v0.1.4): a k8s namespace reports pod health from its discovered
+    // profile (the docker plan()/get_runtime path is SSH-bound).
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return health_k8s(&args, ns_name);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
 
     // Refresh / consult the runtime cache so that the
@@ -180,6 +190,77 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
         }
     }
 
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
+}
+
+/// K7 (v0.1.4): `inspect health <k8s-ns>` — per-pod health from the discovered
+/// profile. Each pod is a "probe": healthy iff its readiness-derived
+/// `health_status` is Ok; a missing readiness / CrashLoop / Failed is not-ok.
+/// Same envelope shape as docker health so an agent branches identically.
+fn health_k8s(args: &HealthArgs, ns: &str) -> Result<ExitKind> {
+    use crate::profile::schema::HealthStatus;
+    let fmt = args.format.resolve()?;
+
+    let profile = match crate::profile::cache::load_profile(ns)? {
+        Some(p) => p,
+        None => {
+            let mut doc = OutputDoc::new(
+                format!("no cached profile for '{ns}' — run `inspect setup {ns}` first"),
+                json!({ "probes": [], "totals": { "total": 0, "ok": 0, "bad": 0 } }),
+            )
+            .with_meta("selector", args.selector.clone())
+            .with_meta("runtime", "k8s".to_string());
+            doc.push_next(crate::verbs::output::NextStep::new(
+                format!("inspect setup {ns}"),
+                "discover the cluster's pods first",
+            ));
+            return crate::format::render::render_doc(&doc, &fmt, &[], args.format.select_spec());
+        }
+    };
+
+    let (mut total, mut ok, mut bad) = (0usize, 0, 0);
+    let mut probes_json: Vec<Value> = Vec::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    for s in &profile.services {
+        total += 1;
+        let healthy = matches!(s.health_status, Some(HealthStatus::Ok));
+        if healthy {
+            ok += 1;
+        } else {
+            bad += 1;
+        }
+        let hs = match s.health_status {
+            Some(HealthStatus::Ok) => "ok",
+            Some(HealthStatus::Unhealthy) => "unhealthy",
+            Some(HealthStatus::Starting) => "starting",
+            _ => "unknown",
+        };
+        let phase = s.health.clone().unwrap_or_default();
+        let detail = format!("{phase} ({hs})");
+        probes_json.push(json!({
+            "server": ns,
+            "service": s.name,
+            "healthy": healthy,
+            "detail": detail,
+            "probe_url": Value::Null,
+        }));
+        let badge = if healthy { "OK " } else { "BAD" };
+        data_lines.push(format!("[{badge}] {ns}/{name:<28} {detail}", name = s.name));
+    }
+
+    let summary = format!("{total} probe(s): {ok} ok, {bad} not-ok");
+    let doc = OutputDoc::new(
+        summary,
+        json!({
+            "probes": probes_json,
+            "totals": { "total": total, "ok": ok, "bad": bad },
+        }),
+    )
+    .with_meta("selector", args.selector.clone())
+    .with_meta("runtime", "k8s".to_string())
+    .with_meta("context", profile.host.clone())
+    .with_meta("source", "cached (profile) — refresh with `inspect setup --force`".to_string())
+    .with_quiet(args.format.quiet);
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
