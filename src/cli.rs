@@ -2746,6 +2746,16 @@ pub struct LogsArgs {
     /// Hidden: ssh-side timeout for follow mode (seconds).
     #[arg(long, hide = true)]
     pub follow_timeout_secs: Option<u64>,
+    /// (k8s, K8 v0.1.4) Container in a multi-container pod (`kubectl -c`).
+    /// When omitted, inspect auto-picks the first container and hints the
+    /// others rather than erroring like `kubectl logs`. Ignored for docker.
+    #[arg(long = "container", short = 'c', value_name = "NAME")]
+    pub container: Option<String>,
+    /// (k8s, K8 v0.1.4) Show the PREVIOUS terminated container's logs
+    /// (`kubectl logs --previous`) — the crash-loop post-mortem view.
+    /// Shows the last terminated instance only. Ignored for docker.
+    #[arg(long = "previous")]
+    pub previous: bool,
 }
 
 #[derive(Debug, Args)]
