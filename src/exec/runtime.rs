@@ -397,4 +397,47 @@ mod tests {
             "got: {ex}"
         );
     }
+
+    #[test]
+    fn k5_every_kubectl_command_carries_explicit_context() {
+        // K5 anti-footgun invariant: EVERY command the k8s runtime assembles
+        // pins --context explicitly — none may fall through to the ambient
+        // current-context (the #1 kubectl destruction class). Exhaustive over
+        // all build methods, including the ones the K1 seed test omitted.
+        let rt = K8sRuntime {
+            context: Some("prod-eks".to_string()),
+            namespace: Some("payments".to_string()),
+        };
+        let mut cmds = vec![
+            rt.inventory_cmd(),
+            rt.build_read_exec("pod-x", "ls"),
+            rt.build_write_exec("pod-x", "rm /tmp/x"),
+        ];
+        for action in [
+            LifecycleAction::Restart,
+            LifecycleAction::Reload,
+            LifecycleAction::Stop,
+            LifecycleAction::Start,
+        ] {
+            cmds.push(rt.build_lifecycle(action, "api"));
+        }
+        for c in &cmds {
+            assert!(
+                c.starts_with("kubectl") && c.contains("--context 'prod-eks'"),
+                "k8s command must pin --context, got: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn k5_context_pinning_holds_regardless_of_namespace() {
+        // Even with no -n scope, --context is still pinned (the invariant is
+        // about the cluster, not the namespace).
+        let rt = K8sRuntime {
+            context: Some("staging".to_string()),
+            namespace: None,
+        };
+        assert!(rt.inventory_cmd().contains("--context 'staging'"));
+        assert!(!rt.inventory_cmd().contains("-n ")); // no namespace scope
+    }
 }

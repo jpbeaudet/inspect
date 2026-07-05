@@ -734,6 +734,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn k5_audit_entry_records_context_and_namespace() {
+        // K5 anti-footgun: a k8s verb's audit record names exactly which
+        // cluster (context) + namespace it touched; the fields round-trip
+        // through JSON. A docker entry (None) omits them entirely
+        // (skip_serializing_if) so pre-K5 entries deserialize unchanged.
+        let mut e = AuditEntry::new("scale", "staging-k8s/api");
+        e.context = Some("prod-eks".into());
+        e.k8s_namespace = Some("payments".into());
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"context\":\"prod-eks\""), "json: {json}");
+        assert!(
+            json.contains("\"k8s_namespace\":\"payments\""),
+            "json: {json}"
+        );
+        let back: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.context.as_deref(), Some("prod-eks"));
+        assert_eq!(back.k8s_namespace.as_deref(), Some("payments"));
+
+        // Docker entry: fields omitted from JSON, deserialize to None.
+        let d = AuditEntry::new("restart", "arte/atlas");
+        let djson = serde_json::to_string(&d).unwrap();
+        assert!(!djson.contains("context"), "docker json must omit: {djson}");
+        assert!(!djson.contains("k8s_namespace"));
+        let dback: AuditEntry = serde_json::from_str(&djson).unwrap();
+        assert_eq!(dback.context, None);
+    }
+
+    #[test]
     fn roundtrip_append_and_read() {
         let _guard = crate::paths::TEST_ENV_LOCK
             .lock()

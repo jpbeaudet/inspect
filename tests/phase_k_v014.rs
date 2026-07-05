@@ -249,3 +249,41 @@ fn wa1_add_reports_resolved_config_path_under_inspect_home() {
         );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// K5 anti-footgun invariant (source scan): inspect must NEVER read or mutate
+/// the ambient kubeconfig `current-context`. It pins `--context` explicitly on
+/// every kubectl call instead (see `K8sRuntime::scope_flags`), so a switch in
+/// some other shell can never redirect an inspect verb at the wrong cluster —
+/// this is the structural immunity to the "context-pong" destruction class.
+#[test]
+fn k5_ambient_current_context_never_read_or_mutated() {
+    fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                scan(&p, hits);
+            } else if p.extension().map(|e| e == "rs").unwrap_or(false) {
+                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                for line in src.lines() {
+                    let l = line.trim_start();
+                    if l.starts_with("//") || l.contains("k5_ambient") {
+                        continue; // skip comments + this test's own name
+                    }
+                    // The forbidden forms are the kubectl subcommands that READ
+                    // or SET the ambient current-context. Pinning `--context` is
+                    // fine; `config current-context` / `config use-context` are not.
+                    if l.contains("config current-context") || l.contains("config use-context") {
+                        hits.push(format!("{}: {}", p.display(), line.trim()));
+                    }
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    scan(std::path::Path::new("src"), &mut hits);
+    assert!(
+        hits.is_empty(),
+        "inspect must never read/mutate the ambient current-context (K5). Offenders:\n  {}",
+        hits.join("\n  ")
+    );
+}
