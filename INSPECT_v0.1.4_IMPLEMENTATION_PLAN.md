@@ -115,9 +115,14 @@ These drive the Deliverable-2 CLAUDE.md amendment (next turn). Each is
 
 ## 4. Wave overview (A → E)
 
+**STATUS (2026-07-05): WAVE A COMPLETE ✅** — K1–K5 all landed, live-tested
+against the maker cluster, wave-close gate green (clippy -D warnings clean;
+full suite 31 suites / 0 failed / 1394 tests). Findings WA-1/WA-2/WA-5 fixed;
+WA-3/WA-4/WA-6 tracked to K6. Next: Wave B (K6–K9).
+
 | Wave | Theme | Items | Gates |
 |---|---|---|---|
-| **A** | Foundation: runtime abstraction, config, backend probe, failure taxonomy, context-pinning | K1–K5 | Blocks all others. |
+| **A** ✅ | Foundation: runtime abstraction, config, backend probe, failure taxonomy, context-pinning | K1–K5 | **DONE** — blocks-all satisfied. |
 | **B** | Discovery + read core (daily driver) | K6–K9 | Needs A. |
 | **C** | k8s-native reads (`why`/`describe`/`events`/`top` + resource mappings) | K10–K14 | Needs A,B. |
 | **D** | Conservative audited writes | K15–K20 | Needs A,B; F11 revert contract. |
