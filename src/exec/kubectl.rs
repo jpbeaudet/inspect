@@ -180,20 +180,8 @@ pub fn not_found_message(namespace: &str, path_searched: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// A classified k8s failure. The `failure_class()` string is the stable
-/// agent-branch discriminator.
-///
-/// **Exit-code policy (K4 decision; the `exit_code()` accessor lands in K6
-/// with its first consumer — a verb exit path — so it is not written unused
-/// here):** transport reuses the F13 12–14 band by *semantic class*
-/// (unreachable → 13, auth → 14; k8s has no "stale" so 12 is unused);
-/// `rbac_forbidden` is an authorization failure → 14 (the `failure_class`
-/// distinguishes it from a credential expiry); `not_found` → 1 (no-match,
-/// inspect's existing semantics); `metrics_unavailable` / `no_shell_in_container`
-/// / `unknown` → 1 (general non-match, with the precise `failure_class`
-/// carrying the detail). A dedicated code for the operational classes is an
-/// open decision flagged to JP (WA-4). Likewise the `TransportClass` bridge
-/// for the dispatch/retry layer lands in K6 when a k8s verb goes through
-/// `dispatch_with_reauth`.
+/// agent-branch discriminator; `exit_code()` is the coarse band (WA-4). See
+/// `exit_code()` for the full documented exit-code table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KubectlFailure {
     /// RBAC denied the action (API reachable, authenticated, but not
@@ -226,6 +214,26 @@ impl KubectlFailure {
             KubectlFailure::TransportUnreachable => "transport_unreachable",
             KubectlFailure::TransportAuthExpired => "transport_auth_failed",
             KubectlFailure::Unknown => "unknown",
+        }
+    }
+
+    /// The coarse exit code an agent branches on (WA-4, JP-2026-07-05). Two
+    /// documented bands adjacent to each other; `failure_class()` carries the
+    /// fine detail. **Transport band** (parallel to the F13 SSH band 12–14):
+    /// `transport_unreachable` → 13, `transport_auth_failed` → 14,
+    /// `rbac_forbidden` → 14 (an authorization failure; `failure_class`
+    /// distinguishes it from a credential expiry). **Operational-degradation
+    /// band** (15–16, JP-assigned — distinct consumer remediations, so distinct
+    /// codes rather than coarse exit-1): `metrics_unavailable` → 15
+    /// (skip-metrics path), `no_shell_in_container` → 16 (skip-exec path).
+    /// `not_found` / `unknown` → 1 (no-match, inspect's existing semantics).
+    pub fn exit_code(self) -> u8 {
+        match self {
+            KubectlFailure::TransportUnreachable => 13,
+            KubectlFailure::TransportAuthExpired | KubectlFailure::RbacForbidden => 14,
+            KubectlFailure::MetricsUnavailable => 15,
+            KubectlFailure::NoShellInContainer => 16,
+            KubectlFailure::NotFound | KubectlFailure::Unknown => 1,
         }
     }
 
@@ -356,6 +364,20 @@ mod tests {
         assert_eq!(c, KubectlFailure::RbacForbidden);
         assert_eq!(c.failure_class(), "rbac_forbidden");
         assert!(c.hint("list secrets -n kube-system").contains("auth can-i"));
+    }
+
+    #[test]
+    fn wa4_exit_code_bands() {
+        // Transport band (parallel to F13 12-14).
+        assert_eq!(KubectlFailure::TransportUnreachable.exit_code(), 13);
+        assert_eq!(KubectlFailure::TransportAuthExpired.exit_code(), 14);
+        assert_eq!(KubectlFailure::RbacForbidden.exit_code(), 14);
+        // Operational-degradation band (15-16, JP-assigned distinct codes).
+        assert_eq!(KubectlFailure::MetricsUnavailable.exit_code(), 15);
+        assert_eq!(KubectlFailure::NoShellInContainer.exit_code(), 16);
+        // No-match / unknown.
+        assert_eq!(KubectlFailure::NotFound.exit_code(), 1);
+        assert_eq!(KubectlFailure::Unknown.exit_code(), 1);
     }
 
     #[test]

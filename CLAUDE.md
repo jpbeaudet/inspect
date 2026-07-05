@@ -367,12 +367,17 @@ The load-bearing invariants a future agent must not violate:
   `failure_class` (already `Option<String>`, F13) gains new **values**
   (`rbac_forbidden`, `no_shell_in_container`, `metrics_unavailable`, and
   the k8s transport classes) — a value-space extension, not a field add.
-- **k8s transport reuses the F13 exit-code class band by semantic class**
-  (unreachable / auth / other), with `failure_class` carrying the
-  medium-specific detail — the exit code is the coarse class an agent
-  branches on, the JSON field the fine detail. (Does not reuse a code for
-  a *new* meaning — the meaning is "transport failure, class X", medium-
-  agnostic.)
+- **k8s exit-code bands (WA-4, JP-2026-07-05).** Two documented bands, with
+  `failure_class` always carrying the fine detail — the exit code is the
+  coarse class an agent branches on. **Transport band** (parallel to the F13
+  SSH band 12–14): `transport_unreachable` → 13, `transport_auth_failed` →
+  14, `rbac_forbidden` → 14 (`failure_class` distinguishes it from a
+  credential expiry). **Operational-degradation band** (15–16, distinct
+  consumer remediations so distinct codes, not coarse exit-1):
+  `metrics_unavailable` → 15 (skip-metrics path), `no_shell_in_container` →
+  16 (skip-exec path). `not_found` / `unknown` → 1. The single source of
+  truth is `KubectlFailure::exit_code()`; no magic numbers scattered
+  elsewhere.
 - **Conservative write set, F11-captured:** `scale` (command_pair revert),
   `restart`=rollout-restart (command_pair via captured `rollout undo
   --to-revision`), `rollout undo`, `delete pod` (unsupported revert +

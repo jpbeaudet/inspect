@@ -773,11 +773,13 @@ fn logs_k8s(
                 });
             }
         }
-        // Other failure: classify + hint (K4), never a raw kubectl blob.
+        // Other failure: classify + hint (K4), never a raw kubectl blob. The
+        // exit code carries the classified band (WA-4) so a shell consumer can
+        // branch (e.g. transport vs no-shell vs metrics).
         let fc =
             crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
         crate::tee_eprintln!("logs: [{}] {}", fc.failure_class(), fc.hint(""));
-        return Ok(ExitKind::Error);
+        return Ok(ExitKind::Inner(fc.exit_code()));
     }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         emit(line);
@@ -844,6 +846,8 @@ mod tests {
             show_secrets: false,
             format: FormatArgs::default(),
             follow_timeout_secs: None,
+            container: None,
+            previous: false,
         }
     }
 

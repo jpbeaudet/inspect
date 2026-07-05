@@ -107,7 +107,22 @@ surfaced to root/JP for the call.
 
 ---
 
-## WA-4 — k8s operational-failure exit codes (open decision, flagged to JP) 📝
+## WA-4 — k8s operational-failure exit codes ✅ RESOLVED (JP-2026-07-05)
+
+**JP DECISION (2026-07-05):** ASSIGN DEDICATED exit codes (not coarse
+exit-1) — a no-jq shell consumer must branch directly (skip-metrics vs
+skip-exec are distinct remediations). Implemented as a coherent documented
+band: **transport** (parallel to F13 12–14) `transport_unreachable`=13,
+`transport_auth_failed`=14, `rbac_forbidden`=14; **operational-degradation
+band** `metrics_unavailable`=15, `no_shell_in_container`=16;
+`not_found`/`unknown`=1. Single source of truth: `KubectlFailure::exit_code()`
+(no scattered magic numbers). `failure_class` still carries the fine detail.
+Documented in CLAUDE.md k8s section; test `wa4_exit_code_bands`. First
+consumer: `logs_k8s` returns `ExitKind::Inner(fc.exit_code())` on failure;
+K9 (`no_shell_in_container`=16) + K13 (`metrics_unavailable`=15) return their
+codes when built.
+
+_Original finding:_
 
 **Surfaced:** K4 design, 2026-07-04. The K4 exit-code policy (recorded on
 `KubectlFailure`): transport reuses the F13 band by semantic class
