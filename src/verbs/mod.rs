@@ -26,6 +26,7 @@ pub mod ls;
 pub mod merged;
 pub mod network;
 pub mod output;
+pub mod top;
 pub mod ports;
 pub mod progress;
 pub mod ps;
