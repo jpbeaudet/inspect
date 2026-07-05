@@ -21,8 +21,10 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
   RBAC grant or absent metrics-server *before* hitting a mid-task Forbidden
   or a `top` failure. Reads denied → fail; writes denied → warn (diagnostics
   still work); metrics absent → warn (a cluster-component gap, not a failure).
-  (Discovery/inventory caching, the `connect` N/A note, and the WA-6 explicit-
-  context requirement are the remaining K6 parts.)
+  `inspect setup <k8s-ns>` discovers pods via a local, context-pinned `kubectl
+  get pods -o json` (never SSH) and caches a profile in the shared model;
+  `connect`/`disconnect` report N/A (k8s is sessionless, Q6); and a k8s
+  namespace now requires an explicit `context` at config time (anti-footgun).
 
 - **K5 — context-pinning invariant + resolved-target audit fields
   (anti-footgun).** Wrong-context/namespace destruction is the #1 kubectl

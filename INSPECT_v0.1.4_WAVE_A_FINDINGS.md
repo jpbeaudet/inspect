@@ -152,7 +152,30 @@ for every *configured* context.
 
 ---
 
+## WA-7 — k8s `setup`/`profile` prints docker-centric `remote_tooling` line (mindtrap) 🟧 (K7-gated)
+
+**Surfaced:** K6 discovery live test, 2026-07-05. `inspect setup <k8s-ns>`
+succeeds and discovers pods, but the human output includes
+`remote_tooling: rg=n jq=n sed=n grep=n ss=n docker=n journalctl=n` and the
+"jq is optional" note. These are **SSH-host tool probes** — meaningless for a
+k8s namespace (there is no remote host to probe for rg/jq/docker), and
+showing `docker=n` on a Kubernetes profile is misleading (implies inspect
+looked for docker on the cluster). **Fix (K7):** the k8s profile print path
+should omit the `remote_tooling` line (or replace it with k8s-relevant facts
+— kubectl version, metrics-server availability from K6). Tracked to K7 where
+the k8s `status`/`profile` presentation is built. Not a blocker — discovery
+itself is correct.
+
+---
+
 ## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K6 k8s discovery** (`inspect setup <k8s-ns>`) live-passes against maker:
+  pointed at `kube-system`, `inspect setup` discovered **7 pods → 7 services**
+  and cached the profile (exit 0, `host: z2-maker` = the pinned context). The
+  parser (`parse_pods`) is pure + total (garbage → empty, never panics) and
+  unit-tested against real captured cluster JSON. (Presentation cleanup for
+  the docker-centric tooling line tracked as WA-7 → K7.)
 
 - **K5 context-pinning invariant** — verified by an exhaustive test over
   every `K8sRuntime` command builder (`--context` pinned on inventory /

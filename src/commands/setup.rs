@@ -20,6 +20,24 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
     let resolved = resolver::resolve(&args.namespace)?;
     resolved.config.validate(&resolved.name)?;
+
+    // K6 (v0.1.4): a k8s namespace discovers via a local, context-pinned
+    // `kubectl get pods -o json` (never SSH). Divert before SshTarget, which
+    // would fail on a hostless k8s config.
+    if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        let now = chrono::Utc::now().to_rfc3339();
+        let profile = crate::discovery::k8s::discover_k8s(&resolved.name, &resolved.config, &now)
+            .with_context(|| format!("setup '{}' (k8s)", resolved.name))?;
+        crate::profile::cache::save_profile(&profile)
+            .with_context(|| format!("caching profile for '{}'", resolved.name))?;
+        if args.format.is_json() {
+            print_json(&profile, "discovered", args.format.select_spec())?;
+        } else {
+            print_human(&profile, "discovered");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     let target = SshTarget::from_resolved(&resolved)?;
 
     if args.check_drift {
