@@ -120,7 +120,37 @@ in the same item that needed `test` as its classifier consumer.
 
 ---
 
+## WA-6 — a context-less k8s namespace falls through to the ambient context (footgun) 🟧 (K6-gated)
+
+**Surfaced:** K5, 2026-07-04. `K8sRuntime::scope_flags` only emits
+`--context` when a context is configured (`Some`). K2 made `context`
+optional at config time (resolvability deferred to setup/test). So a k8s
+namespace added **without** a context would build kubectl commands with **no
+`--context`**, letting kubectl fall through to the ambient `current-context`
+— exactly the footgun K5's invariant exists to prevent. `inspect show` also
+renders `<current-context>` for such a namespace, *implying* inspect uses
+the ambient context.
+
+**Why not fixed in K5:** the enforcement point is `setup`/`test` (K6) —
+where inspect resolves + validates the context against the live cluster.
+**Recommended (K6):** `setup`/`test` must **require** an explicit context
+for a k8s namespace (or resolve-and-record one, never leaving it ambient),
+and the runtime should refuse to build a command without a pinned context.
+Tracked to K6 (named unblock). Not a blocker for K5, whose invariant holds
+for every *configured* context.
+
+---
+
 ## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K5 context-pinning invariant** — verified by an exhaustive test over
+  every `K8sRuntime` command builder (`--context` pinned on inventory /
+  read-exec / write-exec / restart / reload / stop / start) plus a
+  source-scan test that fails the build if any `kubectl config
+  current-context / use-context` call is ever introduced. `AuditEntry`
+  `context` / `k8s_namespace` fields round-trip through JSON and are omitted
+  for docker entries. (Live end-to-end echo in verb `meta` lands with the
+  read verbs in K6+; the invariant itself is structural + test-enforced.)
 
 - **K4 failure classifier + `inspect test` k8s branch** live-passes against
   maker: `inspect test maker` → all checks pass (`config`, `kubectl v1.36.2`,

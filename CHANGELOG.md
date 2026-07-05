@@ -13,6 +13,23 @@ per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
 ### Added
 
+- **K5 — context-pinning invariant + resolved-target audit fields
+  (anti-footgun).** Wrong-context/namespace destruction is the #1 kubectl
+  horror class. inspect is structurally immune: the k8s runtime pins
+  `--context` explicitly on **every** kubectl command (`scope_flags`) and
+  **never reads or mutates the ambient `current-context`** — a switch in
+  another shell can never redirect an inspect verb at the wrong cluster.
+  Enforced by an exhaustive invariant test over every command builder plus
+  a source-scan test (`k5_ambient_current_context_never_read_or_mutated`)
+  that fails the build if any `kubectl config current-context/use-context`
+  call is introduced. `AuditEntry` gains additive `context` /
+  `k8s_namespace` `Option` fields (`skip_serializing_if`, no schema break)
+  so a k8s write's audit record names exactly which cluster + namespace it
+  touched; docker entries omit them and deserialize unchanged. The
+  resolved-target echo in verb `meta` / write dry-run preview + confirmation
+  prompt is applied by the read verbs (K6+) and write verbs (K15+) that emit
+  those surfaces.
+
 - **K4 — k8s failure-class taxonomy + stderr classifier.** kubectl
   collapses NotFound / Forbidden / unreachable / metrics-absent into a
   single non-zero exit with the distinction only in stderr prose;

@@ -158,6 +158,15 @@ and exit code 2 rather than a raw OS error. inspect warns (does not fail)
 if `kubectl` is below the documented floor (v1.19). Auth still inherits
 your kubeconfig — inspect adds no new credential surface.
 
+**The no-wrong-cluster guarantee (K5, v0.1.4).** inspect pins the
+configured `context` explicitly on every `kubectl` call and never reads or
+mutates your ambient `current-context`. So `inspect scale staging-k8s/api`
+always acts on the cluster you configured for `staging-k8s` — a `kubectx`
+switch in another terminal cannot silently redirect it (the "context-pong"
+that causes wrong-cluster incidents). Every k8s **write** also records the
+resolved `context` + `k8s_namespace` in its audit entry, so the log names
+exactly which cluster and namespace were touched.
+
 **Validating a k8s namespace — `inspect test <ns>` (K4, v0.1.4).** For a
 k8s namespace, `test` runs k8s-appropriate checks — config validity, the
 `kubectl` backend probe (K3), and a **context-pinned** API-reachability
