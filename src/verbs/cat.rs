@@ -93,7 +93,7 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
 
-    // K9 (v0.1.4): `inspect cat <k8s-ns>/<pod>:<path>` reads via
+    // `inspect cat <k8s-ns>/<pod>:<path>` reads via
     // `kubectl exec <pod> -- cat <path>` (context-pinned) — not the SSH path.
     if let Some(ns_name) = args.target.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -243,10 +243,10 @@ fn build_cat(service: Option<&str>, path: &str) -> String {
     }
 }
 
-/// K9 (v0.1.4): `inspect cat <k8s-ns>/<pod>:<path>` via `kubectl exec <pod> --
+/// `inspect cat <k8s-ns>/<pod>:<path>` via `kubectl exec <pod> --
 /// cat <path>` (context-pinned). Redacts the output (PEM/secret masking) the
 /// same as docker cat. A distroless/no-shell exec failure is classified as
-/// `no_shell_in_container` → exit 16 (WA-4), never a raw OCI error.
+/// `no_shell_in_container` → exit 16, never a raw OCI error.
 fn cat_k8s(
     args: &CatArgs,
     ns: &str,

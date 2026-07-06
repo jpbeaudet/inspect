@@ -14,7 +14,7 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
 
-    // K9 (v0.1.4): `inspect ls <k8s-ns>/<pod>:<path>` via `kubectl exec`.
+    // `inspect ls <k8s-ns>/<pod>:<path>` via `kubectl exec`.
     if let Some(ns_name) = args.target.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
             if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
@@ -113,9 +113,9 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
     })
 }
 
-/// K9 (v0.1.4): `inspect ls <k8s-ns>/<pod>[:<path>]` via `kubectl exec <pod>
+/// `inspect ls <k8s-ns>/<pod>[:<path>]` via `kubectl exec <pod>
 /// -- ls`. Distroless/no-shell failures classify to no_shell_in_container ->
-/// exit 16 (WA-4), never a raw OCI error.
+/// exit 16, never a raw OCI error.
 fn ls_k8s(
     args: &LsArgs,
     ns: &str,

@@ -60,10 +60,10 @@ pub fn reload(args: LifecycleArgs) -> Result<ExitKind> {
 }
 
 fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
-    // K16 (v0.1.4): a k8s namespace runs the lifecycle op via kubectl —
+    // A k8s namespace runs the lifecycle op via kubectl —
     // `restart`/`reload` -> `kubectl rollout restart`; `stop`/`start` refuse
-    // with a `scale --replicas` hint (K20). Every write echoes the resolved
-    // {context, namespace, workload} (K5 anti-footgun) and is dry-run by
+    // with a `scale --replicas` hint. Every write echoes the resolved
+    // {context, namespace, workload} (anti-footgun) and is dry-run by
     // default. Branch before the SSH plan().
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -212,8 +212,8 @@ fn build_cmd(act: Action, svc: &str, container: &str, kind: ServiceKind) -> Stri
             format!("pkill -HUP -f {svc_q} || true")
         }
         // Container default — dispatched through the runtime executor
-        // seam (K1, v0.1.4). `from_type(None)` selects docker today;
-        // K2 wires the namespace `type` config field so a k8s namespace
+        // seam. `from_type(None)` selects docker today;
+        // Wires the namespace `type` config field so a k8s namespace
         // routes to `rollout restart`/`scale` instead. Byte-identical
         // to the prior inline `docker restart|stop|start|kill -s HUP`
         // strings (HostListener Restart/Stop/Start still fall through
@@ -263,12 +263,12 @@ fn build_revert(act: Action, svc: &str, container: &str, kind: ServiceKind) -> R
     }
 }
 
-/// K16 (v0.1.4): k8s lifecycle via kubectl. `restart`/`reload` map to
+/// k8s lifecycle via kubectl. `restart`/`reload` map to
 /// `kubectl rollout restart deploy/<w>`; `stop`/`start` refuse with a
-/// `scale --replicas` hint (K20). Dry-run by default; on `--apply` the
-/// current rollout revision is captured FIRST so the F11 revert is a real
+/// `scale --replicas` hint. Dry-run by default; on `--apply` the
+/// current rollout revision is captured FIRST so the revert is a real
 /// `rollout undo --to-revision=<n>` command_pair. Every path echoes the
-/// resolved {context, k8s_namespace, workload} (K5 anti-footgun).
+/// resolved {context, k8s_namespace, workload} (anti-footgun).
 fn lifecycle_k8s(
     act: Action,
     args: &LifecycleArgs,
@@ -295,11 +295,11 @@ fn lifecycle_k8s(
     }
 
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // Resolve the namespace kubectl will ACTUALLY act in (config → the
     // context's default → "default") so the echo / confirm / AuditEntry name the
     // real target, not a fabricated "default", and pin it explicitly on the ops.
     let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
-    // The K5 anti-footgun echo — which cluster + namespace + workload.
+    // The anti-footgun echo — which cluster + namespace + workload.
     let target_line = format!("deploy/{workload} in namespace '{k8s_ns}' on context '{context}'");
 
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
@@ -330,7 +330,7 @@ fn lifecycle_k8s(
         ConfirmResult::Apply => {}
     }
 
-    // F11 capture-before-apply: the current revision is the undo target.
+    // Capture-before-apply: the current revision is the undo target.
     let rev_out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args([
             "get",

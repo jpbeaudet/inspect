@@ -1,8 +1,8 @@
-//! `inspect delete <k8s-ns>/<pod>` — narrow pod deletion (K18, v0.1.4).
+//! `inspect delete <k8s-ns>/<pod>` — narrow pod deletion.
 //!
 //! A Kubernetes write verb, deliberately narrow: **pods only**, never
 //! controllers (deleting a Deployment is permanent; deleting a pod just makes
-//! its controller recreate it). Deletion is not undoable — the F11 revert is
+//! its controller recreate it). Deletion is not undoable — the revert is
 //! `unsupported` (the controller's recreation IS the "revert", stated in the
 //! preview). Dry-run by default; deleting a pod that would drop ready replicas
 //! below the deployment threshold (or a naked pod) trips the outage interlock.
@@ -43,7 +43,7 @@ fn delete_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // Resolve the namespace kubectl will ACTUALLY act in (config → the
     // context's default → "default") so the echo / confirm / AuditEntry name the
     // real target, not a fabricated "default", and pin it explicitly on the ops.
     let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);

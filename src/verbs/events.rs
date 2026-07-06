@@ -1,8 +1,7 @@
-//! `inspect events <k8s-ns>[/<pod>]` — cluster/object events, newest-first
-//! (K12, v0.1.4).
+//! `inspect events <k8s-ns>[/<pod>]` — cluster/object events, newest-first.
 //!
 //! A Kubernetes verb. `kubectl get events` is notoriously NOT chronologically
-//! ordered by default (the #1 events complaint, research w3-P7); inspect
+//! ordered by default (the #1 events complaint); inspect
 //! always sorts **newest-first** and, when a pod is given, auto-scopes with a
 //! field-selector so the operator never writes the incantation. Feeds
 //! `inspect why`.
@@ -58,7 +57,7 @@ fn events_k8s(
     let items = v.get("items").and_then(|i| i.as_array()).unwrap_or(&empty);
     let mut warnings = 0usize;
 
-    // H4/R1: emit the standard envelope (`.data.events[]`) + honor `--select`,
+    // Emit the standard envelope (`.data.events[]`) + honor `--select`,
     // matching the other snapshot read verbs — not a bare per-line `json!`
     // stream that silently ignores projection.
     let fmt = args.format.resolve()?;

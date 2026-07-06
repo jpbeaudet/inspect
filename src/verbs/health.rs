@@ -17,7 +17,7 @@ use crate::verbs::output::OutputDoc;
 use crate::verbs::quote::shquote;
 
 pub fn run(args: HealthArgs) -> Result<ExitKind> {
-    // K7 (v0.1.4): a k8s namespace reports pod health from its discovered
+    // A k8s namespace reports pod health from its discovered
     // profile (the docker plan()/get_runtime path is SSH-bound).
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -193,7 +193,7 @@ pub fn run(args: HealthArgs) -> Result<ExitKind> {
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
 
-/// K7 (v0.1.4): `inspect health <k8s-ns>` — per-pod health from the discovered
+/// `inspect health <k8s-ns>` — per-pod health from the discovered
 /// profile. Each pod is a "probe": healthy iff its readiness-derived
 /// `health_status` is Ok; a missing readiness / CrashLoop / Failed is not-ok.
 /// Same envelope shape as docker health so an agent branches identically.

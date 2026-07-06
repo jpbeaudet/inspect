@@ -27,7 +27,7 @@ pub fn run(mut args: GrepArgs) -> Result<ExitKind> {
         parse_duration(s)?;
     }
 
-    // K9 (v0.1.4): k8s grep. File grep (`<ns>/<pod>:<path>`) runs
+    // k8s grep. File grep (`<ns>/<pod>:<path>`) runs
     // `kubectl exec -- grep`; log grep (no `:path`) is served by
     // `inspect logs <ns>/<pod> --match`.
     if let Some(ns_name) = args.selector.split('/').next() {
@@ -297,7 +297,7 @@ fn pick_tool(profile: Option<&Profile>) -> Tool {
     }
 }
 
-/// K9 (v0.1.4): k8s grep. File grep runs `kubectl exec <pod> -- grep -E
+/// k8s grep. File grep runs `kubectl exec <pod> -- grep -E
 /// [-i] -e <pat> -- <path>`; grep's exit 1 (no-match) is NOT a failure.
 /// Log grep (no `:path`) redirects to `inspect logs <ns>/<pod> --match`.
 fn grep_k8s(

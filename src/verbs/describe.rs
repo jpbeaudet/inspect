@@ -1,5 +1,5 @@
 //! `inspect describe <k8s-ns>/<pod>` — deep pod dump reshaped into the JSON
-//! envelope (K11, v0.1.4).
+//! envelope.
 //!
 //! kubectl `describe` is text-only (no `-o json`) — its richest view (spec +
 //! status + conditions) can't be projected or piped. inspect reshapes
@@ -59,7 +59,7 @@ fn describe_k8s(
     let mut obj: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
 
-    // Secret-blindness (L7): the raw pod object is echoed verbatim into the
+    // Secret-blindness: the raw pod object is echoed verbatim into the
     // `--json` envelope below, so any inline secret in it would cross the
     // stdout boundary in plaintext. Two carriers leak: an inline
     // `spec.*containers[].env[].value` literal, and the
@@ -141,9 +141,9 @@ fn scrub_pod_secrets(obj: &mut serde_json::Value) {
                         }
                     }
                 }
-                // N1: `command`/`args` tokens can carry an inline secret
+                // `command`/`args` tokens can carry an inline secret
                 // (`--db-password=…`, a connection URL with creds, a PEM). Run
-                // each token through the L7 audit redactor — it masks the known
+                // each token through the audit redactor — it masks the known
                 // secret shapes while leaving ordinary flags/paths readable, so
                 // the diagnostic value survives. (A wholly-unstructured bare
                 // secret token is subject to the same pattern-detection limits
@@ -168,8 +168,8 @@ fn scrub_pod_secrets(obj: &mut serde_json::Value) {
     }
 }
 
-/// Mask a secret carried in a `command`/`args` token (N1). Two shapes:
-/// 1. the L7 audit-redactor patterns (PEM, credential-in-URL, known tokens);
+/// Mask a secret carried in a `command`/`args` token. Two shapes:
+/// 1. the audit-redactor patterns (PEM, credential-in-URL, known tokens);
 /// 2. a `--flag=value` (or `flag=value`) whose flag name reads as a secret
 ///    (`password`/`secret`/`token`/`key`/`credential`/…) — the common
 ///    `--db-password=…` carrier the pattern redactor does not cover.

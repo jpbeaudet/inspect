@@ -9,7 +9,7 @@ use crate::verbs::dispatch::plan;
 use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
-    // K14 (v0.1.4): k8s images come from the discovered profile's pod specs
+    // k8s images come from the discovered profile's pod specs
     // (no docker daemon). Branch early.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -62,7 +62,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     renderer.dispatch(&fmt, select)
 }
 
-/// K14 (v0.1.4): `inspect images <k8s-ns>` — unique container images across
+/// `inspect images <k8s-ns>` — unique container images across
 /// the namespace's pods, read from the discovered profile (no daemon).
 fn images_k8s(args: &SimpleSelectorArgs, ns: &str) -> Result<ExitKind> {
     let mut renderer = Renderer::new();

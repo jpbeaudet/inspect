@@ -3,7 +3,7 @@
 //! Runs a free-form command on the target. `--apply` required (no
 //! preview semantics — the command is itself the action).
 //!
-//! v0.1.2 (B7): output is streamed line-by-line to the operator's
+//! Output is streamed line-by-line to the operator's
 //! terminal as the remote command produces it, instead of being
 //! buffered until exit. A background heartbeat thread emits
 //! `[inspect] still running on <ns> (Ns elapsed)` to stderr after
@@ -32,7 +32,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     }
     let user_cmd = args.cmd.join(" ");
 
-    // K19 (v0.1.4): a k8s namespace runs the writing command via `kubectl
+    // A k8s namespace runs the writing command via `kubectl
     // exec <pod> -- <cmd>` under the --apply gate, audited. Branch before SSH.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -107,7 +107,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         out
     };
 
-    // B7: heartbeat configuration. 0 = disabled.
+    // Heartbeat configuration. 0 = disabled.
     let heartbeat_secs: u64 = if args.no_heartbeat {
         0
     } else {
@@ -148,7 +148,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             s.service().map(|x| format!("/{x}")).unwrap_or_default()
         );
 
-        // B7: heartbeat thread. Wakes every 500ms and, if no remote line
+        // Heartbeat thread. Wakes every 500ms and, if no remote line
         // has arrived for `heartbeat_secs`, emits a single line to stderr.
         let last_seen = Arc::new(Mutex::new(Instant::now()));
         let stop_heartbeat = Arc::new(AtomicBool::new(false));
@@ -179,7 +179,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
             None
         };
 
-        // B7: stream stdout live; capture into a buffer for the audit log.
+        // Stream stdout live; capture into a buffer for the audit log.
         // The closure prints each line as it arrives so the operator sees
         // progress in real time, and pokes `last_seen` so the heartbeat
         // thread knows the remote is still talking.
@@ -267,7 +267,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
                     if !effective_overlay.is_empty() {
                         entry.env_overlay = Some(effective_overlay.clone());
                     }
-                    // G2: redact wrapped shell command unless the
+                    // Redact wrapped shell command unless the
                     // operator opted into `--show-secrets`.
                     entry.rendered_cmd = Some(if args.show_secrets {
                         cmd.clone()
@@ -312,7 +312,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         // operator's explicit `--no-revert` acknowledgement so audit
         // readers can tell free-form mutations apart from mutations
         // that simply pre-date the contract.
-        // G2 (post-v0.1.3 audit hardening): the preview text mirrors
+        // The preview text mirrors
         // the original user command, so redact it the same way as
         // the args field unless the operator opted into
         // `--show-secrets`.
@@ -329,7 +329,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
         if !effective_overlay.is_empty() {
             e.env_overlay = Some(effective_overlay.clone());
         }
-        // G2: the rendered shell command is the wrapped form
+        // The rendered shell command is the wrapped form
         // (`docker exec ... sh -c '<user_cmd>'`) which still embeds
         // any secrets the operator typed. Redact in the same
         // show-secrets-aware way.
@@ -433,7 +433,7 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
 /// `--show-secrets`; `[secrets_masked=true]` when the redactor fired
 /// during this step; clean cmd otherwise.
 ///
-/// G2 (post-v0.1.3 audit hardening): the `user_cmd` text itself is
+/// The `user_cmd` text itself is
 /// passed through [`crate::redact::redact_for_audit`] so embedded
 /// secrets in the command line never reach the audit log in plaintext.
 fn stamp_args(
@@ -493,12 +493,12 @@ fn exec_fanout_threshold() -> usize {
     3
 }
 
-/// K19 (v0.1.4): `inspect exec <k8s-ns>/<pod> --apply -- <cmd>` — a WRITING
+/// `inspect exec <k8s-ns>/<pod> --apply -- <cmd>` — a WRITING
 /// in-pod command via `kubectl exec` under the --apply gate, audited. Dry-run
-/// by default with the K5 resolved-target echo. In-pod fs mutation is
-/// ephemeral (does not survive a restart) and non-dispatchable, so the F11
+/// by default with the resolved-target echo. In-pod fs mutation is
+/// ephemeral (does not survive a restart) and non-dispatchable, so the
 /// revert is `unsupported` with a manual-inverse note. Output redacted;
-/// distroless/no-shell -> no_shell_in_container (exit 16, WA-4).
+/// distroless/no-shell -> no_shell_in_container (exit 16).
 fn exec_k8s(
     args: &crate::cli::ExecArgs,
     ns: &str,
@@ -516,7 +516,7 @@ fn exec_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // Resolve the namespace kubectl will ACTUALLY act in (config → the
     // context's default → "default") so the echo / confirm / AuditEntry name the
     // real target, not a fabricated "default". `exec_in_pod` targets that same
     // context-default (exec_base omits `-n` when config is unset), so echo ==
@@ -564,7 +564,7 @@ fn exec_k8s(
 
     let mut entry = AuditEntry::new("exec", &format!("{ns}/{pod}"));
     entry.args = crate::redact::redact_for_audit(&cmd_str).into_owned();
-    // R2: match the other four k8s write verbs' AuditEntry scaffold — record
+    // Match the other four k8s write verbs' AuditEntry scaffold — record
     // the operator reason and the wall-clock duration (previously dropped only
     // on the k8s exec path, a scaffold-drift inconsistency vs docker exec).
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;

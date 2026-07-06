@@ -9,7 +9,7 @@ use crate::verbs::dispatch::plan;
 use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: PsArgs) -> Result<ExitKind> {
-    // K7 (v0.1.4): a k8s namespace lists pods from its discovered profile —
+    // A k8s namespace lists pods from its discovered profile —
     // the docker `plan()` + `docker ps` path is SSH-bound.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -77,7 +77,7 @@ pub fn run(args: PsArgs) -> Result<ExitKind> {
     human.dispatch(&fmt, select)
 }
 
-/// K7 (v0.1.4): `inspect ps <k8s-ns>` — list pods from the discovered profile
+/// `inspect ps <k8s-ns>` — list pods from the discovered profile
 /// (the pod is the container-equivalent; its name is the kubectl address).
 fn ps_k8s(args: &PsArgs, ns: &str) -> Result<ExitKind> {
     let fmt = args.format.resolve()?;

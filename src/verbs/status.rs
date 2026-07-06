@@ -32,8 +32,8 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     // service portion, so they pass through unchanged.
     let selector = expand_bare_namespace(&args.selector);
 
-    // K7 (v0.1.4): a k8s namespace is presented from its discovered profile
-    // (health-aware, K7 part 1) — the docker `plan()`/`get_runtime` pipeline
+    // A k8s namespace is presented from its discovered profile
+    // (health-aware) — the docker `plan()`/`get_runtime` pipeline
     // is SSH-bound and would fail on a hostless k8s config. Branch early.
     if let Some(ns_name) = selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -301,7 +301,7 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
 
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
-/// K7 (v0.1.4): present a k8s namespace's `status` from its discovered,
+/// Present a k8s namespace's `status` from its discovered,
 /// health-aware profile. No live docker-ps reconcile — the profile's
 /// `health_status` (set at `setup` from pod readiness) IS the source; an
 /// operator re-runs `inspect setup <ns> --force` (or status --refresh, a

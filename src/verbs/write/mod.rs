@@ -8,19 +8,19 @@
 
 pub mod chmod;
 pub mod chown;
-pub mod delete; // k8s delete pod (K18)
+pub mod delete; // k8s delete pod
 pub mod edit;
 pub mod exec;
 pub mod lifecycle; // restart / stop / start / reload
 pub mod mkdir;
 pub mod rm;
-pub mod rollout; // k8s rollout undo (K17)
-pub mod scale; // k8s scale (K15)
+pub mod rollout; // k8s rollout undo
+pub mod scale; // k8s scale
 pub mod touch;
 
 pub(crate) mod atomic;
 
-/// K20 (v0.1.4): immutable-pod ops (edit / cp / chmod / chown / mkdir / touch /
+/// Immutable-pod ops (edit / cp / chmod / chown / mkdir / touch /
 /// rm) REFUSE on a k8s namespace with a chained idiom hint — pod filesystems
 /// are ephemeral and in-pod fs mutation is an anti-pattern. Returns
 /// `Some(ExitKind::Error)` when the target namespace is k8s (the caller returns

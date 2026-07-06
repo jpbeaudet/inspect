@@ -25,7 +25,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         parse_duration(s)?;
     }
 
-    // K8 (v0.1.4): a k8s namespace runs `kubectl logs` (context-pinned),
+    // A k8s namespace runs `kubectl logs` (context-pinned),
     // never the SSH/docker-logs path. Branch early.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
@@ -196,7 +196,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         return Ok(if total > 0 {
             ExitKind::Success
         } else if !args.match_re.is_empty() && !args.follow {
-            // B3 (v0.1.2): same exit-0-with-notice contract as the
+            // Same exit-0-with-notice contract as the
             // non-merged path. We don't bother distinguishing per
             // source here — the merged view is one logical stream.
             if !args.format.is_json() {
@@ -303,7 +303,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)
         })?;
         if !out.ok() && out.stdout.is_empty() {
-            // B3 (v0.1.2): when `--match` is in play, the remote
+            // When `--match` is in play, the remote
             // pipeline ends in `grep -E '<pat>'`, which exits 1 when
             // it finds zero lines. That is the predicate doing its
             // job, not a real failure. Suppress the spurious "logs
@@ -363,7 +363,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     Ok(if any_lines {
         ExitKind::Success
     } else if !args.match_re.is_empty() && !args.follow {
-        // B3 (v0.1.2): treat `inspect logs --match <pat>` with zero
+        // Treat `inspect logs --match <pat>` with zero
         // hits as a successful narrowing of the log view, not an
         // error. Mirrors how operators read this flag ("filter the
         // stream, tell me if there's anything") rather than how grep
@@ -380,7 +380,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     })
 }
 
-/// B3 (v0.1.2): build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
+/// Build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
 /// hits. Pulled out so the same message is reachable from both the
 /// per-step and merged code paths.
 fn no_match_notice(args: &LogsArgs) -> String {
@@ -666,12 +666,11 @@ fn stream_follow(
     }
 }
 
-/// K8 (v0.1.4): `inspect logs <k8s-ns>/<pod>` via `kubectl logs`. Batch by
+/// `inspect logs <k8s-ns>/<pod>` via `kubectl logs`. Batch by
 /// True when kubectl's stderr indicates a `--previous` read found no prior
 /// instance (the container has never restarted). That is a normal state — the
 /// pod is running fine on its first instance — not a `not_found` the operator
-/// should chase via name/namespace, so `logs --previous` reports it cleanly
-/// (SMOKE-1).
+/// should chase via name/namespace, so `logs --previous` reports it cleanly.
 fn is_no_previous_instance(stderr: &str) -> bool {
     stderr.contains("previous terminated container") && stderr.contains("not found")
 }
@@ -762,7 +761,7 @@ fn logs_k8s(
 
     // Batch: capture, and on a multi-container ambiguity auto-pick + hint.
     let out = build(args.container.as_deref(), false).output()?;
-    // SMOKE-1: `--previous` on a pod whose container has never restarted is a
+    // `--previous` on a pod whose container has never restarted is a
     // normal state, not an error — kubectl returns "previous terminated
     // container … not found", which the generic classifier would render as a
     // misleading `not_found` ("check the name and -n"). Emit a clear note and
@@ -797,8 +796,8 @@ fn logs_k8s(
                 });
             }
         }
-        // Other failure: classify + hint (K4), never a raw kubectl blob. The
-        // exit code carries the classified band (WA-4) so a shell consumer can
+        // Other failure: classify + hint, never a raw kubectl blob. The
+        // exit code carries the classified band so a shell consumer can
         // branch (e.g. transport vs no-shell vs metrics).
         let fc =
             crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
@@ -921,7 +920,7 @@ mod tests {
         assert!(s.contains("svc;rm -rf /") || s.contains("'svc;rm -rf /'"));
     }
 
-    // --- B3 (v0.1.2): friendly "(no matches ...)" notice ---
+    // --- Friendly "(no matches ...)" notice ---
 
     #[test]
     fn no_match_notice_single_pattern_with_since() {

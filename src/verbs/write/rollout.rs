@@ -1,11 +1,11 @@
 //! `inspect rollout <k8s-ns>/<deploy> [--to-revision N]` — roll a Deployment
-//! back to a prior revision (K17, v0.1.4).
+//! back to a prior revision.
 //!
 //! The community's documented fast rollback of a bad deploy (`kubectl rollout
 //! undo`). Low-risk: it moves to an EXISTING prior revision. Its own inverse
-//! is another rollout undo — so the F11 revert is a `command_pair` back to the
+//! is another rollout undo — so the revert is a `command_pair` back to the
 //! pre-undo revision (captured first). Dry-run by default; resolved-target
-//! echo (K5) on every path.
+//! echo on every path.
 
 use anyhow::Result;
 
@@ -37,7 +37,7 @@ fn rollout_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // Resolve the namespace kubectl will ACTUALLY act in (config → the
     // context's default → "default") so the echo / confirm / AuditEntry name the
     // real target, not a fabricated "default", and pin it explicitly on the ops.
     let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
@@ -48,7 +48,7 @@ fn rollout_k8s(
     let target_line =
         format!("deploy/{workload}{to} in namespace '{k8s_ns}' on context '{context}'");
 
-    // The current revision is the undo target for the F11 revert.
+    // The current revision is the undo target for the revert.
     let cur_out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args([
             "get",

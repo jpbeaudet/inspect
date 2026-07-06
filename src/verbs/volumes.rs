@@ -9,7 +9,7 @@ use crate::verbs::dispatch::plan;
 use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
-    // K14 (v0.1.4): k8s "volumes" = PersistentVolumeClaims (kubectl get pvc).
+    // k8s "volumes" = PersistentVolumeClaims (kubectl get pvc).
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
             if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
@@ -67,7 +67,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     renderer.dispatch(&fmt, select)
 }
 
-/// K14 (v0.1.4): `inspect volumes <k8s-ns>` — PersistentVolumeClaims
+/// `inspect volumes <k8s-ns>` — PersistentVolumeClaims
 /// (`kubectl get pvc`): name, status, capacity, storageClass.
 fn volumes_k8s(
     args: &SimpleSelectorArgs,

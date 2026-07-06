@@ -1,8 +1,8 @@
-//! `inspect top <k8s-ns>[/<pod>]` — pod CPU/memory usage (K13, v0.1.4).
+//! `inspect top <k8s-ns>[/<pod>]` — pod CPU/memory usage.
 //!
 //! A Kubernetes verb: runs `kubectl top pods` (context-pinned). When
 //! metrics-server is absent it degrades cleanly to `metrics_unavailable`
-//! (exit 15, WA-4) with an install hint — never a raw kubectl error. For a
+//! (exit 15) with an install hint — never a raw kubectl error. For a
 //! docker namespace it refuses with a pointer to `inspect status`/`health`.
 
 use anyhow::Result;
@@ -46,12 +46,12 @@ fn top_k8s(
         let stderr = String::from_utf8_lossy(&out.stderr);
         let f =
             crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
-        // metrics-server absent → the K13/WA-4 degrade path (exit 15).
+        // metrics-server absent → the degrade path (exit 15).
         crate::tee_eprintln!("top: [{}] {}", f.failure_class(), f.hint(""));
         return Ok(ExitKind::Inner(f.exit_code()));
     }
 
-    // H4/R1: emit the standard envelope (`.data.pods[]`) + honor `--select`,
+    // Emit the standard envelope (`.data.pods[]`) + honor `--select`,
     // matching the other snapshot read verbs (ps / status / describe) — not a
     // bare per-line `json!` stream that silently ignores projection.
     let fmt = args.format.resolve()?;

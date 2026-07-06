@@ -1,9 +1,9 @@
-//! `inspect scale <k8s-ns>/<workload> --replicas N` (K15, v0.1.4).
+//! `inspect scale <k8s-ns>/<workload> --replicas N`.
 //!
 //! A Kubernetes write verb: `kubectl scale deploy/<w> --replicas=N`. The
-//! cleanest revertible write — the F11 inverse is a `kubectl scale` back to
+//! cleanest revertible write — the inverse is a `kubectl scale` back to
 //! the prior replica count (a real `command_pair`). Dry-run by default; every
-//! path echoes the resolved {context, k8s_namespace, workload} (K5). Scaling
+//! path echoes the resolved {context, k8s_namespace, workload}. Scaling
 //! to 0 (a full outage) trips an extra confirmation unless `--yes-all`.
 
 use anyhow::Result;
@@ -36,7 +36,7 @@ fn scale_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // Resolve the namespace kubectl will ACTUALLY act in (config → the
     // context's default → "default") so the echo / confirm / AuditEntry name
     // the real target, not a fabricated "default", and pin it explicitly below.
     let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);

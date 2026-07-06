@@ -1,4 +1,4 @@
-//! `inspect watch <target> --until-<kind>` (B10, v0.1.2).
+//! `inspect watch <target> --until-<kind>`.
 //!
 //! Block until a predicate over a single target becomes true, exit 124
 //! on timeout (matching `timeout(1)`'s convention), exit 0 on match.
@@ -144,7 +144,7 @@ pub fn run(args: WatchArgs) -> Result<ExitKind> {
     }
 
     // Resolve selector → exactly one target. Watch is single-target by
-    // design; multi-target fan-out belongs in `inspect bundle` (B9).
+    // design; multi-target fan-out belongs in `inspect bundle`.
     let (runner, nses, targets) = plan(&args.selector).map_err(|e| anyhow!("{e}"))?;
     let steps: Vec<_> = iter_steps(&nses, &targets).collect();
     if steps.is_empty() {
@@ -354,7 +354,7 @@ fn emit_status(
 
 /// Trim and collapse a value to a single short line for audit/UX use.
 ///
-/// G2 (post-v0.1.3 audit hardening): the trimmed value is also passed
+/// The trimmed value is also passed
 /// through [`crate::redact::redact_for_audit`] before recording, so
 /// `--until-cmd` output containing `KEY=VALUE`, header values, or
 /// URL credentials does not leak into the audit log verbatim.

@@ -31,7 +31,7 @@ pub enum StepError {
 /// is a k8s namespace; otherwise emit `refusal` and return `Ok(None)` so the
 /// caller returns the error exit. Collapses the byte-identical dispatch
 /// preamble the **k8s-only** verbs (describe / events / top / scale / rollout /
-/// delete) each copied verbatim (R4). The dual-runtime verbs (why / network /
+/// delete) each copied verbatim. The dual-runtime verbs (why / network /
 /// volumes / images / ports) keep their own `if let Ok(..)` fall-through to the
 /// docker path — a genuinely distinct outcome (Rule 13: collapse identical
 /// shapes, keep distinct ones distinct), so they are not routed through here.

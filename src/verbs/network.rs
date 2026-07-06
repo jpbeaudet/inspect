@@ -9,7 +9,7 @@ use crate::verbs::dispatch::plan;
 use crate::verbs::output::{Envelope, Renderer};
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
-    // K14 (v0.1.4): k8s "network" = Services (kubectl get svc), not docker nets.
+    // k8s "network" = Services (kubectl get svc), not docker nets.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
             if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
@@ -76,7 +76,7 @@ pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     renderer.dispatch(&fmt, select)
 }
 
-/// K14 (v0.1.4): `inspect network <k8s-ns>` — Services in the namespace
+/// `inspect network <k8s-ns>` — Services in the namespace
 /// (`kubectl get svc`): name, type, clusterIP, and ports. The k8s analogue
 /// of docker networks — Services are the reachability layer.
 fn network_k8s(

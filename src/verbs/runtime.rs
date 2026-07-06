@@ -56,7 +56,7 @@ pub trait RemoteRunner: Send + Sync {
         Ok(out.exit_code)
     }
 
-    /// B7 (v0.1.2): streaming variant that **also** captures every
+    /// Streaming variant that **also** captures every
     /// emitted stdout line into the returned [`RemoteOutput`]. Used by
     /// `inspect exec` so the operator gets live progress *and* the
     /// audit log gets a faithful record of what was shown. Default

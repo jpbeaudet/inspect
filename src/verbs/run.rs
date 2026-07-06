@@ -379,7 +379,7 @@ fn store_script_body(body: &[u8], sha: &str) -> Result<()> {
 }
 
 pub fn run(args: RunArgs) -> Result<ExitKind> {
-    // SMOKE 2026-05-09 fail-fast (v0.1.3): catch the
+    // Fail-fast: catch the
     // `inspect run --apply` muscle-memory trap before any dispatch.
     // `inspect run` is read-only; the audited mutation verb is
     // `inspect exec --apply`. The `apply` field on `RunArgs` exists
@@ -420,7 +420,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     }
     let user_cmd = args.cmd.join(" ");
 
-    // K9 (v0.1.4): a k8s namespace runs the command via `kubectl exec <pod>`.
+    // A k8s namespace runs the command via `kubectl exec <pod>`.
     if let Some(ns_name) = args.selector.split('/').next() {
         if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
             if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
@@ -618,7 +618,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
     let mut uniform_transport: Option<crate::ssh::transport::TransportClass> = None;
     let mut transport_failures = 0usize;
     let mut command_failures = 0usize;
-    // B8 (v0.1.2): when --no-truncate is set, lift the per-line byte cap
+    // When --no-truncate is set, lift the per-line byte cap
     // entirely. Otherwise keep the existing 4 KiB default that protects
     // terminals from runaway 100KB+ JSON blobs.
     let line_budget = if args.no_truncate {
@@ -1114,7 +1114,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
         };
         r.summary(trailer);
         r.print();
-        // B8: surface a single, unmissable end-of-stream warning when any
+        // Surface a single, unmissable end-of-stream warning when any
         // line was truncated mid-content. Goes to stderr so it doesn't
         // interleave with the data captured by `> file` redirects.
         if truncated_lines > 0 {
@@ -1178,7 +1178,7 @@ pub fn run(args: RunArgs) -> Result<ExitKind> {
 /// from `[secrets_masked=true]` (the redactor fired during this step)
 /// from a clean run (neither tag).
 ///
-/// G2 (post-v0.1.3 audit hardening): the `user_cmd` text itself is
+/// The `user_cmd` text itself is
 /// passed through [`crate::redact::redact_for_audit`] so embedded
 /// secrets (`psql -p s3cret`, `curl -H "Authorization: Bearer …"`,
 /// `DATABASE_URL=postgres://u:p@h/d`) never reach the audit log in
@@ -1214,7 +1214,7 @@ fn collect_kinds(redactor: &crate::redact::OutputRedactor) -> Option<Vec<String>
     }
 }
 
-/// G2 (post-v0.1.3 audit hardening): redact the wrapped shell command
+/// Redact the wrapped shell command
 /// stored in `AuditEntry::rendered_cmd`. The wrapped form (e.g.
 /// `docker exec ctr sh -c '<user_cmd>'`) embeds whatever the operator
 /// typed and would otherwise leak secrets to the audit log even when
@@ -1228,10 +1228,10 @@ fn redact_rendered(cmd: &str, show_secrets: bool) -> String {
     }
 }
 
-/// K9 (v0.1.4): `inspect run <k8s-ns>/<pod> -- <cmd>` via `kubectl exec <pod>
+/// `inspect run <k8s-ns>/<pod> -- <cmd>` via `kubectl exec <pod>
 /// -- <cmd>` (read-only; context-pinned). Redacts output. A kubectl-level
 /// exec failure (distroless/no-shell, forbidden, unreachable) is classified
-/// (K4) and returns its WA-4 exit code; otherwise the in-pod command's own
+/// and returns its exit code; otherwise the in-pod command's own
 /// exit code passes through (the `run` inner-exit-code contract). Advanced
 /// modes (`--file`/`--stdin-script`) are not supported for pods — pass the
 /// command inline.
