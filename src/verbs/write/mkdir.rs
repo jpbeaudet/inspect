@@ -14,6 +14,9 @@ use crate::verbs::output::Renderer;
 use crate::verbs::quote::shquote;
 
 pub fn run(args: PathArgArgs) -> Result<ExitKind> {
+    if let Some(ek) = crate::verbs::write::refuse_if_k8s_immutable(&args.target, "mkdir") {
+        return Ok(ek);
+    }
     let (runner, nses, targets) = plan(&args.target)?;
     let mut planned = Vec::new();
     for s in iter_steps(&nses, &targets) {
