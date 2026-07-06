@@ -120,6 +120,39 @@ against the maker cluster, wave-close gate green (clippy -D warnings clean;
 full suite 31 suites / 0 failed / 1394 tests). Findings WA-1/WA-2/WA-5 fixed;
 WA-3/WA-4/WA-6 tracked to K6. Next: Wave B (K6–K9).
 
+**PROGRAM BUILD STATUS (2026-07-06, autopilot Phase 5).** 23 of 25 K-items
+landed + committed on `feat/v0.1.4-program`, every one live-verified against
+the real maker/hub clusters; clippy + help_contract green throughout.
+- **Wave A ✅** K1 Runtime trait · K2 config · K3 kubectl probe · K4 failure
+  taxonomy · K5 context-pinning.
+- **Wave B ✅** K6 discovery (setup/test/auth-can-i/metrics) · K7 status/ps/
+  health · K8 logs · K9 cat/ls/grep/run.
+- **Wave C ✅** K10 why (dogfooded a real degraded hub pod) · K11 describe ·
+  K12 events · K13 top · K14 ports/network/volumes/images.
+- **Wave D ✅ (code)** K15 scale · K16 restart · K17 rollout · K18 delete-pod ·
+  K19 exec --apply · K20 refuse mappings · WD-2 local revert executor. Every
+  write: dry-run default + resolved-target echo + F11 revert capture + audit
+  (context/k8s_namespace). ALL dry-run paths live-verified; no mutation
+  performed.
+- **Wave E:** K21 fleet mixed rollup ✅ · K24 help topic ✅ · K25 SMOKE
+  runbook ✅.
+- All findings WA-1..7 resolved (WA-3/WA-4 per JP-2026-07-05).
+
+**Two remaining decisions (surfaced to JP):**
+1. **K22 `search` + K23 bundle seam** are deep integrations into SSH-coupled
+   engines (the LogQL per-medium readers; the bundle step executor +
+   preflight/postflight, all `runner.run`-over-SSH). Per research w3-D9 there
+   is **no v0.1.4 field demand** for either (single-medium pains dominate;
+   cross-medium bundle *composition* is already bounded to v0.2.0). Recommend
+   they move to **v0.1.5** (a focused design pass alongside the stabilization
+   sweep) rather than a rushed autopilot refactor — the practical k8s CLI
+   (every read + write verb, fleet, help, smoke) is complete without them.
+2. **WD-1 mutating round-trip** (apply + local revert) is the one test that
+   requires a real maker mutation (throwaway deployment in `inspect-livetest`).
+   All write DRY-RUN paths are verified; the mutating cycle is scripted in
+   `SMOKE_v0.1.4.md` P9. Needs explicit authorization to execute (autopilot
+   guardrail forbids initiating maker mutations on a generic nudge).
+
 | Wave | Theme | Items | Gates |
 |---|---|---|---|
 | **A** ✅ | Foundation: runtime abstraction, config, backend probe, failure taxonomy, context-pinning | K1–K5 | **DONE** — blocks-all satisfied. |
