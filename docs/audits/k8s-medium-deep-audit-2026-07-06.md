@@ -15,7 +15,7 @@
 
 | ID | Dim/Surface | Sev | One-line | Disposition |
 |----|-------------|-----|----------|-------------|
-| **H1** (S1) | S — sovereign secret law | **High** | `describe_k8s` embeds raw `kubectl get pod -o json` into the envelope with no redaction → inline `env[].value` + `last-applied-configuration` leak in plaintext on stdout | Path A — fix-now |
+| **H1** (S1) | S — sovereign secret law | **High** | `describe_k8s` embeds raw `kubectl get pod -o json` into the envelope with no redaction → inline `env[].value` + `last-applied-configuration` leak in plaintext on stdout | ✅ **FIXED** — `scrub_pod_secrets` in `describe.rs`, tests `k11_scrub_*` |
 | **H2** (G1) | Surface 1 — gaps | **High** | k8s **write** verbs K15–K19 (scale/rollout/delete/exec) ship with ~zero automated tests; plan §6 names 21 that don't exist | Path A — fix-now |
 | **H3** (O1/R3) | O + Surface 1 | **High** | All 5 write verbs echo/audit `k8s_namespace` via `unwrap_or("default")`; when unset, kubectl acts in the **context's** namespace → dry-run preview, confirm prompt, and AuditEntry can name a *different* namespace than the mutation lands in | Path A — fix-now |
 | **H4** (R1) | R — redundancy | **High** | Read verbs split into two JSON conventions in one release: `ps/status/describe/network/images/volumes/ports` emit the standard envelope; `top/events` (tabular) emit bare `json!` with no envelope and **silently drop `--select`** — the bare-NDJSON trap already extinguished in `34ae25d` | Path A — fix-now (per-verb) |

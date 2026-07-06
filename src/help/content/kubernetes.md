@@ -47,6 +47,13 @@ On a CrashLoop, add `--previous` for the crashed instance's logs. `--select`
 (jaq) over the envelope is strictly better than kubectl jsonpath — no regex
 limits, no brace-quoting traps.
 
+`describe` masks secrets before they reach stdout: inline
+`spec.*containers[].env[].value` literals and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation render as
+`<redacted>`. Env `valueFrom` references (secretKeyRef / configMapKeyRef) are
+shown by name — they carry no value. This is the same secret-blindness the
+`cat` / `logs` / `grep` / `exec` output paths enforce (see `inspect help safety`).
+
 ## Write verbs (conservative, audited, revertible)
 
 Dry-run by default; `--apply` to enact. Every write echoes the resolved

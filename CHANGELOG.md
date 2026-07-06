@@ -11,6 +11,22 @@ The **Kubernetes release** — introduces the k8s runtime medium purely
 additively (docker users see zero change). Work lands in `K<n>` items
 per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
 
+### Security (exit-gate audit)
+
+- **`inspect describe <k8s-ns>/<pod>` no longer leaks inline env secrets.**
+  The exit-gate deep audit (`docs/audits/k8s-medium-deep-audit-2026-07-06.md`,
+  finding H1/S1) caught `describe` embedding the raw `kubectl get pod -o json`
+  object verbatim into the `--json` envelope with no redaction — so an inline
+  `spec.*containers[].env[].value` literal and the always-present
+  `kubectl.kubernetes.io/last-applied-configuration` annotation (a full copy of
+  the applied manifest) crossed the stdout boundary in plaintext. `describe` now
+  structurally scrubs both to `<redacted>` before rendering; `env[].valueFrom`
+  references (secretKeyRef / configMapKeyRef) carry no value and are shown by
+  name. This brings `describe` in line with the secret-blindness the `cat` /
+  `logs` / `grep` / `exec` output paths already enforce. Caught pre-tag — no
+  released version ever shipped the leak. Tests: `k11_scrub_*` in
+  `src/verbs/describe.rs`.
+
 ### Added
 
 - **K6 (part 1) — `inspect test <k8s-ns>` RBAC self-test + metrics probe.**

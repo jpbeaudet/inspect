@@ -1562,6 +1562,9 @@ pub enum Command {
     Events(SimpleSelectorArgs),
     /// (k8s, K11 v0.1.4) Deep object dump for a pod reshaped into the JSON
     /// envelope (kubectl describe has no -o json). `inspect describe <ns>/<pod>`.
+    /// Inline `env[].value` literals and the `last-applied-configuration`
+    /// annotation are masked (`<redacted>`) so secrets do not cross stdout;
+    /// `env[].valueFrom` references (secretKeyRef) are shown by name.
     Describe(SimpleSelectorArgs),
     /// List listening ports.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
