@@ -332,6 +332,14 @@ fn revert_command_pair(
         ));
         return Ok(ExitKind::Error);
     }
+
+    // WD-2 (v0.1.4): a k8s write's revert payload is a self-contained local
+    // `kubectl … rollout undo / scale …` (the entry carries `context`) — run
+    // it LOCALLY. The SSH `plan()` path below has no target for a k8s entry.
+    if entry.context.is_some() {
+        return revert_command_pair_k8s(args, entry, store, &cmd);
+    }
+
     let (runner, nses, targets) = plan(&entry.selector)?;
     let steps: Vec<_> = crate::verbs::dispatch::iter_steps(&nses, &targets).collect();
     let Some(step) = steps.first() else {
@@ -413,6 +421,63 @@ fn revert_command_pair(
     } else {
         ExitKind::Error
     })
+}
+
+/// WD-2 (v0.1.4): execute a k8s write's `command_pair` revert LOCALLY (the
+/// payload is a full `kubectl … undo/scale …` self-contained command). Mirrors
+/// the SSH `revert_command_pair` shape: dry-run by default, then run the
+/// captured kubectl and write a linked revert audit entry.
+fn revert_command_pair_k8s(
+    args: &RevertArgs,
+    entry: &AuditEntry,
+    store: &AuditStore,
+    cmd: &str,
+) -> Result<ExitKind> {
+    let revert = entry.revert.as_ref().expect("kind=command_pair implies Some");
+    let label = entry.selector.clone();
+    let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    if !gate.should_apply() {
+        let mut r = Renderer::new();
+        r.summary(format!("DRY RUN. Would revert audit {} ({label})", entry.id));
+        r.data_line(format!("REVERT: {}", revert.preview));
+        r.data_line(format!("  + {cmd}   (local kubectl)"));
+        r.next("Re-run with --apply to execute");
+        r.print();
+        return Ok(ExitKind::Success);
+    }
+    if let ConfirmResult::Aborted(why) = gate.confirm(Confirm::LargeFanout, 1, "Revert?") {
+        eprintln!("aborted: {why}");
+        return Ok(ExitKind::Error);
+    }
+    let started = Instant::now();
+    let out = std::process::Command::new("sh").arg("-c").arg(cmd).output()?;
+    let dur = started.elapsed().as_millis() as u64;
+    let exit = out.status.code().unwrap_or(1);
+    let ok = out.status.success();
+
+    let mut rev_entry = AuditEntry::new("revert", &label);
+    rev_entry.is_revert = true;
+    rev_entry.reverts = Some(entry.id.clone());
+    rev_entry.args = crate::redact::redact_for_audit(cmd).into_owned();
+    rev_entry.exit = exit;
+    rev_entry.duration_ms = dur;
+    rev_entry.applied = Some(ok);
+    rev_entry.context = entry.context.clone();
+    rev_entry.k8s_namespace = entry.k8s_namespace.clone();
+    store.append(&rev_entry)?;
+
+    let mut r = Renderer::new();
+    if ok {
+        r.summary(format!("reverted audit {} \u{2192} {label} (audit {})", entry.id, rev_entry.id));
+    } else {
+        r.summary(format!(
+            "revert FAILED on {label} (exit {exit}): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    r.next("inspect audit show <id>");
+    r.print();
+    Ok(if ok { ExitKind::Success } else { ExitKind::Error })
 }
 
 fn revert_state_snapshot(

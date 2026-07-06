@@ -216,7 +216,17 @@ verified only once, per the guardrail, inside the `inspect-livetest`
 namespace on maker against a throwaway test deployment (create nginx, apply,
 assert, revert, delete). Tracked so the mutating round-trip isn't skipped.
 
-## WD-2 — `inspect revert` executor must run k8s reverts locally 🟧 (Wave D)
+## WD-2 — `inspect revert` executor must run k8s reverts locally ✅ code-complete (round-trip test = WD-1)
+
+**IMPLEMENTED:** `revert_command_pair` now branches on `entry.context.is_some()`
+→ `revert_command_pair_k8s`, which runs the captured `kubectl … rollout
+undo/scale …` payload **locally** (`sh -c`) instead of over SSH, and writes a
+linked revert audit entry carrying `context`/`k8s_namespace`. Dry-run by
+default (mirrors the SSH path). Compiles + clippy clean. The apply-side
+round-trip (apply a k8s write → `inspect revert --apply` → local kubectl
+undo) is validated together with WD-1 in the `inspect-livetest` sandbox.
+
+_Original finding:_
 
 The F11 revert **capture** for a k8s write is a `command_pair` whose payload
 is a local `kubectl … rollout undo/scale …` (recorded in the audit entry with
