@@ -207,7 +207,21 @@ itself is correct.
 
 ---
 
-## WD-1 — k8s write verbs: `--apply` mutating live-test pending sandbox 🟧 (Wave D)
+## WD-1 — k8s write verbs: `--apply` mutating live-test ✅ DONE (JP-authorized 2026-07-06)
+
+**COMPLETE.** Ran the SMOKE P9 mutating apply+revert round-trip in the
+throwaway `inspect-livetest` namespace on maker (JP-authorized; smoke-nginx
+deploy; isolated INSPECT_HOME; P10 cleanup deleted the deployment + namespace
+— cluster left as found, nothing outside the sandbox touched). Verified live:
+`scale --replicas 2 --apply` → `revert --apply` restored the prior count (3)
+via a LOCAL kubectl (WD-2); `restart --apply` (rollout restart, revert
+captured); `delete <pod> --apply` (controller recreated it). **This test
+caught a real bug** — the revert command_pair payloads omitted `--kubeconfig`,
+so reverts failed on a non-default kubeconfig (`context "z2-maker" does not
+exist`); fixed via `revert_kubectl_prefix()` (commit eee03e0) and re-verified.
+Exactly the class of bug only a live mutating test surfaces.
+
+_Original finding:_
 
 k8s write verbs (K16 restart, K15 scale, …) are coded with dry-run + `--apply`
 + audit + F11 revert-capture + the K5 resolved-target echo. The **dry-run**
