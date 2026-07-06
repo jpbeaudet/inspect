@@ -54,6 +54,11 @@ pub const TOPICS: &[Topic] = &[
         body: Some(include_str!("content/write.md")),
     },
     Topic {
+        id: "kubernetes",
+        summary: "Kubernetes namespaces: addressing, verbs, exit codes (v0.1.4)",
+        body: Some(include_str!("content/kubernetes.md")),
+    },
+    Topic {
         id: "safety",
         summary: "Audit log, snapshots, revert",
         body: Some(include_str!("content/safety.md")),
