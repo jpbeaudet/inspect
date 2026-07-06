@@ -102,7 +102,10 @@ fn scale_k8s(
 
     let revert = match prior {
         Some(p) => Revert::command_pair(
-            format!("kubectl --context {context} -n {k8s_ns} scale deploy/{workload} --replicas={p}"),
+            format!(
+                "{} scale deploy/{workload} --replicas={p}",
+                crate::exec::kubectl::revert_kubectl_prefix(cfg)
+            ),
             format!("scale deploy/{workload} back to {p} replica(s)"),
         ),
         None => Revert::unsupported(format!(

@@ -294,6 +294,25 @@ pub struct K8sExecOut {
     pub failure: Option<KubectlFailure>,
 }
 
+/// The `kubectl … ` prefix STRING for an F11 revert `command_pair` payload —
+/// includes `--context`, `--kubeconfig` (expanded), and `-n`, so the payload
+/// is fully self-contained and runs correctly under `sh -c` locally (WD-1
+/// caught that omitting `--kubeconfig` broke reverts on a non-default
+/// kubeconfig). Values are config-controlled identifiers/paths.
+pub fn revert_kubectl_prefix(cfg: &crate::config::namespace::NamespaceConfig) -> String {
+    let mut s = String::from("kubectl");
+    if let Some(ctx) = cfg.context.as_deref() {
+        s.push_str(&format!(" --context {ctx}"));
+    }
+    if let Some(kc) = cfg.kubeconfig.as_deref() {
+        s.push_str(&format!(" --kubeconfig {}", expand_tilde_kc(kc)));
+    }
+    if let Some(n) = cfg.k8s_namespace.as_deref() {
+        s.push_str(&format!(" -n {n}"));
+    }
+    s
+}
+
 /// A context-pinned `kubectl` base command (K5: `--context` always explicit,
 /// never the ambient current-context) with `--kubeconfig` + `-n` from config.
 /// The caller appends the subcommand (`get` / `describe` / `top` / `events`).

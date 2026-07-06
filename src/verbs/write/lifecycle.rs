@@ -337,7 +337,8 @@ fn lifecycle_k8s(
     } else {
         Revert::command_pair(
             format!(
-                "kubectl --context {context} -n {k8s_ns} rollout undo deploy/{workload} --to-revision={current_rev}"
+                "{} rollout undo deploy/{workload} --to-revision={current_rev}",
+                crate::exec::kubectl::revert_kubectl_prefix(cfg)
             ),
             format!("rollout undo deploy/{workload} to revision {current_rev}"),
         )
