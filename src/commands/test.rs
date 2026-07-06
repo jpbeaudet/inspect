@@ -54,12 +54,12 @@ pub fn run(args: TestArgs) -> anyhow::Result<ExitKind> {
     let r = resolver::resolve(&args.namespace)?;
     let cfg = &r.config;
 
-    // K4 (v0.1.4): a k8s namespace is reached via kubectl locally, not SSH.
+    // A k8s namespace is reached via kubectl locally, not SSH.
     // Its `test` runs k8s-appropriate checks (config, kubectl backend, API
     // reachability) and skips the SSH key/tcp checks that are nonsensical for
     // a kubeconfig target (running them would report bogus "no key_path" /
     // "no host" failures — itself a mindtrap). API failures are classified
-    // through the K4 taxonomy so an agent gets a stable `failure_class` + a
+    // through the taxonomy so an agent gets a stable `failure_class` + a
     // chained hint rather than raw kubectl prose.
     if cfg.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
         let checks = k8s_checks(cfg, &r.name);
@@ -146,9 +146,9 @@ pub fn run(args: TestArgs) -> anyhow::Result<ExitKind> {
     })
 }
 
-/// K4 (v0.1.4): the k8s check set — config, kubectl backend presence, and a
+/// The k8s check set — config, kubectl backend presence, and a
 /// context-pinned API-reachability probe. Any kubectl failure is routed
-/// through the K4 classifier so the reported detail is
+/// through the classifier so the reported detail is
 /// `[<failure_class>] <hint>` rather than raw kubectl stderr.
 fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Vec<Check> {
     use crate::exec::kubectl;
@@ -168,7 +168,7 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
         }),
     }
 
-    // 2. kubectl backend presence (K3). Without it, no API probe is possible.
+    // 2. kubectl backend presence. Without it, no API probe is possible.
     let probe = kubectl::probe_kubectl();
     if probe.available {
         let mut detail = probe.version.clone().unwrap_or_else(|| "present".into());
@@ -195,8 +195,8 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
         return checks; // no point probing the API without kubectl
     }
 
-    // 3. API reachability — context-pinned per the K5 anti-footgun invariant
-    //    (never the ambient current-context). Failures are classified (K4).
+    // 3. API reachability — context-pinned per the anti-footgun invariant
+    //    (never the ambient current-context). Failures are classified.
     let mut cmd = k8s_kubectl_base(cfg);
     cmd.args(["version", "--output=json", "--request-timeout=5s"]);
     let api_ok = match cmd.output() {
@@ -228,7 +228,7 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
         }
     };
 
-    // 4-5. RBAC self-test + metrics-server probe (K6) — only meaningful once
+    // 4-5. RBAC self-test + metrics-server probe — only meaningful once
     //      the API is reachable. `auth can-i` pre-empts a mid-task Forbidden
     //      (research w3-P2); the metrics probe pre-answers `top` (w3-P6).
     if api_ok {
@@ -238,7 +238,7 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
     checks
 }
 
-/// A context-pinned (K5) kubectl base command — `--context` + `--kubeconfig`
+/// A context-pinned kubectl base command — `--context` + `--kubeconfig`
 /// from config, never the ambient current-context. The k8s namespace `-n`
 /// scope is added per-call where relevant (not on cluster-scoped calls).
 fn k8s_kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> std::process::Command {
@@ -252,7 +252,7 @@ fn k8s_kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> std::pro
     cmd
 }
 
-/// K6 RBAC self-test: run `kubectl auth can-i` for the EXACT verbs inspect
+/// RBAC self-test: run `kubectl auth can-i` for the EXACT verbs inspect
 /// uses (not a superset — bible security-scope-narrower). Reads are essential
 /// (deny → fail); the writes are optional capabilities (deny → warn, you can
 /// still diagnose). Pre-empts the mid-task Forbidden that is the #1 RBAC pain.
@@ -322,7 +322,7 @@ fn rbac_verdict(denied_reads: &[String], denied_writes: &[String]) -> Check {
     }
 }
 
-/// K6 metrics-server probe: pre-answers whether `top` will work, so an agent
+/// Metrics-server probe: pre-answers whether `top` will work, so an agent
 /// isn't surprised by `metrics_unavailable` mid-task (research w3-P6). A
 /// missing metrics-server is a cluster-component gap (Warn), not a failure.
 fn k8s_metrics_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {

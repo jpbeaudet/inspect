@@ -179,7 +179,7 @@ fn show(
     id_prefix: &str,
     format: &crate::format::FormatArgs,
 ) -> Result<ExitKind> {
-    // SMOKE 2026-05-09 fail-fast (v0.1.3): empty id_prefix used to
+    // Fail-fast (2026-05-09): empty id_prefix used to
     // silently match the first entry in iteration order (because
     // `"".starts_with("")` is true for every audit id). Surfaced
     // during smoke: a `--select-raw` projection upstream yielded

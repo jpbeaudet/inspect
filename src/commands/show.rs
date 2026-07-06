@@ -19,7 +19,7 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
 
     let is_k8s = r.config.runtime_kind() == RuntimeKind::K8s;
 
-    // K3/WA-3 (v0.1.4, JP-2026-07-05): `show` is a pure CONFIG READ — it
+    // (JP-2026-07-05): `show` is a pure CONFIG READ — it
     // ALWAYS displays the on-disk config plus a kubectl *readiness line*, and
     // NEVER hard-fails / breaks `--json` on an absent backend. Enforcement of
     // "kubectl must be present" belongs to the ACTION verbs (test / setup /
@@ -32,7 +32,7 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
     };
 
     if args.format.is_json() {
-        // K2 (v0.1.4): schema 2 adds `type` + the k8s addressing fields.
+        // Schema 2 adds `type` + the k8s addressing fields.
         // SSH-only fields serialize as their real value (null for a k8s
         // namespace, since they are inert / unset there).
         let body = format!(
@@ -65,11 +65,11 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             kubeconfig = json_opt_string(&r.config.kubeconfig),
             context = json_opt_string(&r.config.context),
             k8sns = json_opt_string(&r.config.k8s_namespace),
-            // K3 (v0.1.4): kubectl backend readiness. For k8s namespaces
+            // Kubectl backend readiness. For k8s namespaces
             // the preflight above guarantees availability (absent bails),
             // so this is `true` with the detected client version; docker
             // namespaces carry `false`/null (the field is inert there).
-            // WA-3: reflect the ACTUAL probe, not a hardcoded `true` — `show`
+            // Reflect the ACTUAL probe, not a hardcoded `true` — `show`
             // no longer preflights, so kubectl may genuinely be absent.
             kavail = k8s_probe
                 .as_ref()
@@ -114,7 +114,7 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             "  namespace:           {}",
             r.config.k8s_namespace.as_deref().unwrap_or("<default>")
         );
-        // WA-3 (v0.1.4): the kubectl backend readiness line — reported, not
+        // The kubectl backend readiness line — reported, not
         // enforced. Present → version; absent → NOT FOUND + the fix, so an
         // operator sees exactly why an action verb will refuse without `show`
         // itself failing.
@@ -147,7 +147,7 @@ pub fn run(args: ShowArgs) -> anyhow::Result<ExitKind> {
             // key/value list (no colon on some rows = an agent trap).
             println!("  {:<21}N/A (k8s)", format!("{field}:"));
         }
-        // K3 (v0.1.4): a below-floor kubectl warns (never fails) — every
+        // A below-floor kubectl warns (never fails) — every
         // k8s verb inspect drives works far below the floor; this is a
         // heads-up, not a gate.
         if let Some(w) = k8s_probe.as_ref().and_then(|p| p.floor_warning()) {

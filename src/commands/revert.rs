@@ -333,7 +333,7 @@ fn revert_command_pair(
         return Ok(ExitKind::Error);
     }
 
-    // WD-2 (v0.1.4): a k8s write's revert payload is a self-contained local
+    // A k8s write's revert payload is a self-contained local
     // `kubectl … rollout undo / scale …` (the entry carries `context`) — run
     // it LOCALLY. The SSH `plan()` path below has no target for a k8s entry.
     if entry.context.is_some() {
@@ -423,7 +423,7 @@ fn revert_command_pair(
     })
 }
 
-/// WD-2 (v0.1.4): execute a k8s write's `command_pair` revert LOCALLY (the
+/// Execute a k8s write's `command_pair` revert LOCALLY (the
 /// payload is a full `kubectl … undo/scale …` self-contained command). Mirrors
 /// the SSH `revert_command_pair` shape: dry-run by default, then run the
 /// captured kubectl and write a linked revert audit entry.

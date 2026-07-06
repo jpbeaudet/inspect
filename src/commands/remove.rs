@@ -34,7 +34,7 @@ pub fn run(args: RemoveArgs) -> anyhow::Result<ExitKind> {
         }
         servers.namespaces.remove(&args.namespace);
         file::save(&servers)?;
-        // WA-1 (v0.1.4): name the RESOLVED servers.toml path so an agent
+        // Name the RESOLVED servers.toml path so an agent
         // knows exactly which file changed (honors INSPECT_HOME).
         println!(
             "SUMMARY: namespace '{}' removed from {}",

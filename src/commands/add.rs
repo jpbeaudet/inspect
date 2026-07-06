@@ -24,7 +24,7 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
         )));
     }
 
-    // K2 (v0.1.4): a `--type k8s` namespace collects kubeconfig /
+    // A `--type k8s` namespace collects kubeconfig /
     // context / namespace and skips the SSH host/user/key prompts
     // entirely (it is addressed by its kubeconfig context, not SSH).
     let is_k8s = matches!(
@@ -98,7 +98,7 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
     servers.namespaces.insert(args.namespace.clone(), cfg);
     file::save(&servers).context("writing servers.toml")?;
 
-    // WA-1 (v0.1.4): report the RESOLVED servers.toml path, not a literal
+    // Report the RESOLVED servers.toml path, not a literal
     // `~/.inspect/servers.toml`. When `INSPECT_HOME` relocates config, the
     // hardcoded string lied about where the write landed — a silent
     // "what I said" vs "what I did" divergence that traps an agent going to
@@ -114,7 +114,7 @@ pub fn run(args: AddArgs) -> anyhow::Result<ExitKind> {
     } else {
         println!("DATA:    host, user, port, key_path stored (passphrases never on disk)");
     }
-    // WA-3 (v0.1.4): the NEXT hint must be runtime-aware. A k8s namespace
+    // The NEXT hint must be runtime-aware. A k8s namespace
     // is sessionless (kubeconfig is stateless) — suggesting `inspect
     // connect` there is a mindtrap: `connect` requires an SSH host and
     // fails with `namespace has no host` (exit 2). Only docker namespaces

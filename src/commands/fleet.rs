@@ -145,7 +145,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
         }
     }
 
-    // H2: compute the total target count before fanout so the
+    // Compute the total target count before fanout so the
     // large-fanout interlock fires on the actual fanout size, not just
     // the namespace count. We do a best-effort dry-resolve against each
     // chosen namespace's cached profile; if a profile isn't present the
@@ -203,7 +203,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     let plan: Vec<NsPlan> = chosen
         .iter()
         .map(|ns| {
-            // K21 (v0.1.4): k8s child verbs detect their namespace by parsing
+            // K8s child verbs detect their namespace by parsing
             // the selector, not the fleet env-pin — so for a k8s namespace we
             // pass the ns (or `<ns>/<inner-token>`) as a direct positional
             // selector, making the child a normal `inspect <verb> <ns>` call.
@@ -481,7 +481,7 @@ fn rewrite_inner_selector(raw: &str) -> Result<Option<String>> {
     Ok(Some(format!("_/{trimmed}")))
 }
 
-/// H2: estimate the total number of targets fleet will end up invoking
+/// Estimate the total number of targets fleet will end up invoking
 /// the inner verb on. Uses each namespace's cached profile when
 /// available; falls back to `1` per namespace.
 fn estimate_total_targets(chosen: &[String], selector: Option<&str>, force_ns_mode: bool) -> usize {
@@ -655,7 +655,7 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
 /// For a k8s namespace a selector-verb gets a
 /// **direct positional selector** (`<ns>` or `<ns>/<inner-token>`) instead of
 /// the env-pin, since k8s child verbs resolve their namespace by parsing the
-/// selector (K21).
+/// selector.
 fn build_child_args_for(verb: &str, user_args: &[String], ns: &str, is_k8s: bool) -> Vec<String> {
     let mut out = Vec::with_capacity(user_args.len() + 2);
     out.push(verb.to_string());
@@ -798,7 +798,7 @@ fn run_child(
     }
     cmd.env("INSPECT_NON_INTERACTIVE", "1");
 
-    // H1: `output()` drains both pipes concurrently, avoiding the
+    // `output()` drains both pipes concurrently, avoiding the
     // deadlock that `read_to_string` on each pipe in sequence can hit
     // when a child writes >64 KB to stderr before exiting.
     match cmd.output() {

@@ -31,7 +31,7 @@ use crate::verbs::runtime::{current_runner, resolve_target, RemoteRunner};
 pub const LOG_TAIL_CAP: u32 = 200;
 
 pub fn run(args: WhyArgs) -> Result<ExitKind> {
-    // K10 (v0.1.4): a k8s namespace assembles the diagnostic from kubectl
+    // A k8s namespace assembles the diagnostic from kubectl
     // (pod status + conditions + restart/exit reasons + recent events), not
     // the SSH/compose walk.
     if let Some(ns_name) = args.selector.split('/').next() {
@@ -843,7 +843,7 @@ fn build_container_hint(raw_selector: &str) -> Option<String> {
     None
 }
 
-/// K10 (v0.1.4): `inspect why <k8s-ns>/<pod>` — the k8s deep diagnostic.
+/// `inspect why <k8s-ns>/<pod>` — the k8s deep diagnostic.
 /// Assembles pod phase + per-container readiness/restart/last-terminated
 /// reason + recent Events into the standard envelope with a severity rollup
 /// and chained next-action hints (e.g. `--previous` on a CrashLoop). Runs

@@ -21,11 +21,11 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     let resolved = resolver::resolve(&args.namespace)?;
     resolved.config.validate(&resolved.name)?;
 
-    // K6 (v0.1.4): a k8s namespace discovers via a local, context-pinned
+    // A k8s namespace discovers via a local, context-pinned
     // `kubectl get pods -o json` (never SSH). Divert before SshTarget, which
     // would fail on a hostless k8s config.
     if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
-        // WA-3 (JP-2026-07-05): enforcement lives in the ACTION verbs. `setup`
+        // Enforcement lives in the ACTION verbs (JP-2026-07-05). `setup`
         // needs kubectl to discover, so it fails loud/specific/actionable (the
         // four-question error) when kubectl is absent — unlike `show`, which
         // only reports readiness.
@@ -202,7 +202,7 @@ fn print_human(p: &Profile, status: &str) {
     println!("DATA:");
     let is_k8s = p.runtime.as_deref() == Some("k8s");
     if is_k8s {
-        // WA-7: a k8s profile has no remote SSH host to probe for
+        // A k8s profile has no remote SSH host to probe for
         // rg/jq/docker — showing that docker-centric line is a mindtrap.
         // Surface the k8s-relevant facts instead.
         println!("  runtime:        kubernetes (context pinned: {})", p.host);
@@ -368,7 +368,7 @@ fn merge_retry(prev: &Profile, fresh: &Profile) -> Profile {
     merged
 }
 
-/// B1 (v0.1.2): run [`discovery::ssh_precheck`] and translate any
+/// Run [`discovery::ssh_precheck`] and translate any
 /// failure into a fatal `anyhow::Error` carrying a chained,
 /// human-readable hint. The error message is shaped so that
 /// `error::topic_for_message()` will append `see: inspect help ssh`.

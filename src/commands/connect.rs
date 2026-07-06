@@ -50,8 +50,8 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
 
     let resolved = resolver::resolve(&args.namespace)?;
 
-    // Q6 (v0.1.4): k8s namespaces are sessionless. The kubeconfig context is
-    // resolved per-verb from config and pinned explicitly (K5), so there is no
+    // K8s namespaces are sessionless. The kubeconfig context is
+    // resolved per-verb from config and pinned explicitly, so there is no
     // persistent connection to open — and no sticky `current-context` footgun.
     // Report N/A clearly rather than attempting an SSH master that would fail
     // on a hostless config.
