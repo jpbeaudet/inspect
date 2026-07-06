@@ -207,7 +207,37 @@ itself is correct.
 
 ---
 
+## WD-1 — k8s write verbs: `--apply` mutating live-test pending sandbox 🟧 (Wave D)
+
+k8s write verbs (K16 restart, K15 scale, …) are coded with dry-run + `--apply`
++ audit + F11 revert-capture + the K5 resolved-target echo. The **dry-run**
+path is live-verified (no mutation). The **`--apply` mutating** path is
+verified only once, per the guardrail, inside the `inspect-livetest`
+namespace on maker against a throwaway test deployment (create nginx, apply,
+assert, revert, delete). Tracked so the mutating round-trip isn't skipped.
+
+## WD-2 — `inspect revert` executor must run k8s reverts locally 🟧 (Wave D)
+
+The F11 revert **capture** for a k8s write is a `command_pair` whose payload
+is a local `kubectl … rollout undo/scale …` (recorded in the audit entry with
+`context`/`k8s_namespace`). But the existing `inspect revert` executor
+dispatches `command_pair` payloads over **SSH** to a remote target — a k8s
+namespace has none. So `inspect revert <id>` on a k8s entry must detect the
+`context` field and run the captured kubectl **locally** instead. The capture
+contract (record-the-inverse-before-apply) is met now; the auto-execution
+wiring is this tracked item. Until it lands, the audit entry shows the exact
+manual `kubectl` inverse to run.
+
+---
+
 ## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K16 k8s `inspect restart`** (rollout-restart) dry-run live-verified vs
+  maker: `restart makersys/coredns` → "DRY RUN. Would rollout-restart
+  deploy/coredns in namespace 'kube-system' on context 'z2-maker'" + the
+  command + revert preview, exit 0 (NO mutation); `stop`/`start` refuse with
+  a `scale --replicas` hint (K20 pod-immutability). The resolved-target
+  anti-footgun echo (context+namespace+workload) is present on every path.
 
 - **K6 k8s discovery** (`inspect setup <k8s-ns>`) live-passes against maker:
   pointed at `kube-system`, `inspect setup` discovered **7 pods → 7 services**

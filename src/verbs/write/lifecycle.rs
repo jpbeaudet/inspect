@@ -60,6 +60,19 @@ pub fn reload(args: LifecycleArgs) -> Result<ExitKind> {
 }
 
 fn run(act: Action, args: LifecycleArgs) -> Result<ExitKind> {
+    // K16 (v0.1.4): a k8s namespace runs the lifecycle op via kubectl —
+    // `restart`/`reload` -> `kubectl rollout restart`; `stop`/`start` refuse
+    // with a `scale --replicas` hint (K20). Every write echoes the resolved
+    // {context, namespace, workload} (K5 anti-footgun) and is dry-run by
+    // default. Branch before the SSH plan().
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return lifecycle_k8s(act, &args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
     let steps: Vec<Step> = iter_steps(&nses, &targets)
         .filter(|s| s.service().is_some())
@@ -247,5 +260,119 @@ fn build_revert(act: Action, svc: &str, container: &str, kind: ServiceKind) -> R
         (_, Action::Reload) => {
             Revert::unsupported(format!("reload (SIGHUP) has no inverse for {svc}"))
         }
+    }
+}
+
+/// K16 (v0.1.4): k8s lifecycle via kubectl. `restart`/`reload` map to
+/// `kubectl rollout restart deploy/<w>`; `stop`/`start` refuse with a
+/// `scale --replicas` hint (K20). Dry-run by default; on `--apply` the
+/// current rollout revision is captured FIRST so the F11 revert is a real
+/// `rollout undo --to-revision=<n>` command_pair. Every path echoes the
+/// resolved {context, k8s_namespace, workload} (K5 anti-footgun).
+fn lifecycle_k8s(
+    act: Action,
+    args: &LifecycleArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let workload = args.selector.split_once('/').map(|(_, r)| r).unwrap_or("");
+    if workload.is_empty() {
+        crate::error::emit(format!("{}: specify a workload — `{ns}/<deploy>`", act.as_str()));
+        return Ok(ExitKind::Error);
+    }
+    // Only rollout-restart is a supported k8s write here; stop/start -> scale.
+    if !matches!(act, Action::Restart | Action::Reload) {
+        crate::error::emit(format!(
+            "{act} is not supported for k8s pods — scale the workload instead: \
+             `inspect scale {ns}/{workload} --replicas=<n>` (0 to stop). Pods are \
+             immutable; there is no stop/start.",
+            act = act.as_str(),
+        ));
+        return Ok(ExitKind::Error);
+    }
+
+    let context = cfg.context.as_deref().unwrap_or("<none>");
+    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    // The K5 anti-footgun echo — which cluster + namespace + workload.
+    let target_line = format!(
+        "deploy/{workload} in namespace '{k8s_ns}' on context '{context}'"
+    );
+
+    let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    if !gate.should_apply() {
+        let mut r = Renderer::new();
+        r.summary(format!("DRY RUN. Would rollout-restart {target_line}"));
+        r.data_line(format!("command: kubectl rollout restart deploy/{workload}"));
+        r.data_line(
+            "revert:  kubectl rollout undo --to-revision=<current> (captured at --apply time)"
+                .to_string(),
+        );
+        r.next("Re-run with --apply to execute".to_string());
+        r.print();
+        return Ok(ExitKind::Success);
+    }
+    match gate.confirm(Confirm::LargeFanout, 1, &format!("Rollout-restart {target_line}?")) {
+        ConfirmResult::Aborted(why) => {
+            eprintln!("aborted: {why}");
+            return Ok(ExitKind::Error);
+        }
+        ConfirmResult::DryRun => unreachable!(),
+        ConfirmResult::Apply => {}
+    }
+
+    // F11 capture-before-apply: the current revision is the undo target.
+    let rev_out = crate::exec::kubectl::kubectl_base(cfg)
+        .args([
+            "get",
+            &format!("deploy/{workload}"),
+            "-o",
+            "jsonpath={.metadata.annotations.deployment\\.kubernetes\\.io/revision}",
+        ])
+        .output()?;
+    let current_rev = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+    let revert = if current_rev.is_empty() {
+        Revert::unsupported(format!(
+            "kubectl rollout undo deploy/{workload} (revision unknown)"
+        ))
+    } else {
+        Revert::command_pair(
+            format!(
+                "kubectl --context {context} -n {k8s_ns} rollout undo deploy/{workload} --to-revision={current_rev}"
+            ),
+            format!("rollout undo deploy/{workload} to revision {current_rev}"),
+        )
+    };
+    if args.revert_preview {
+        eprintln!("[inspect] revert preview {ns}/{workload}: {}", revert.preview);
+    }
+
+    let started = Instant::now();
+    let out = crate::exec::kubectl::kubectl_base(cfg)
+        .args(["rollout", "restart", &format!("deploy/{workload}")])
+        .output()?;
+    let dur = started.elapsed().as_millis() as u64;
+    let success = out.status.success();
+
+    let mut entry = AuditEntry::new("restart", &format!("{ns}/{workload}"));
+    entry.exit = out.status.code().unwrap_or(1);
+    entry.duration_ms = dur;
+    entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+    entry.context = Some(context.to_string());
+    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.revert = Some(revert);
+    entry.applied = Some(success);
+    AuditStore::open()?.append(&entry)?;
+    crate::verbs::cache::invalidate(ns);
+
+    if success {
+        println!("SUMMARY: rollout-restarted {target_line}");
+        println!("DATA:    revert captured (rollout undo to revision {current_rev})");
+        println!("NEXT:    inspect audit ls   inspect status {ns}/{workload}");
+        Ok(ExitKind::Success)
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let f = crate::exec::kubectl::classify_kubectl_failure(&stderr, entry.exit);
+        crate::tee_eprintln!("restart: [{}] {}", f.failure_class(), f.hint(""));
+        Ok(ExitKind::Inner(f.exit_code()))
     }
 }
