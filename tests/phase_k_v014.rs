@@ -540,3 +540,61 @@ fn k16_restart_k8s_dry_run_echoes_rollout_restart_target() {
                 .and(contains("web")),
         );
 }
+
+// ---- K11–K13 (v0.1.4): k8s-only read verbs — contract edges ----------
+//
+// describe / events / top are Kubernetes-only reads: they REFUSE a docker
+// namespace with a chained pointer (never a raw runtime error) and error on a
+// missing target before any kubectl call. Their happy-path output parsing +
+// envelope shape is exercised against a live cluster in the release smoke
+// (reads are non-destructive); `describe`'s secret scrub is unit-tested in
+// `src/verbs/describe.rs` (k11_scrub_*). These pin the cluster-independent
+// contract edges so the read surface is not wholly untested (audit G2).
+
+/// K11: `describe` refuses a docker namespace.
+#[test]
+fn k11_describe_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K11DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K11DOCK_USER", "u")
+        .args(["describe", "k11dock/some-pod"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
+
+/// K11: `describe` on a k8s namespace with no pod errors before any kubectl.
+#[test]
+fn k11_describe_errors_on_missing_pod() {
+    inspect()
+        .env("INSPECT_K11NP_TYPE", "k8s")
+        .env("INSPECT_K11NP_CONTEXT", "inspect-test-ctx")
+        .args(["describe", "k11np"])
+        .assert()
+        .failure()
+        .stderr(contains("specify a pod"));
+}
+
+/// K12: `events` refuses a docker namespace.
+#[test]
+fn k12_events_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K12DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K12DOCK_USER", "u")
+        .args(["events", "k12dock"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
+
+/// K13: `top` refuses a docker namespace with a pointer to status/health.
+#[test]
+fn k13_top_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K13DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K13DOCK_USER", "u")
+        .args(["top", "k13dock"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
