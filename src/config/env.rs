@@ -8,9 +8,9 @@
 //! - `INSPECT_<NS>_KEY_PATH`
 //! - `INSPECT_<NS>_KEY_PASSPHRASE_ENV`
 //! - `INSPECT_<NS>_KEY_INLINE`
-//! - `INSPECT_<NS>_TYPE` (K2, v0.1.4 — `docker` | `k8s`)
+//! - `INSPECT_<NS>_TYPE` (`docker` | `k8s`)
 //! - `INSPECT_<NS>_KUBECONFIG` / `INSPECT_<NS>_CONTEXT` /
-//!   `INSPECT_<NS>_NAMESPACE` (K2 — kubernetes addressing)
+//!   `INSPECT_<NS>_NAMESPACE` (kubernetes addressing)
 //!
 //! `KEY_PATH` and `KEY_INLINE` are mutually exclusive; the resolver returns
 //! both so the caller's [`NamespaceConfig::validate`] can flag conflicts.
@@ -31,7 +31,7 @@ pub fn read_env(namespace: &str) -> Option<NamespaceConfig> {
     let key_path = std::env::var(format!("{prefix}KEY_PATH")).ok();
     let key_passphrase_env = std::env::var(format!("{prefix}KEY_PASSPHRASE_ENV")).ok();
     let key_inline = std::env::var(format!("{prefix}KEY_INLINE")).ok();
-    // K2 (v0.1.4): kubernetes addressing overrides.
+    // Kubernetes addressing overrides.
     let runtime_type = std::env::var(format!("{prefix}TYPE")).ok();
     let kubeconfig = std::env::var(format!("{prefix}KUBECONFIG")).ok();
     let context = std::env::var(format!("{prefix}CONTEXT")).ok();

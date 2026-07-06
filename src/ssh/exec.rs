@@ -205,7 +205,7 @@ pub fn run_remote(
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
     } else {
-        // G4 (v0.1.3): when we are NOT attaching to an inspect-owned
+        // When we are NOT attaching to an inspect-owned
         // ControlMaster socket, force `ControlMaster=no` so an
         // operator's personal `ControlMaster auto` in ~/.ssh/config
         // cannot promote this short-lived dispatch into a backgrounded
@@ -458,7 +458,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
     } else {
-        // G4 (v0.1.3): force `ControlMaster=no` on the direct-ssh
+        // Force `ControlMaster=no` on the direct-ssh
         // path. See `run_remote` above for rationale.
         ssh.arg("-o").arg("ControlMaster=no");
     }
@@ -640,7 +640,7 @@ pub fn run_remote_streaming<F: FnMut(&str)>(
     Ok(exit_code)
 }
 
-/// B7 (v0.1.2) capturing streaming variant. Pumps remote stdout
+/// Capturing streaming variant. Pumps remote stdout
 /// line-by-line through `on_line` for live display **and** captures
 /// every emitted line into the returned [`RemoteOutput`] so callers
 /// (notably `inspect exec`, which writes the audit log) keep a
@@ -685,7 +685,7 @@ pub fn run_remote_streaming_capturing<F: FnMut(&str)>(
             .arg("-o")
             .arg(format!("ControlPath={}", socket.display()));
     } else {
-        // G4 (v0.1.3): force `ControlMaster=no` on the direct-ssh
+        // Force `ControlMaster=no` on the direct-ssh
         // path. See `run_remote` above for rationale.
         ssh.arg("-o").arg("ControlMaster=no");
     }

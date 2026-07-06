@@ -81,7 +81,7 @@ pub enum SelectorError {
         services: String,
         groups: String,
         aliases: String,
-        /// B2 (v0.1.2): optional one-line migration breadcrumb when
+        /// Optional one-line migration breadcrumb when
         /// the selector text looks like a pre-v0.1.1 long Docker
         /// container name (e.g. `luminary-worker`) and a matching
         /// short service name exists. Empty string when no
@@ -255,7 +255,7 @@ fn fmt_set(s: &BTreeSet<String>) -> String {
     }
 }
 
-/// B2 (v0.1.2): build a one-line migration breadcrumb when the user's
+/// Build a one-line migration breadcrumb when the user's
 /// selector text looks like a pre-v0.1.1 long Docker container name
 /// (e.g. `luminary-worker`) AND a matching short service name (e.g.
 /// `worker`) is present in the discovered profile. The note appears
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(got, vec!["prod-1".to_string(), "prod-2".to_string()]);
     }
 
-    // --- B2 (v0.1.2): legacy selector migration breadcrumb ---
+    // --- Legacy selector migration breadcrumb ---
 
     fn services(set: &[&str]) -> BTreeSet<String> {
         set.iter().map(|s| s.to_string()).collect()

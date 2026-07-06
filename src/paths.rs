@@ -56,7 +56,7 @@ pub fn servers_toml() -> PathBuf {
 /// an `INSPECT_HOME` override under `/tmp` or a CI sandbox — is shown as its
 /// real absolute path.
 ///
-/// This is the WA-1 (v0.1.4) anti-mindtrap contract: a message must never
+/// This is the anti-mindtrap contract: a message must never
 /// name `~/.inspect/...` when the tool actually wrote somewhere else, or an
 /// agent that follows the reported path finds nothing there. With
 /// `INSPECT_HOME` unset the output is byte-identical to the old hardcoded

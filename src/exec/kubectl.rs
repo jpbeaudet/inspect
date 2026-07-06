@@ -1,6 +1,6 @@
-//! K3 (v0.1.4): local `kubectl` backend probe + preflight.
+//! Local `kubectl` backend probe + preflight.
 //!
-//! The kubectl shell-out backend (Q2) is only as reliable as the
+//! The kubectl shell-out backend is only as reliable as the
 //! `kubectl` binary being present on the **local** machine's PATH. k8s
 //! namespaces run kubectl locally against the kubeconfig context —
 //! surface map §10: the k8s transport is local, not SSH — so this probe
@@ -22,8 +22,8 @@ use std::process::Command;
 /// `rollout restart` (kubectl ≥1.15), `scale`, `auth can-i` — is supported
 /// well below this floor, so an older kubectl is a "you are on something
 /// ancient, expect rough edges" nudge, not a hard gate. Enforced as a
-/// warning by [`floor_warning`]. (Warn-not-fail is the choice recorded in
-/// the K3 spec: "pick warn unless the plan says fail, and document it.")
+/// warning by [`floor_warning`]. (Warn-not-fail is deliberate:
+/// "pick warn unless the plan says fail, and document it.")
 pub const KUBECTL_MIN_MAJOR: u32 = 1;
 /// See [`KUBECTL_MIN_MAJOR`].
 pub const KUBECTL_MIN_MINOR: u32 = 19;
@@ -177,20 +177,20 @@ pub fn not_found_message(namespace: &str, path_searched: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// K4 (v0.1.4): k8s failure-class taxonomy + stderr classifier.
+// k8s failure-class taxonomy + stderr classifier.
 //
 // kubectl collapses NotFound / Forbidden / Unreachable / metrics-absent all
 // into a single non-zero exit with the distinction only in stderr *prose*.
 // inspect's job is to parse that prose into a stable, agent-branchable
 // `failure_class` string + a CI-gate-quality hint, so an agent never has to
 // scrape kubectl's English. The exit code stays the coarse class (transport
-// reuses the F13 12–14 band by semantic class); `failure_class` is the fine
+// reuses the 12–14 band by semantic class); `failure_class` is the fine
 // detail. Fixtures in the test module are REAL strings harvested from the
 // live maker/hub clusters (the harvest commands are recorded there).
 // ---------------------------------------------------------------------------
 
 /// A classified k8s failure. The `failure_class()` string is the stable
-/// agent-branch discriminator; `exit_code()` is the coarse band (WA-4). See
+/// agent-branch discriminator; `exit_code()` is the coarse band. See
 /// `exit_code()` for the full documented exit-code table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KubectlFailure {
@@ -213,7 +213,7 @@ pub enum KubectlFailure {
 
 impl KubectlFailure {
     /// The stable `failure_class` JSON/SUMMARY string. Transport classes
-    /// reuse the F13 `TransportClass` strings so the value space is uniform
+    /// reuse the `TransportClass` strings so the value space is uniform
     /// across mediums.
     pub fn failure_class(self) -> &'static str {
         match self {
@@ -227,9 +227,9 @@ impl KubectlFailure {
         }
     }
 
-    /// The coarse exit code an agent branches on (WA-4, JP-2026-07-05). Two
+    /// The coarse exit code an agent branches on (JP-2026-07-05). Two
     /// documented bands adjacent to each other; `failure_class()` carries the
-    /// fine detail. **Transport band** (parallel to the F13 SSH band 12–14):
+    /// fine detail. **Transport band** (parallel to the SSH band 12–14):
     /// `transport_unreachable` → 13, `transport_auth_failed` → 14,
     /// `rbac_forbidden` → 14 (an authorization failure; `failure_class`
     /// distinguishes it from a credential expiry). **Operational-degradation
@@ -299,24 +299,24 @@ impl KubectlFailure {
     }
 }
 
-/// Result of running a command inside a pod via `kubectl exec` (K9). On
+/// Result of running a command inside a pod via `kubectl exec`. On
 /// failure, `failure` carries the classified class (which yields both the
 /// exit code via `exit_code()` and the hint) — so the raw stderr/exit are not
 /// re-exposed here.
 pub struct K8sExecOut {
     pub stdout: String,
-    /// `Some` when the exec failed — the classified failure (K4), so the
-    /// caller can branch (e.g. `no_shell_in_container` → exit 16, WA-4).
+    /// `Some` when the exec failed — the classified failure, so the
+    /// caller can branch (e.g. `no_shell_in_container` → exit 16).
     pub failure: Option<KubectlFailure>,
 }
 
-/// The `kubectl … ` prefix STRING for an F11 revert `command_pair` payload —
+/// The `kubectl … ` prefix STRING for a revert `command_pair` payload —
 /// includes `--context`, `--kubeconfig` (expanded), and an explicit, resolved
 /// `-n <ns>` (from [`effective_namespace`]), so the payload is fully
-/// self-contained and reverts in the SAME namespace the mutation targeted (WD-1
-/// caught that omitting `--kubeconfig` broke reverts on a non-default
-/// kubeconfig; H3 extends that to pinning the resolved namespace so a revert
-/// never lands in a different namespace than the apply). Values are
+/// self-contained and reverts in the SAME namespace the mutation targeted
+/// (omitting `--kubeconfig` broke reverts on a non-default kubeconfig; pinning
+/// the resolved namespace ensures a revert never lands in a different namespace
+/// than the apply). Values are
 /// config-controlled identifiers/paths.
 pub fn revert_kubectl_prefix_in(
     cfg: &crate::config::namespace::NamespaceConfig,
@@ -333,10 +333,10 @@ pub fn revert_kubectl_prefix_in(
     s
 }
 
-/// A context-pinned `kubectl` base command (K5: `--context` always explicit,
+/// A context-pinned `kubectl` base command (`--context` always explicit,
 /// never the ambient current-context) with `--kubeconfig` + `-n` from config.
 /// The caller appends the subcommand (`get` / `describe` / `top` / `events`).
-/// Reused by K10 `why`, K11 `describe`, K12 `events`, K13 `top`, K14. When
+/// Reused by the read verbs (`why`, `describe`, `events`, `top`, and more). When
 /// `k8s_namespace` is unset the `-n` flag is omitted and kubectl uses the
 /// context's default namespace — fine for reads; write verbs instead resolve
 /// and pin the namespace explicitly (see [`kubectl_base_in`]).
@@ -351,7 +351,7 @@ pub fn kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> Command 
 /// Like [`kubectl_base`] but pins an explicit, already-resolved `-n <ns>` (from
 /// [`effective_namespace`]) regardless of `cfg.k8s_namespace`. The k8s **write**
 /// verbs use this so the mutating command targets exactly the namespace named
-/// in the dry-run preview, the confirm prompt, and the `AuditEntry` (H3/O1) —
+/// in the dry-run preview, the confirm prompt, and the `AuditEntry` —
 /// never an implicit context-default the audit can't see.
 pub fn kubectl_base_in(cfg: &crate::config::namespace::NamespaceConfig, ns: &str) -> Command {
     kubectl_base_impl(cfg, Some(ns))
@@ -374,8 +374,8 @@ fn kubectl_base_impl(cfg: &crate::config::namespace::NamespaceConfig, ns: Option
 /// Chained failure hint for a **Deployment-scoped** write verb (scale /
 /// rollout / restart). On `NotFound` it names the deploy-only conservative
 /// write set + the kubectl escape hatch, so a StatefulSet/DaemonSet of the
-/// same name does not fail as an opaque `not_found` (R6 — the K20 refuse-with-
-/// idiom applied to a wrong-kind target). Every other class defers to the
+/// same name does not fail as an opaque `not_found` (the refuse-with-idiom
+/// applied to a wrong-kind target). Every other class defers to the
 /// standard [`KubectlFailure::hint`]. `delete`/`exec` target pods, not
 /// Deployments, so they keep the plain hint.
 pub fn deploy_write_hint(f: KubectlFailure, workload: &str, ns: &str, context: &str) -> String {
@@ -398,11 +398,11 @@ pub fn deploy_write_hint(f: KubectlFailure, workload: &str, ns: &str, context: &
 /// — no API round-trip, so it works in dry-run and against an unreachable
 /// cluster); otherwise the literal `"default"` (kubectl's own final fallback).
 ///
-/// Closes H3/O1: the write verbs previously echoed/audited
+/// The write verbs previously echoed/audited
 /// `unwrap_or("default")`, so a context whose default namespace was e.g.
 /// `production` ran there while the confirm prompt + `AuditEntry` said
 /// `default` — a false forensic record on a destructive op. Resolving + pinning
-/// the real value also extends the K5 anti-footgun from context to namespace:
+/// the real value also extends the anti-footgun from context to namespace:
 /// the mutation never rides an implicit context-default. `config view` is
 /// read-only and does not touch `current-context`.
 pub fn effective_namespace(cfg: &crate::config::namespace::NamespaceConfig) -> String {
@@ -431,17 +431,17 @@ pub fn effective_namespace(cfg: &crate::config::namespace::NamespaceConfig) -> S
     "default".to_string()
 }
 
-/// Build the context-pinned `kubectl exec <pod> [-c <c>] --` prefix (K5: the
+/// Build the context-pinned `kubectl exec <pod> [-c <c>] --` prefix (the
 /// context is always explicit, never the ambient current-context). The caller
 /// appends the in-pod argv. No `/bin/sh` wrapper — the command runs directly,
-/// avoiding the k9s Alpine-no-bash trap (research w1-D8).
+/// avoiding the k9s Alpine-no-bash trap.
 pub fn exec_base(
     cfg: &crate::config::namespace::NamespaceConfig,
     pod: &str,
     container: Option<&str>,
 ) -> Command {
     // Reuse `kubectl_base` for the context/kubeconfig/-n prefix so the
-    // blank-`k8s_namespace` filter (N3) and the K5 context pinning apply
+    // blank-`k8s_namespace` filter and the context pinning apply
     // uniformly — then append the exec framing.
     let mut c = kubectl_base(cfg);
     c.arg("exec").arg(pod);
@@ -452,7 +452,7 @@ pub fn exec_base(
     c
 }
 
-/// Run `argv` inside a pod and return a classified result (K9). Used by
+/// Run `argv` inside a pod and return a classified result. Used by
 /// `cat`/`ls`/`grep`/`run` for their in-pod read commands.
 pub fn exec_in_pod(
     cfg: &crate::config::namespace::NamespaceConfig,
@@ -552,14 +552,14 @@ pub fn classify_kubectl_failure(stderr: &str, _exit_code: i32) -> KubectlFailure
 mod tests {
     use super::*;
 
-    // K4 acceptance — REAL kubectl stderr harvested from the live clusters
+    // Acceptance — REAL kubectl stderr harvested from the live clusters
     // (maker/hub) on 2026-07-04, so the classifier is validated against
     // genuine output, not invented strings (no-synthetic-verification rule):
     //   notfound   : kubectl get pod does-not-exist -n inspect-livetest
     //   forbidden  : kubectl get secrets -n kube-system \
     //                  --as=system:serviceaccount:default:default
     //   unreachable: kubectl --context no-such-ctx get pods
-    // H3/O1: `effective_namespace` prefers an explicit config `k8s_namespace`
+    // `effective_namespace` prefers an explicit config `k8s_namespace`
     // and returns it WITHOUT shelling out (the early return before the
     // `kubectl config view` fallback). This is the deterministic branch — the
     // context-default query branch needs a live kubeconfig and is covered by
@@ -591,7 +591,7 @@ mod tests {
         assert_ne!(ns, "   ");
     }
 
-    // R6: a Deployment-scoped write verb turns a wrong-kind `not_found` into a
+    // A Deployment-scoped write verb turns a wrong-kind `not_found` into a
     // chained hint that names the deploy-only conservative write set + the
     // kubectl escape hatch, instead of an opaque "does not exist".
     #[test]
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn wa4_exit_code_bands() {
-        // Transport band (parallel to F13 12-14).
+        // Transport band (parallel to the SSH 12-14 band).
         assert_eq!(KubectlFailure::TransportUnreachable.exit_code(), 13);
         assert_eq!(KubectlFailure::TransportAuthExpired.exit_code(), 14);
         assert_eq!(KubectlFailure::RbacForbidden.exit_code(), 14);
@@ -704,10 +704,10 @@ mod tests {
         assert_eq!(c.failure_class(), "unknown");
     }
 
-    // K3 acceptance (unit-level). The crate is bin-only (no `[lib]`),
+    // Acceptance (unit-level). The crate is bin-only (no `[lib]`),
     // so the `tests/phase_k_v014.rs` integration file is black-box and
     // cannot import these internal APIs — the pure version-floor and
-    // parse logic is exercised here (same precedent as the in-module K1
+    // parse logic is exercised here (same precedent as the in-module
     // tests in `src/exec/runtime.rs`). The presence/absent/docker-unaffected
     // acceptance is black-box in `tests/phase_k_v014.rs`.
 

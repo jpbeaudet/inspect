@@ -203,7 +203,7 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("revert", &["safety", "write"]),
     // Fleet orchestrator.
     ("fleet", &["fleet", "write", "selectors"]),
-    // B9 — bundle orchestration.
+    // Bundle orchestration.
     ("bundle", &["write", "safety", "fleet"]),
     // Diagnostic recipes.
     ("why", &["recipes", "examples"]),
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn topic_count_matches_bible() {
         // 14 HP-1 editorial topics + 1 compose topic
-        // + 1 select topic + 1 kubernetes topic (K24, v0.1.4).
+        // + 1 select topic + 1 kubernetes topic.
         assert_eq!(TOPICS.len(), 17);
     }
 

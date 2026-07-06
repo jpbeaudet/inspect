@@ -106,7 +106,7 @@ pub enum ConfigError {
     InvalidRuntimeType {
         namespace: String,
         value: String,
-        // WA-1 (v0.1.4): resolved servers.toml path, not a hardcoded
+        // Resolved servers.toml path, not a hardcoded
         // `~/.inspect/...`, so the fix-here hint points at the real file
         // under INSPECT_HOME.
         path: String,
@@ -367,7 +367,7 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("discovery"),
     },
     // ---- ssh ----------------------------------------------------------
-    // G5 (v0.1.3): the kernel's `sun_path` cap (108 bytes on Linux,
+    // The kernel's `sun_path` cap (108 bytes on Linux,
     // 104 on macOS) is conservatively enforced at 104. More specific
     // than the generic "ssh" fragment below, so it must come first.
     ErrorEntry {

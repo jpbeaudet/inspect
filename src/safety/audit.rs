@@ -48,13 +48,13 @@ pub struct AuditEntry {
     /// here so audit downstream can grep on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// B9 (v0.1.2): bundle correlation id. When set, every step run
+    /// Bundle correlation id. When set, every step run
     /// from the same `inspect bundle run` invocation shares this id
     /// so `inspect audit ls --bundle <id>` can reconstruct the
     /// transaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
-    /// B9 (v0.1.2): the step id within the bundle. Lets reviewers
+    /// The step id within the bundle. Lets reviewers
     /// see which YAML step produced this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_step: Option<String>,
@@ -150,13 +150,13 @@ pub struct AuditEntry {
     /// the verb terminated with a transport failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
-    /// K5 (v0.1.4): the resolved kubeconfig **context** a k8s verb ran
+    /// The resolved kubeconfig **context** a k8s verb ran
     /// against. Part of the anti-footgun contract — the audit record
     /// names exactly which cluster was touched, never leaving it to an
     /// ambient `current-context`. `None` for docker namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    /// K5 (v0.1.4): the resolved in-cluster **k8s namespace** a k8s verb
+    /// The resolved in-cluster **k8s namespace** a k8s verb
     /// ran against. `None` for docker namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub k8s_namespace: Option<String>,
@@ -735,10 +735,11 @@ mod tests {
 
     #[test]
     fn k5_audit_entry_records_context_and_namespace() {
-        // K5 anti-footgun: a k8s verb's audit record names exactly which
+        // Anti-footgun: a k8s verb's audit record names exactly which
         // cluster (context) + namespace it touched; the fields round-trip
         // through JSON. A docker entry (None) omits them entirely
-        // (skip_serializing_if) so pre-K5 entries deserialize unchanged.
+        // (skip_serializing_if) so older entries (written before these
+        // fields existed) deserialize unchanged.
         let mut e = AuditEntry::new("scale", "staging-k8s/api");
         e.context = Some("prod-eks".into());
         e.k8s_namespace = Some("payments".into());

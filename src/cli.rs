@@ -1554,13 +1554,13 @@ pub enum Command {
     /// List networks.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Network(SimpleSelectorArgs),
-    /// (k8s, K13 v0.1.4) Pod CPU/memory usage via `kubectl top`. Degrades to
+    /// (k8s) Pod CPU/memory usage via `kubectl top`. Degrades to
     /// `metrics_unavailable` (exit 15) when metrics-server is absent.
     Top(SimpleSelectorArgs),
-    /// (k8s, K12 v0.1.4) Cluster/object events, newest-first (`kubectl get
+    /// (k8s) Cluster/object events, newest-first (`kubectl get
     /// events`). Optionally scoped to a pod: `inspect events <ns>/<pod>`.
     Events(SimpleSelectorArgs),
-    /// (k8s, K11 v0.1.4) Deep object dump for a pod reshaped into the JSON
+    /// (k8s) Deep object dump for a pod reshaped into the JSON
     /// envelope (kubectl describe has no -o json). `inspect describe <ns>/<pod>`.
     /// Inline `env[].value` literals and the `last-applied-configuration`
     /// annotation are masked (`<redacted>`) so secrets do not cross stdout;
@@ -1588,16 +1588,16 @@ pub enum Command {
     /// Restart container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Restart(LifecycleArgs),
-    /// (k8s, K15 v0.1.4) Scale a Deployment to N replicas (`kubectl scale`).
+    /// (k8s) Scale a Deployment to N replicas (`kubectl scale`).
     /// Dry-run by default; `--apply` captures the prior replica count so the
     /// revert scales back. `--replicas 0` stops the workload. Targets
-    /// Deployments (the v0.1.4 conservative write set) — for a StatefulSet /
+    /// Deployments (the conservative write set) — for a StatefulSet /
     /// DaemonSet the not-found error names the kubectl escape hatch.
     Scale(ScaleArgs),
-    /// (k8s, K18 v0.1.4) Delete a pod (`kubectl delete pod`). Narrow: pods
+    /// (k8s) Delete a pod (`kubectl delete pod`). Narrow: pods
     /// only. The controller recreates it (deletion is not undoable).
     Delete(DeleteArgs),
-    /// (k8s, K17 v0.1.4) Roll a Deployment back to a prior revision
+    /// (k8s) Roll a Deployment back to a prior revision
     /// (`kubectl rollout undo`) — the fast rollback of a bad deploy.
     Rollout(RolloutArgs),
     /// Stop container(s).
@@ -1643,7 +1643,7 @@ pub enum Command {
     #[command(long_about = LONG_RUN)]
     Run(RunArgs),
 
-    /// Block until a predicate over the target becomes true (B10).
+    /// Block until a predicate over the target becomes true.
     #[command(long_about = LONG_WATCH)]
     Watch(WatchArgs),
 
@@ -1680,7 +1680,7 @@ pub enum Command {
     #[command(long_about = LONG_FLEET)]
     Fleet(FleetArgs),
 
-    // ---- v0.1.2 B9 bundle ----------------------------------------------------
+    // ---- bundle ----------------------------------------------------
     /// YAML-driven multi-step orchestration with rollback.
     #[command(long_about = LONG_BUNDLE)]
     Bundle(BundleArgs),
@@ -1809,7 +1809,7 @@ pub struct AddArgs {
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Runtime medium: `docker` (default) or `k8s` (K2, v0.1.4). A k8s
+    /// Runtime medium: `docker` (default) or `k8s`. A k8s
     /// namespace uses kubeconfig/context/namespace instead of
     /// host/user/key_path.
     #[arg(long = "type")]
@@ -1821,7 +1821,7 @@ pub struct AddArgs {
     pub kubeconfig: Option<String>,
 
     /// (k8s) kubeconfig context to pin on every kubectl call. inspect
-    /// never reads the ambient `current-context` (anti-footgun, K5).
+    /// never reads the ambient `current-context` (anti-footgun).
     #[arg(long)]
     pub context: Option<String>,
 
@@ -2770,12 +2770,12 @@ pub struct LogsArgs {
     /// Hidden: ssh-side timeout for follow mode (seconds).
     #[arg(long, hide = true)]
     pub follow_timeout_secs: Option<u64>,
-    /// (k8s, K8 v0.1.4) Container in a multi-container pod (`kubectl -c`).
+    /// (k8s) Container in a multi-container pod (`kubectl -c`).
     /// When omitted, inspect auto-picks the first container and hints the
     /// others rather than erroring like `kubectl logs`. Ignored for docker.
     #[arg(long = "container", short = 'c', value_name = "NAME")]
     pub container: Option<String>,
-    /// (k8s, K8 v0.1.4) Show the PREVIOUS terminated container's logs
+    /// (k8s) Show the PREVIOUS terminated container's logs
     /// (`kubectl logs --previous`) — the crash-loop post-mortem view.
     /// Shows the last terminated instance only. Ignored for docker.
     #[arg(long = "previous")]
@@ -2991,7 +2991,7 @@ pub struct LifecycleArgs {
     pub revert_preview: bool,
 }
 
-/// K15 (v0.1.4): `inspect scale <k8s-ns>/<workload> --replicas N`.
+/// `inspect scale <k8s-ns>/<workload> --replicas N`.
 #[derive(Debug, Args)]
 pub struct ScaleArgs {
     /// Selector: `<k8s-ns>/<workload>` (a Deployment).
@@ -3022,7 +3022,7 @@ pub struct ScaleArgs {
     pub format: crate::format::FormatArgs,
 }
 
-/// K18 (v0.1.4): `inspect delete <k8s-ns>/<pod>` — narrow pod deletion.
+/// `inspect delete <k8s-ns>/<pod>` — narrow pod deletion.
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
     /// Selector: `<k8s-ns>/<pod>` (pods only; not controllers).
@@ -3043,7 +3043,7 @@ pub struct DeleteArgs {
     pub format: crate::format::FormatArgs,
 }
 
-/// K17 (v0.1.4): `inspect rollout <k8s-ns>/<deploy>` — roll a Deployment back
+/// `inspect rollout <k8s-ns>/<deploy>` — roll a Deployment back
 /// to its previous (or a named) revision (`kubectl rollout undo`).
 #[derive(Debug, Args)]
 pub struct RolloutArgs {
@@ -3117,7 +3117,7 @@ pub struct ExecArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
     /// Emit a `[inspect] still running on <ns> (Ns elapsed)` line to
-    /// stderr after this many seconds of remote silence (B7, v0.1.2).
+    /// stderr after this many seconds of remote silence.
     /// Defaults to 30s. Use `--no-heartbeat` to disable.
     #[arg(long, value_name = "SECS", conflicts_with = "no_heartbeat")]
     pub heartbeat: Option<u64>,
@@ -3239,7 +3239,7 @@ pub struct RunArgs {
     /// so `--clean-output --tty` is a clap-level rejection.
     #[arg(long = "tty")]
     pub tty: bool,
-    /// SMOKE 2026-05-09 fail-fast (v0.1.3): catch the
+    /// SMOKE 2026-05-09 fail-fast: catch the
     /// `inspect run --apply` muscle-memory trap. `inspect run` is
     /// READ-ONLY — the audited mutation verb is `inspect exec
     /// --apply`. Pre-fix, `--apply` slipped past clap into the
@@ -3498,7 +3498,7 @@ pub struct WatchArgs {
 }
 
 // ---------------------------------------------------------------------------
-// B9 (v0.1.2) — `inspect bundle`
+// `inspect bundle`
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Args)]
@@ -4042,7 +4042,7 @@ pub struct RevertArgs {
     pub last: Option<usize>,
 }
 
-// ---- compose (v0.1.3) ----------------------------------------------------
+// ---- compose ----------------------------------------------------
 
 #[derive(Debug, Args)]
 #[command(

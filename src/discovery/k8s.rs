@@ -1,13 +1,14 @@
-//! K6 (v0.1.4): Kubernetes discovery — the local, kubectl-based analogue of
+//! Kubernetes discovery — the local, kubectl-based analogue of
 //! the SSH/docker discovery in this module. One API round-trip
-//! (`kubectl get pods -o json`, context-pinned per K5) is parsed into the
+//! (`kubectl get pods -o json`, context-pinned) is parsed into the
 //! shared [`Profile`] / [`Service`] model so every downstream read verb
 //! consumes k8s the same way it consumes docker.
 //!
 //! Scope note: this first increment maps **pods → services** (the
 //! container-equivalent). Service/Endpoint ports, PVC volumes, and image
-//! inventory are the province of K14 (`ports`/`network`/`volumes`/`images`);
-//! deployment grouping + richer health rollup land with K7. What ships here is
+//! inventory are the province of the dedicated
+//! `ports`/`network`/`volumes`/`images` verbs; deployment grouping + richer
+//! health rollup land in a later increment. What ships here is
 //! the discovery seam + the pod inventory that `setup`/`profile`/`status` need.
 
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ use crate::profile::schema::{HealthStatus, Profile, Service, ServiceKind};
 
 /// Run k8s discovery for a namespace and return a populated [`Profile`].
 /// The kubectl command pins `--context` (and `--kubeconfig`) explicitly — it
-/// never reads the ambient current-context (K5 anti-footgun invariant).
+/// never reads the ambient current-context (anti-footgun invariant).
 pub fn discover_k8s(name: &str, cfg: &NamespaceConfig, discovered_at: &str) -> Result<Profile> {
     let context = cfg
         .context

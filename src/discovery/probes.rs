@@ -36,7 +36,7 @@ pub struct ProbeResult {
 // -----------------------------------------------------------------------------
 // Three-bucket classification of `docker inspect` outcomes.
 //
-// Field feedback (v0.1.2, two independent users) flagged a single noisy
+// Field feedback (two independent users) flagged a single noisy
 // `warning:` line on every healthy `inspect setup` against hosts with
 // 30+ containers. Root cause: a fixed 10s budget on the batched
 // `docker inspect` invocation, plus an unconditional `warning: ...

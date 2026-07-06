@@ -73,7 +73,7 @@ pub struct NamespaceConfig {
     /// doesn't hold a live remote session indefinitely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ttl: Option<String>,
-    /// K2 (v0.1.4): runtime medium selector. Absent or `"docker"`
+    /// Runtime medium selector. Absent or `"docker"`
     /// (the default) is the docker-over-SSH runtime every existing
     /// config uses; `"k8s"` / `"kubernetes"` selects the Kubernetes
     /// runtime (kubectl shell-out). Any other value is rejected by
@@ -81,21 +81,21 @@ pub struct NamespaceConfig {
     /// [`NamespaceConfig::runtime_kind`].
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub runtime_type: Option<String>,
-    /// K2 (v0.1.4): path to the kubeconfig for a `type = "k8s"`
+    /// Path to the kubeconfig for a `type = "k8s"`
     /// namespace. `None` uses kubectl's default resolution
     /// (`$KUBECONFIG` / `~/.kube/config`). Inert for docker namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubeconfig: Option<String>,
-    /// K2 (v0.1.4): kubeconfig context to pin on every kubectl call
-    /// (the K5 anti-footgun invariant — inspect never reads the ambient
+    /// Kubeconfig context to pin on every kubectl call
+    /// (the anti-footgun invariant — inspect never reads the ambient
     /// `current-context`). `None` until the operator sets it at `add` /
-    /// in `servers.toml`; `setup`/`test` (K6) verify it resolves. Inert
+    /// in `servers.toml`; `setup`/`test` verify it resolves. Inert
     /// for docker namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    /// K2 (v0.1.4): the Kubernetes namespace (inside the cluster) that
+    /// The Kubernetes namespace (inside the cluster) that
     /// this inspect-namespace scopes to. `None` ⇒ kubectl's default
-    /// namespace; a per-verb `-n`/`-A` override (K7+) supersedes it.
+    /// namespace; a per-verb `-n`/`-A` override supersedes it.
     /// Serialized as `namespace` in `servers.toml`; named
     /// `k8s_namespace` in code to avoid confusion with the
     /// inspect-namespace itself. Inert for docker namespaces.
@@ -187,12 +187,12 @@ impl NamespaceConfig {
     /// Validate that required fields are populated and that mutually
     /// exclusive options aren't both set.
     ///
-    /// K2 (v0.1.4): validation is **type-conditional**. A docker
+    /// Validation is **type-conditional**. A docker
     /// namespace keeps the `host` + `user` requirement (and all the SSH
     /// shape / auth / key / ttl checks). A `type = "k8s"` namespace
     /// requires **neither** `host` nor `user` — it is addressed by its
     /// kubeconfig context, whose resolvability is checked at
-    /// `setup`/`test` (K6), not here. SSH-only fields on a k8s namespace
+    /// `setup`/`test`, not here. SSH-only fields on a k8s namespace
     /// are inert (not validated); `show` renders them N/A. An unknown
     /// `type` value is rejected loudly (CI-gate-quality) rather than
     /// silently treated as docker.
@@ -228,10 +228,10 @@ impl NamespaceConfig {
 
         // A k8s namespace needs neither host nor user, and its SSH-only
         // fields (key/auth/password/ttl) are inert. But it MUST pin an
-        // explicit kubeconfig `context` (K5/WA-6 anti-footgun): without one,
+        // explicit kubeconfig `context` (anti-footgun): without one,
         // kubectl would fall through to the ambient `current-context` — the
         // #1 wrong-cluster destruction class. The context's *reachability* is
-        // checked at setup/test (K6); its *presence* is required here.
+        // checked at setup/test; its *presence* is required here.
         if self.runtime_kind() == RuntimeKind::K8s {
             match self.context.as_deref() {
                 Some(c) if !c.trim().is_empty() => return Ok(()),
@@ -244,7 +244,7 @@ impl NamespaceConfig {
             }
         }
 
-        // ---- Docker (default) medium: the pre-K2 SSH validation. ----
+        // ---- Docker (default) medium: the standard SSH validation. ----
         if self.host.is_none() {
             return Err(ConfigError::MissingField {
                 namespace: namespace.to_string(),
@@ -674,12 +674,12 @@ mod tests {
         assert_eq!(merged.session_ttl.as_deref(), Some("12h"));
     }
 
-    // ---- K2 (v0.1.4): kubernetes namespace config -----------------------
+    // ---- Kubernetes namespace config -----------------------
 
     #[test]
     fn k2_k8s_namespace_parses_without_host_user() {
         // A k8s namespace validates with neither host nor user — it is
-        // addressed by its kubeconfig context (checked at setup/test, K6).
+        // addressed by its kubeconfig context (checked at setup/test).
         let c = k8s_cfg(Some("staging"), Some("default"));
         assert!(c.host.is_none() && c.user.is_none());
         assert!(c.validate("staging-k8s").is_ok());
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn k2_docker_namespace_still_requires_host_user() {
-        // Absent `type` ⇒ docker ⇒ the pre-K2 host+user requirement holds.
+        // Absent `type` ⇒ docker ⇒ the standard host+user requirement holds.
         let missing_user = cfg(Some("h"), None, None);
         assert!(matches!(
             missing_user.validate("ns"),
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn k6_k8s_namespace_requires_explicit_context() {
-        // WA-6 anti-footgun: a k8s namespace with no context is invalid —
+        // Anti-footgun: a k8s namespace with no context is invalid —
         // it would let kubectl fall through to the ambient current-context.
         let no_ctx = k8s_cfg(None, Some("default"));
         assert!(matches!(

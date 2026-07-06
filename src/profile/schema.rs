@@ -23,7 +23,7 @@ pub struct Profile {
     /// byte-stable across timezones.
     pub discovered_at: String,
 
-    /// K6/K7 (v0.1.4): the runtime medium this profile was discovered from —
+    /// The runtime medium this profile was discovered from —
     /// `Some("k8s")` for a Kubernetes namespace, `None` for docker (default).
     /// Lets presentation + status skip docker-only facts (`remote_tooling`,
     /// the jq note) that are meaningless for a k8s namespace.

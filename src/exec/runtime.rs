@@ -1,4 +1,4 @@
-//! K1 (v0.1.4): the runtime executor abstraction.
+//! The runtime executor abstraction.
 //!
 //! Historically inspect assumed a single runtime — docker-over-SSH —
 //! structurally: `discovery/probes.rs` builds `docker ps`/`docker
@@ -9,17 +9,17 @@
 //! This module introduces that seam for the **docker** command-string
 //! builders. [`Runtime`] abstracts the runtime-specific command-building +
 //! inventory concerns the surface map §2 enumerates, behind an object-safe
-//! trait. K1 landed the byte-clean docker builders (`inventory_cmd`,
+//! trait. It provides the byte-clean docker builders (`inventory_cmd`,
 //! `build_read_exec`, `build_write_exec`, `build_lifecycle`), used concretely
 //! via `DockerRuntime` at a few sites.
 //!
-//! **What actually became the k8s seam (corrected 2026-07-06, exit-gate audit
-//! H5):** the later-wave k8s concerns did NOT grow this trait. The k8s
-//! stderr→`failure_class` classifier (K4), the `logs`/exec builders (K8/K9),
-//! and per-verb dispatch all landed as the free-function family in
+//! **What actually became the k8s seam (corrected 2026-07-06, exit-gate
+//! audit):** the later-wave k8s concerns did NOT grow this trait. The k8s
+//! stderr→`failure_class` classifier, the `logs`/exec builders, and per-verb
+//! dispatch all landed as the free-function family in
 //! [`crate::exec::kubectl`] + a per-verb `runtime_kind()` branch. The
 //! `runtime_kind()` discriminator lives on [`crate::config::namespace::
-//! NamespaceConfig`] (K2), not as a trait method. This trait carries the
+//! NamespaceConfig`], not as a trait method. This trait carries the
 //! docker builders; it is not the k8s dispatch path. See the [`K8sRuntime`]
 //! note below.
 //!
@@ -33,7 +33,7 @@
 //! - [`K8sRuntime`] — a **dormant** command-string builder for the
 //!   kubernetes runtime, exercised only by the `k1_*` parity unit tests.
 //!   **It is NOT the live k8s backend** (corrected 2026-07-06, exit-gate
-//!   audit H5). K1 landed this as the seed of a trait-carried k8s runtime,
+//!   audit). It landed as the seed of a trait-carried k8s runtime,
 //!   but Waves B–D wired the actual k8s verbs to the shared kubectl helper
 //!   family in [`crate::exec::kubectl`] (`kubectl_base` / `exec_base` /
 //!   `exec_in_pod` / `classify_kubectl_failure` / `revert_kubectl_prefix`),
@@ -60,7 +60,7 @@
 use crate::verbs::quote::shquote;
 
 /// Which runtime backs a namespace. Selected from the namespace `type`
-/// config field (wired in K2); defaults to [`RuntimeKind::Docker`] so
+/// config field (wired in the config layer); defaults to [`RuntimeKind::Docker`] so
 /// every existing configuration is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeKind {
@@ -71,7 +71,7 @@ pub enum RuntimeKind {
 impl RuntimeKind {
     /// Map a namespace `type` field to a runtime. Absent / `"docker"`
     /// → docker (the no-change default); `"k8s"` / `"kubernetes"` →
-    /// k8s. Unknown values fall back to docker — K2 adds the
+    /// k8s. Unknown values fall back to docker — config parsing adds the
     /// validation that rejects an unknown `type` loudly at config
     /// parse time; this helper stays total so runtime selection can
     /// never panic on a malformed config.
@@ -101,17 +101,17 @@ pub enum LifecycleAction {
 
 /// The docker command-builder seam. Object-safe (`Box<dyn Runtime>`), but
 /// used **concretely** as `DockerRuntime` at the docker call sites — NOT as a
-/// dispatch seam (corrected 2026-07-06, exit-gate audit H5/N2).
+/// dispatch seam (corrected 2026-07-06, exit-gate audit).
 ///
-/// K1 landed the byte-clean command builders that migrate off inline
+/// This trait's byte-clean command builders migrate off inline
 /// `docker …` construction with zero behavior change: `inventory_cmd`,
 /// `build_read_exec`, `build_write_exec`, `build_lifecycle` — each wired to
 /// its real docker call site.
 ///
-/// The later-wave k8s concerns did **not** grow this trait, contrary to K1's
-/// original intent: the k8s `logs` builder (K8), the stderr→`failure_class`
-/// classifier (K4), and the `runtime_kind()` discriminator + target
-/// resolution (K2) all landed as the free-function family in
+/// The later-wave k8s concerns did **not** grow this trait, contrary to its
+/// original intent: the k8s `logs` builder, the stderr→`failure_class`
+/// classifier, and the `runtime_kind()` discriminator + target
+/// resolution all landed as the free-function family in
 /// [`crate::exec::kubectl`] + `NamespaceConfig::runtime_kind()` + a per-verb
 /// dispatch fork — not as trait methods. So this trait carries only the docker
 /// builders; a future trait-as-seam refactor (v0.1.5+, JP-authorized) would
@@ -130,7 +130,7 @@ pub trait Runtime: Send + Sync {
     /// Build a **write** in-container/in-pod exec: same shape, used by
     /// the audited write path (`exec --apply`). Docker does not
     /// distinguish read vs write exec; k8s keeps them separate so the
-    /// write path can be audited/gated independently (K19).
+    /// write path can be audited/gated independently.
     fn build_write_exec(&self, target: &str, cmd: &str) -> String;
 
     /// Build a lifecycle command (`restart`/`stop`/`start`/`reload`)
@@ -176,30 +176,30 @@ impl Runtime for DockerRuntime {
     }
 }
 
-/// Kubernetes runtime — kubectl shell-out backend (Q2).
+/// Kubernetes runtime — kubectl shell-out backend.
 ///
 /// Carries the resolved kubeconfig `context` and k8s `namespace` so
 /// every command it builds pins `--context` explicitly and never reads
-/// the ambient `current-context` (the K5 anti-footgun invariant; the
-/// full enforcement + resolved-target echo land in K5). K1 ships the
-/// command-assembly skeleton; the verbs that consume it land in Waves
-/// B–D. No user path constructs a `K8sRuntime` in K1.
+/// the ambient `current-context` (the anti-footgun invariant; the
+/// full enforcement + resolved-target echo land with the write verbs).
+/// This ships the command-assembly skeleton; the verbs that consume it
+/// land in later waves. No user path constructs a `K8sRuntime` yet.
 #[derive(Debug, Default, Clone)]
 pub struct K8sRuntime {
     /// kubeconfig context to pin on every call (`--context`). When
-    /// `None`, no `--context` is emitted — K2/K5 make this required
+    /// `None`, no `--context` is emitted — config validation makes this required
     /// for a real k8s namespace; the field is `Option` here only so
     /// the unit-test scaffold can construct a bare runtime.
     pub context: Option<String>,
     /// k8s namespace to scope reads/writes (`-n`). `None` → the
     /// kubectl default namespace (the `-n`/`-A` override lands in the
-    /// verbs, K7+).
+    /// verbs).
     pub namespace: Option<String>,
 }
 
 impl K8sRuntime {
     /// Emit the `--context <ctx> -n <ns>` scoping flags this runtime
-    /// pins on every kubectl invocation (K5 invariant seed).
+    /// pins on every kubectl invocation (anti-footgun invariant seed).
     fn scope_flags(&self) -> String {
         let mut s = String::new();
         if let Some(ctx) = &self.context {
@@ -214,7 +214,7 @@ impl K8sRuntime {
 
 impl Runtime for K8sRuntime {
     fn inventory_cmd(&self) -> String {
-        // K6 consumes this for discovery; one API round-trip.
+        // Consumed for discovery; one API round-trip.
         format!(
             "kubectl {}get pods,services,deployments,configmaps -o json",
             self.scope_flags()
@@ -222,9 +222,9 @@ impl Runtime for K8sRuntime {
     }
 
     fn build_read_exec(&self, target: &str, cmd: &str) -> String {
-        // No `/bin/bash` wrapper — avoids the k9s Alpine-no-bash trap
-        // (research w1-D8). `--` separates kubectl flags from the
-        // in-pod command. K9 refines container selection (`-c`).
+        // No `/bin/bash` wrapper — avoids the k9s Alpine-no-bash trap.
+        // `--` separates kubectl flags from the in-pod command.
+        // Container selection (`-c`) is refined later.
         format!(
             "kubectl {}exec {} -- {}",
             self.scope_flags(),
@@ -234,7 +234,7 @@ impl Runtime for K8sRuntime {
     }
 
     fn build_write_exec(&self, target: &str, cmd: &str) -> String {
-        // K19 gates/audits this under `--apply`.
+        // Gated/audited under `--apply`.
         format!(
             "kubectl {}exec {} -- {}",
             self.scope_flags(),
@@ -244,7 +244,7 @@ impl Runtime for K8sRuntime {
     }
 
     fn build_lifecycle(&self, action: LifecycleAction, target: &str) -> String {
-        // The community-correct idioms (K15/K16): restart →
+        // The community-correct idioms: restart →
         // rollout restart; stop/start map to scale (refined in the
         // write wave with the outage guard). `reload` folds into
         // rollout restart.
@@ -262,7 +262,7 @@ impl Runtime for K8sRuntime {
 
 /// Factory: the runtime-selection mechanism. Returns a boxed trait
 /// object for `kind`. Wiring [`RuntimeKind`] to the namespace `type`
-/// config field is K2; K1 makes selection testable via an explicit
+/// config field happens in the config layer; this factory makes selection testable via an explicit
 /// [`RuntimeKind`] and defaults callers to docker so docker behavior
 /// is unchanged.
 pub fn runtime_for(kind: RuntimeKind) -> Box<dyn Runtime> {
@@ -272,11 +272,11 @@ pub fn runtime_for(kind: RuntimeKind) -> Box<dyn Runtime> {
     }
 }
 
-// K1 acceptance tests (v0.1.4). These live in-module because the crate
-// is bin-only (no `[lib]` target): the `tests/phase_k_v014.rs`
+// Runtime command-builder acceptance tests. These live in-module because
+// the crate is bin-only (no `[lib]` target): the `tests/phase_k_v014.rs`
 // integration file is black-box (`assert_cmd`-driven) and cannot import
 // these internal Rust APIs. Names follow the `k1_*` convention so they
-// are greppable as the K1 acceptance set.
+// are greppable as the acceptance set.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,8 +339,8 @@ mod tests {
     //
     // Discriminates by the runtime's *observable behavior* (the command
     // string it builds) rather than a label — a stronger check that the
-    // factory routed to the right impl. `from_type` maps the (future,
-    // K2) namespace `type` field to a runtime; None/"docker" → docker,
+    // factory routed to the right impl. `from_type` maps the namespace
+    // `type` field to a runtime; None/"docker" → docker,
     // "k8s"/"kubernetes" → k8s, unknown → docker (selection stays total).
 
     fn restart_cmd(type_field: Option<&str>) -> String {
@@ -390,11 +390,11 @@ mod tests {
         assert!(cmds[3].starts_with("kubectl"));
     }
 
-    // ---- k8s runtime scaffold (unit-level; no user path reaches it in K1)
+    // ---- k8s runtime scaffold (unit-level; no user path reaches it yet)
 
     #[test]
     fn k1_k8s_runtime_pins_context_and_namespace() {
-        // K5 invariant seed: every kubectl command carries an explicit
+        // Anti-footgun invariant seed: every kubectl command carries an explicit
         // --context and -n; the ambient current-context is never used.
         let rt = K8sRuntime {
             context: Some("prod-eks".to_string()),
@@ -421,10 +421,10 @@ mod tests {
 
     #[test]
     fn k5_every_kubectl_command_carries_explicit_context() {
-        // K5 anti-footgun invariant: EVERY command the k8s runtime assembles
+        // Anti-footgun invariant: EVERY command the k8s runtime assembles
         // pins --context explicitly — none may fall through to the ambient
         // current-context (the #1 kubectl destruction class). Exhaustive over
-        // all build methods, including the ones the K1 seed test omitted.
+        // all build methods, including the ones the seed test omitted.
         let rt = K8sRuntime {
             context: Some("prod-eks".to_string()),
             namespace: Some("payments".to_string()),

@@ -47,7 +47,7 @@ pub fn signal_count() -> u32 {
 
 /// Manually trip the cancel flag (and bump the counter).
 ///
-/// Originally (v0.1.3 earlier) gated to `#[cfg(test)]` with the
+/// Originally gated to `#[cfg(test)]` with the
 /// rationale "production code never calls this; the SIGINT/SIGTERM
 /// handler does the same work via the `extern "C"` path".
 /// invalidates that — `inspect run --steps` with a step's

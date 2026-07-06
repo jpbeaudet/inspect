@@ -185,7 +185,7 @@ fn cheap_rows(namespace: &str, target: &SshTarget) -> anyhow::Result<Vec<DriftRo
     // captures port-level state in the same single ssh round-trip;
     // the column itself may be empty (containers without exposed
     // ports) and that case parses to `Vec::new()`.
-    // Built through the runtime executor seam (K1, v0.1.4). Docker today;
+    // Built through the runtime executor seam. Docker today;
     // byte-identical to the prior inline `docker ps --format …` string.
     let cmd = DockerRuntime.inventory_cmd();
     let out = run_remote(
