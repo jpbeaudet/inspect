@@ -667,6 +667,15 @@ fn stream_follow(
 }
 
 /// K8 (v0.1.4): `inspect logs <k8s-ns>/<pod>` via `kubectl logs`. Batch by
+/// True when kubectl's stderr indicates a `--previous` read found no prior
+/// instance (the container has never restarted). That is a normal state — the
+/// pod is running fine on its first instance — not a `not_found` the operator
+/// should chase via name/namespace, so `logs --previous` reports it cleanly
+/// (SMOKE-1).
+fn is_no_previous_instance(stderr: &str) -> bool {
+    stderr.contains("previous terminated container") && stderr.contains("not found")
+}
+
 /// default; `--follow` streams. Redacts every line (unless `--show-secrets`).
 /// On a multi-container pod with no `-c`, auto-picks the first container and
 /// hints the others — never the raw `kubectl` "a container name must be
@@ -753,6 +762,21 @@ fn logs_k8s(
 
     // Batch: capture, and on a multi-container ambiguity auto-pick + hint.
     let out = build(args.container.as_deref(), false).output()?;
+    // SMOKE-1: `--previous` on a pod whose container has never restarted is a
+    // normal state, not an error — kubectl returns "previous terminated
+    // container … not found", which the generic classifier would render as a
+    // misleading `not_found` ("check the name and -n"). Emit a clear note and
+    // succeed: the query resolved, there is simply no prior instance.
+    if !out.status.success() && args.previous {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if is_no_previous_instance(&stderr) {
+            crate::tee_eprintln!(
+                "note: pod '{pod}' has no previous instance — its container has not \
+                 restarted, so there are no --previous logs to show."
+            );
+            return Ok(ExitKind::Success);
+        }
+    }
     if !out.status.success() && args.container.is_none() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if let Some(containers) = parse_container_choices(&stderr) {
@@ -825,6 +849,19 @@ mod tests {
         let v = super::parse_container_choices(e).unwrap();
         assert_eq!(v, vec!["app", "istio-proxy", "sidecar"]);
         assert!(super::parse_container_choices("some other error").is_none());
+    }
+
+    #[test]
+    fn smoke1_no_previous_instance_detected() {
+        // kubectl's real message when --previous is asked of a never-restarted
+        // container — a clean "no previous", NOT a name/namespace not_found.
+        let e = "Error from server (BadRequest): previous terminated container \
+                 \"coredns\" in pod \"coredns-abc\" not found";
+        assert!(super::is_no_previous_instance(e));
+        // A genuine missing-pod error must NOT be swallowed as "no previous".
+        assert!(!super::is_no_previous_instance(
+            "Error from server (NotFound): pods \"nope\" not found"
+        ));
     }
 
     use super::*;

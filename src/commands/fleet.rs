@@ -589,6 +589,14 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
                     Some(r) => r,
                     None => continue,
                 };
+                // SMOKE-2: k8s namespaces are sessionless — there is no SSH
+                // master to prewarm. Skip silently rather than build an
+                // `SshTarget` (which fails "namespace has no host" and would
+                // print a docker-centric skip note that reads as a spurious
+                // error for a perfectly valid k8s namespace).
+                if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                    continue;
+                }
                 let target = match SshTarget::from_resolved(resolved) {
                     Ok(t) => t,
                     Err(e) => {

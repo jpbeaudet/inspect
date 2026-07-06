@@ -42,3 +42,24 @@ version-bump is root's release step). kubectl: v1.36.2.
 Neither is a functional failure (both phases pass with correct output + exit
 codes), but both are agent-facing message-quality issues on the new k8s
 surface — fixed per the LLM-trap-fix-on-first-surface rule.
+
+## Fixes + re-verification
+
+Both findings fixed, binary reinstalled, and the two checks re-run live
+against maker:
+
+- **SMOKE-1 fixed** (`src/verbs/logs.rs`): `logs --previous` now detects the
+  "previous terminated container … not found" shape via
+  `is_no_previous_instance()` and reports a clean note — *"pod '…' has no
+  previous instance — its container has not restarted, so there are no
+  --previous logs to show."* — at **exit 0**, instead of the generic
+  not_found hint. Unit test `smoke1_no_previous_instance_detected` (also pins
+  that a genuine missing-pod error is NOT swallowed). **Re-verified live:
+  exit 0 + the clean note.**
+- **SMOKE-2 fixed** (`src/commands/fleet.rs`): fleet prewarm now skips k8s
+  namespaces silently (they are sessionless — no SSH master to prewarm)
+  before building an `SshTarget`, so no docker-centric "has no host" note.
+  **Re-verified live: exit 0, empty stderr.**
+
+Gate after fixes: fmt clean, clippy `-D warnings` clean, 1430 tests / 0
+failed. **P0–P10 GREEN, all findings closed.**
