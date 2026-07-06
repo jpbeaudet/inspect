@@ -259,7 +259,10 @@ fn health_k8s(args: &HealthArgs, ns: &str) -> Result<ExitKind> {
     .with_meta("selector", args.selector.clone())
     .with_meta("runtime", "k8s".to_string())
     .with_meta("context", profile.host.clone())
-    .with_meta("source", "cached (profile) — refresh with `inspect setup --force`".to_string())
+    .with_meta(
+        "source",
+        "cached (profile) — refresh with `inspect setup --force`".to_string(),
+    )
     .with_quiet(args.format.quiet);
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }

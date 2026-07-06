@@ -368,8 +368,8 @@ mod tests {
     #[test]
     fn topic_count_matches_bible() {
         // 14 HP-1 editorial topics + 1 compose topic
-        // + 1 select topic.
-        assert_eq!(TOPICS.len(), 16);
+        // + 1 select topic + 1 kubernetes topic (K24, v0.1.4).
+        assert_eq!(TOPICS.len(), 17);
     }
 
     #[test]

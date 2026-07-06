@@ -8,14 +8,14 @@
 
 pub mod chmod;
 pub mod chown;
+pub mod delete; // k8s delete pod (K18)
 pub mod edit;
 pub mod exec;
 pub mod lifecycle; // restart / stop / start / reload
-pub mod scale; // k8s scale (K15)
-pub mod delete; // k8s delete pod (K18)
-pub mod rollout; // k8s rollout undo (K17)
 pub mod mkdir;
 pub mod rm;
+pub mod rollout; // k8s rollout undo (K17)
+pub mod scale; // k8s scale (K15)
 pub mod touch;
 
 pub(crate) mod atomic;
@@ -33,15 +33,21 @@ pub fn refuse_if_k8s_immutable(target: &str, verb: &str) -> Option<crate::error:
         return None;
     }
     let hint = match verb {
-        "edit" => "pods are immutable — edit the ConfigMap/Secret that backs this \
+        "edit" => {
+            "pods are immutable — edit the ConfigMap/Secret that backs this \
                    workload, then `inspect restart <ns>/<deploy>` (rollout restart) to \
-                   pick it up.",
-        "cp" | "put" | "get" => "pod filesystems are ephemeral — use a ConfigMap / \
+                   pick it up."
+        }
+        "cp" | "put" | "get" => {
+            "pod filesystems are ephemeral — use a ConfigMap / \
                    Secret / Volume, or raw `kubectl cp` for the rare legit case (needs \
-                   `tar` in the container).",
-        _ => "in-pod filesystem mutation does not survive a pod restart (anti-pattern). \
+                   `tar` in the container)."
+        }
+        _ => {
+            "in-pod filesystem mutation does not survive a pod restart (anti-pattern). \
               Edit the ConfigMap/Secret and `inspect restart <ns>/<deploy>`; for live \
-              debugging use `inspect exec <ns>/<pod> --apply -- <cmd>`.",
+              debugging use `inspect exec <ns>/<pod> --apply -- <cmd>`."
+        }
     };
     crate::error::emit(format!("{verb} is not supported for k8s pods — {hint}"));
     Some(crate::error::ExitKind::Error)

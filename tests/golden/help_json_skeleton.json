@@ -102,6 +102,7 @@
     "search",
     "formats",
     "write",
+    "kubernetes",
     "safety",
     "fleet",
     "bundle",

@@ -914,9 +914,7 @@ fn why_k8s(
             if !ready {
                 degraded = true;
             }
-            let mut detail = format!(
-                "  container {name}: ready={ready} restarts={restarts}"
-            );
+            let mut detail = format!("  container {name}: ready={ready} restarts={restarts}");
             if !waiting.is_empty() {
                 detail.push_str(&format!(" waiting={waiting}"));
                 if waiting.contains("CrashLoop") || waiting.contains("Error") {
@@ -936,7 +934,9 @@ fn why_k8s(
             if !term_reason.is_empty() {
                 detail.push_str(&format!(
                     " last_terminated={term_reason}{}",
-                    term_exit.map(|e| format!(" (exit {e})")).unwrap_or_default()
+                    term_exit
+                        .map(|e| format!(" (exit {e})"))
+                        .unwrap_or_default()
                 ));
                 if term_exit.map(|e| e != 0).unwrap_or(false) {
                     degraded = true;

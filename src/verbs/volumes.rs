@@ -91,8 +91,14 @@ fn volumes_k8s(
     let mut count = 0usize;
     for pvc in items {
         count += 1;
-        let name = pvc.pointer("/metadata/name").and_then(|x| x.as_str()).unwrap_or("");
-        let status = pvc.pointer("/status/phase").and_then(|x| x.as_str()).unwrap_or("-");
+        let name = pvc
+            .pointer("/metadata/name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let status = pvc
+            .pointer("/status/phase")
+            .and_then(|x| x.as_str())
+            .unwrap_or("-");
         let cap = pvc
             .pointer("/status/capacity/storage")
             .and_then(|x| x.as_str())

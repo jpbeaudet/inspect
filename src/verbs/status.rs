@@ -359,7 +359,10 @@ fn status_k8s(args: &StatusArgs, ns: &str, selector: &str) -> Result<ExitKind> {
             "image": img,
             "aliases": [],
         }));
-        data_lines.push(format!("{ns}/{name:<28} {status_str:<10} {img}", name = s.name));
+        data_lines.push(format!(
+            "{ns}/{name:<28} {status_str:<10} {img}",
+            name = s.name
+        ));
     }
 
     let state = if total > 0 { "ok" } else { "empty_inventory" };

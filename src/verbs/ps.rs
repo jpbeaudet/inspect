@@ -101,7 +101,10 @@ fn ps_k8s(args: &PsArgs, ns: &str) -> Result<ExitKind> {
         count += 1;
         let image = s.image.clone().unwrap_or_default();
         let phase = s.health.clone().unwrap_or_default(); // pod phase, e.g. Running
-        human.data_line(format!("{ns} | {name:<28} {image:<40} {phase}", name = s.name));
+        human.data_line(format!(
+            "{ns} | {name:<28} {image:<40} {phase}",
+            name = s.name
+        ));
         human.push_row(
             &Envelope::new(ns, "state", "state")
                 .with_service(&s.name)

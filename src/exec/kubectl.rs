@@ -114,7 +114,10 @@ pub fn parse_semver(gitversion: &str) -> Option<(u32, u32)> {
     let mut it = s.split('.');
     let major = it.next()?.parse::<u32>().ok()?;
     let minor_raw = it.next()?;
-    let minor_digits: String = minor_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let minor_digits: String = minor_raw
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     let minor = minor_digits.parse::<u32>().ok()?;
     Some((major, minor))
 }
@@ -252,33 +255,39 @@ impl KubectlFailure {
                     resource_hint
                 }
             ),
-            KubectlFailure::NotFound =>
+            KubectlFailure::NotFound => {
                 "the addressed object does not exist in this namespace/context — \
                  check the name and `-n`/`--namespace`."
-                    .into(),
-            KubectlFailure::NoShellInContainer =>
+                    .into()
+            }
+            KubectlFailure::NoShellInContainer => {
                 "this container has no shell / coreutils (distroless or minimal image); \
                  in-pod exec cannot run. Use an ephemeral debug container \
                  (`kubectl debug`) — a first-class debug verb is planned for v0.1.5+."
-                    .into(),
-            KubectlFailure::MetricsUnavailable =>
+                    .into()
+            }
+            KubectlFailure::MetricsUnavailable => {
                 "metrics are unavailable — metrics-server is not installed (or still \
                  warming up, ~60s after install). Install metrics-server, or retry \
                  shortly; this is a cluster-component gap, not a workload failure."
-                    .into(),
-            KubectlFailure::TransportUnreachable =>
+                    .into()
+            }
+            KubectlFailure::TransportUnreachable => {
                 "the Kubernetes API server is unreachable — check the context, the \
                  kubeconfig, and network reachability to the cluster."
-                    .into(),
-            KubectlFailure::TransportAuthExpired =>
+                    .into()
+            }
+            KubectlFailure::TransportAuthExpired => {
                 "authentication to the API server failed — your token or client \
                  certificate may be expired; refresh your kubeconfig credentials \
                  (`kubectl` handles re-auth; inspect does not cache k8s credentials)."
-                    .into(),
-            KubectlFailure::Unknown =>
+                    .into()
+            }
+            KubectlFailure::Unknown => {
                 "kubectl returned an error inspect did not recognize — see the raw \
                  stderr below and `kubectl` docs."
-                    .into(),
+                    .into()
+            }
         }
     }
 }
@@ -373,7 +382,10 @@ pub fn exec_in_pod(
         None
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Some(classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1)))
+        Some(classify_kubectl_failure(
+            &stderr,
+            out.status.code().unwrap_or(1),
+        ))
     };
     Ok(K8sExecOut {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -596,10 +608,16 @@ mod tests {
     fn k3_not_found_message_answers_four_questions() {
         let m = not_found_message("maker", "/usr/bin:/bin");
         for needle in ["what:", "where:", "why:", "fix:"] {
-            assert!(m.contains(needle), "four-question message missing {needle:?}: {m}");
+            assert!(
+                m.contains(needle),
+                "four-question message missing {needle:?}: {m}"
+            );
         }
         assert!(m.contains("kubectl not found"));
-        assert!(m.contains("/usr/bin:/bin"), "where: must echo the searched PATH");
+        assert!(
+            m.contains("/usr/bin:/bin"),
+            "where: must echo the searched PATH"
+        );
         assert!(m.contains("install kubectl"), "fix: must be actionable");
         // Empty PATH renders a legible placeholder, not a blank.
         assert!(not_found_message("ns", "").contains("(empty PATH)"));

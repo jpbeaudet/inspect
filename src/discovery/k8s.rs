@@ -34,14 +34,18 @@ pub fn discover_k8s(name: &str, cfg: &NamespaceConfig, discovered_at: &str) -> R
     }
     cmd.args(["get", "pods", "-o", "json", "--request-timeout=10s"]);
 
-    let out = cmd.output().context("failed to spawn kubectl for discovery")?;
+    let out = cmd
+        .output()
+        .context("failed to spawn kubectl for discovery")?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let fc = crate::exec::kubectl::classify_kubectl_failure(
-            &stderr,
-            out.status.code().unwrap_or(1),
+        let fc =
+            crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+        anyhow::bail!(
+            "k8s discovery failed [{}] {}",
+            fc.failure_class(),
+            fc.hint("")
         );
-        anyhow::bail!("k8s discovery failed [{}] {}", fc.failure_class(), fc.hint(""));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let services = parse_pods(&stdout);
@@ -123,7 +127,9 @@ fn pod_health(pod: &serde_json::Value) -> (Option<String>, Option<HealthStatus>)
             let any_crashloop = arr.iter().any(|c| {
                 c.pointer("/state/waiting/reason")
                     .and_then(|r| r.as_str())
-                    .map(|r| r.contains("CrashLoop") || r.contains("Error") || r.contains("ImagePull"))
+                    .map(|r| {
+                        r.contains("CrashLoop") || r.contains("Error") || r.contains("ImagePull")
+                    })
                     .unwrap_or(false)
             });
             (all_ready, any_crashloop)
@@ -134,7 +140,7 @@ fn pod_health(pod: &serde_json::Value) -> (Option<String>, Option<HealthStatus>)
         _ if any_crashloop => HealthStatus::Unhealthy,
         Some("Running") if all_ready => HealthStatus::Ok,
         Some("Running") => HealthStatus::Starting, // running but not all containers ready
-        Some("Succeeded") => HealthStatus::Ok,      // completed job pod
+        Some("Succeeded") => HealthStatus::Ok,     // completed job pod
         Some("Pending") => HealthStatus::Starting,
         Some("Failed") => HealthStatus::Unhealthy,
         _ => HealthStatus::Unknown,
@@ -190,15 +196,24 @@ mod tests {
         let crash = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
             "status":{"phase":"Running","containerStatuses":[
               {"ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}"#;
-        assert_eq!(parse_pods(crash)[0].health_status, Some(HealthStatus::Unhealthy));
+        assert_eq!(
+            parse_pods(crash)[0].health_status,
+            Some(HealthStatus::Unhealthy)
+        );
         // Pending -> Starting.
         let pending = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
             "status":{"phase":"Pending"}}]}"#;
-        assert_eq!(parse_pods(pending)[0].health_status, Some(HealthStatus::Starting));
+        assert_eq!(
+            parse_pods(pending)[0].health_status,
+            Some(HealthStatus::Starting)
+        );
         // Running but a container not ready (no crashloop) -> Starting.
         let notready = r#"{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"image":"x"}]},
             "status":{"phase":"Running","containerStatuses":[{"ready":false}]}}]}"#;
-        assert_eq!(parse_pods(notready)[0].health_status, Some(HealthStatus::Starting));
+        assert_eq!(
+            parse_pods(notready)[0].health_status,
+            Some(HealthStatus::Starting)
+        );
     }
 
     #[test]

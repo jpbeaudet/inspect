@@ -493,27 +493,6 @@ fn exec_fanout_threshold() -> usize {
     3
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_distroless_no_shell() {
-        // OCI runtime spec wording on Docker 20-25.
-        let s = "OCI runtime exec failed: exec failed: unable to start container process: \
-                 exec: \"sh\": executable file not found in $PATH: unknown";
-        assert!(looks_like_no_shell(s));
-
-        // Containerd / CRI wording.
-        let s2 = "starting container process caused: exec: \"sh\": executable file not found";
-        assert!(looks_like_no_shell(s2));
-
-        // Genuine other failure must not trip the heuristic.
-        assert!(!looks_like_no_shell("permission denied"));
-        assert!(!looks_like_no_shell("container not found"));
-    }
-}
-
 /// K19 (v0.1.4): `inspect exec <k8s-ns>/<pod> --apply -- <cmd>` — a WRITING
 /// in-pod command via `kubectl exec` under the --apply gate, audited. Dry-run
 /// by default with the K5 resolved-target echo. In-pod fs mutation is
@@ -525,16 +504,21 @@ fn exec_k8s(
     ns: &str,
     cfg: &crate::config::namespace::NamespaceConfig,
 ) -> Result<ExitKind> {
-    let pod = args.selector.split_once('/').map(|(_, r)| r.split(':').next().unwrap_or("")).unwrap_or("");
+    let pod = args
+        .selector
+        .split_once('/')
+        .map(|(_, r)| r.split(':').next().unwrap_or(""))
+        .unwrap_or("");
     if pod.is_empty() {
-        crate::error::emit(format!("exec: specify a pod — `inspect exec {ns}/<pod> --apply -- <cmd>`"));
+        crate::error::emit(format!(
+            "exec: specify a pod — `inspect exec {ns}/<pod> --apply -- <cmd>`"
+        ));
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
     let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
     let cmd_str = args.cmd.join(" ");
-    let target_line =
-        format!("pod '{pod}' in namespace '{k8s_ns}' on context '{context}'");
+    let target_line = format!("pod '{pod}' in namespace '{k8s_ns}' on context '{context}'");
 
     // In-pod exec has no synthesisable inverse (ephemeral) — mirror the docker
     // exec contract: --apply requires an explicit --no-revert acknowledgement.
@@ -558,9 +542,11 @@ fn exec_k8s(
         return Ok(ExitKind::Success);
     }
     // `exec` payload is opaque user shell — the tighter interlock.
-    if let ConfirmResult::Aborted(why) =
-        gate.confirm(Confirm::LargeFanout, 1, &format!("Exec `{cmd_str}` in {target_line}?"))
-    {
+    if let ConfirmResult::Aborted(why) = gate.confirm(
+        Confirm::LargeFanout,
+        1,
+        &format!("Exec `{cmd_str}` in {target_line}?"),
+    ) {
         eprintln!("aborted: {why}");
         return Ok(ExitKind::Error);
     }
@@ -594,4 +580,25 @@ fn exec_k8s(
         }
     }
     Ok(ExitKind::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_distroless_no_shell() {
+        // OCI runtime spec wording on Docker 20-25.
+        let s = "OCI runtime exec failed: exec failed: unable to start container process: \
+                 exec: \"sh\": executable file not found in $PATH: unknown";
+        assert!(looks_like_no_shell(s));
+
+        // Containerd / CRI wording.
+        let s2 = "starting container process caused: exec: \"sh\": executable file not found";
+        assert!(looks_like_no_shell(s2));
+
+        // Genuine other failure must not trip the heuristic.
+        assert!(!looks_like_no_shell("permission denied"));
+        assert!(!looks_like_no_shell("container not found"));
+    }
 }

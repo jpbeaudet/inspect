@@ -70,7 +70,9 @@ fn images_k8s(args: &SimpleSelectorArgs, ns: &str) -> Result<ExitKind> {
         Some(p) => p,
         None => {
             renderer
-                .summary(format!("no cached profile for '{ns}' — run `inspect setup {ns}`"))
+                .summary(format!(
+                    "no cached profile for '{ns}' — run `inspect setup {ns}`"
+                ))
                 .next(format!("inspect setup {ns}"));
             let fmt = args.format.resolve()?;
             return renderer.dispatch(&fmt, args.format.select_filter()?);
@@ -81,9 +83,8 @@ fn images_k8s(args: &SimpleSelectorArgs, ns: &str) -> Result<ExitKind> {
         if let Some(img) = s.image.as_deref() {
             if seen.insert(img.to_string()) {
                 renderer.data_line(format!("{ns} | {img}"));
-                renderer.push_row(
-                    &Envelope::new(ns, "image", "image").put("image", img.to_string()),
-                );
+                renderer
+                    .push_row(&Envelope::new(ns, "image", "image").put("image", img.to_string()));
             }
         }
     }

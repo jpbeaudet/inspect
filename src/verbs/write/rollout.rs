@@ -75,7 +75,11 @@ fn rollout_k8s(
         r.print();
         return Ok(ExitKind::Success);
     }
-    match gate.confirm(Confirm::LargeFanout, 1, &format!("Roll back {target_line}?")) {
+    match gate.confirm(
+        Confirm::LargeFanout,
+        1,
+        &format!("Roll back {target_line}?"),
+    ) {
         ConfirmResult::Aborted(why) => {
             eprintln!("aborted: {why}");
             return Ok(ExitKind::Error);
@@ -85,7 +89,9 @@ fn rollout_k8s(
     }
 
     let revert = if current_rev.is_empty() {
-        Revert::unsupported(format!("kubectl rollout undo deploy/{workload} (revision unknown)"))
+        Revert::unsupported(format!(
+            "kubectl rollout undo deploy/{workload} (revision unknown)"
+        ))
     } else {
         Revert::command_pair(
             format!(
@@ -96,7 +102,10 @@ fn rollout_k8s(
         )
     };
     if args.revert_preview {
-        eprintln!("[inspect] revert preview {ns}/{workload}: {}", revert.preview);
+        eprintln!(
+            "[inspect] revert preview {ns}/{workload}: {}",
+            revert.preview
+        );
     }
 
     let mut cmd = crate::exec::kubectl::kubectl_base(cfg);

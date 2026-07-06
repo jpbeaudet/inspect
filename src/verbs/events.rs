@@ -52,7 +52,8 @@ fn events_k8s(
         return Ok(ExitKind::Inner(f.exit_code()));
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     let empty = Vec::new();
     let items = v.get("items").and_then(|i| i.as_array()).unwrap_or(&empty);
     let as_json = args.format.is_json();

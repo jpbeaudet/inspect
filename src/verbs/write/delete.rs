@@ -38,7 +38,9 @@ fn delete_k8s(
         .map(|(_, r)| r.split(':').next().unwrap_or(""))
         .unwrap_or("");
     if pod.is_empty() {
-        crate::error::emit(format!("delete: specify a pod — `inspect delete {ns}/<pod>`"));
+        crate::error::emit(format!(
+            "delete: specify a pod — `inspect delete {ns}/<pod>`"
+        ));
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
@@ -55,7 +57,9 @@ fn delete_k8s(
             "jsonpath={.metadata.ownerReferences[0].kind}",
         ])
         .output()?;
-    let owner = String::from_utf8_lossy(&owner_out.stdout).trim().to_string();
+    let owner = String::from_utf8_lossy(&owner_out.stdout)
+        .trim()
+        .to_string();
     let naked = owner_out.status.success() && owner.is_empty();
 
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
@@ -80,7 +84,11 @@ fn delete_k8s(
 
     // Outage interlock: a naked pod (permanent loss) always uses the stronger
     // confirmation unless --yes-all.
-    let confirm_kind = if naked { Confirm::Always } else { Confirm::LargeFanout };
+    let confirm_kind = if naked {
+        Confirm::Always
+    } else {
+        Confirm::LargeFanout
+    };
     let prompt = if naked {
         format!("Delete {target_line}? It has NO controller — this is PERMANENT.")
     } else {

@@ -277,7 +277,10 @@ fn lifecycle_k8s(
 ) -> Result<ExitKind> {
     let workload = args.selector.split_once('/').map(|(_, r)| r).unwrap_or("");
     if workload.is_empty() {
-        crate::error::emit(format!("{}: specify a workload — `{ns}/<deploy>`", act.as_str()));
+        crate::error::emit(format!(
+            "{}: specify a workload — `{ns}/<deploy>`",
+            act.as_str()
+        ));
         return Ok(ExitKind::Error);
     }
     // Only rollout-restart is a supported k8s write here; stop/start -> scale.
@@ -294,15 +297,15 @@ fn lifecycle_k8s(
     let context = cfg.context.as_deref().unwrap_or("<none>");
     let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
     // The K5 anti-footgun echo — which cluster + namespace + workload.
-    let target_line = format!(
-        "deploy/{workload} in namespace '{k8s_ns}' on context '{context}'"
-    );
+    let target_line = format!("deploy/{workload} in namespace '{k8s_ns}' on context '{context}'");
 
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     if !gate.should_apply() {
         let mut r = Renderer::new();
         r.summary(format!("DRY RUN. Would rollout-restart {target_line}"));
-        r.data_line(format!("command: kubectl rollout restart deploy/{workload}"));
+        r.data_line(format!(
+            "command: kubectl rollout restart deploy/{workload}"
+        ));
         r.data_line(
             "revert:  kubectl rollout undo --to-revision=<current> (captured at --apply time)"
                 .to_string(),
@@ -311,7 +314,11 @@ fn lifecycle_k8s(
         r.print();
         return Ok(ExitKind::Success);
     }
-    match gate.confirm(Confirm::LargeFanout, 1, &format!("Rollout-restart {target_line}?")) {
+    match gate.confirm(
+        Confirm::LargeFanout,
+        1,
+        &format!("Rollout-restart {target_line}?"),
+    ) {
         ConfirmResult::Aborted(why) => {
             eprintln!("aborted: {why}");
             return Ok(ExitKind::Error);
@@ -344,7 +351,10 @@ fn lifecycle_k8s(
         )
     };
     if args.revert_preview {
-        eprintln!("[inspect] revert preview {ns}/{workload}: {}", revert.preview);
+        eprintln!(
+            "[inspect] revert preview {ns}/{workload}: {}",
+            revert.preview
+        );
     }
 
     let started = Instant::now();

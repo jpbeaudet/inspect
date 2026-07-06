@@ -322,31 +322,6 @@ fn rbac_verdict(denied_reads: &[String], denied_writes: &[String]) -> Check {
     }
 }
 
-#[cfg(test)]
-mod k6_tests {
-    use super::*;
-
-    #[test]
-    fn k6_rbac_verdict_denied_reads_fail() {
-        let v = rbac_verdict(&["get pods".into()], &[]);
-        assert_eq!(v.status, CheckStatus::Fail);
-        assert!(v.detail.contains("get pods"));
-    }
-
-    #[test]
-    fn k6_rbac_verdict_denied_writes_only_warn() {
-        let v = rbac_verdict(&[], &["patch deployments".into(), "delete pods".into()]);
-        assert_eq!(v.status, CheckStatus::Warn);
-        assert!(v.detail.contains("patch deployments"));
-    }
-
-    #[test]
-    fn k6_rbac_verdict_all_permitted_pass() {
-        let v = rbac_verdict(&[], &[]);
-        assert_eq!(v.status, CheckStatus::Pass);
-    }
-}
-
 /// K6 metrics-server probe: pre-answers whether `top` will work, so an agent
 /// isn't surprised by `metrics_unavailable` mid-task (research w3-P6). A
 /// missing metrics-server is a cluster-component gap (Warn), not a failure.
@@ -392,9 +367,7 @@ fn emit_text_k8s(name: &str, checks: &[Check], overall: CheckStatus) {
     }
     match overall {
         CheckStatus::Pass | CheckStatus::Warn => {
-            println!(
-                "NEXT:    inspect setup {name}   (k8s is sessionless — no connect step)"
-            );
+            println!("NEXT:    inspect setup {name}   (k8s is sessionless — no connect step)");
         }
         _ => {
             println!("NEXT:    fix the failed checks above; rerun inspect test {name}");
@@ -551,4 +524,29 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod k6_tests {
+    use super::*;
+
+    #[test]
+    fn k6_rbac_verdict_denied_reads_fail() {
+        let v = rbac_verdict(&["get pods".into()], &[]);
+        assert_eq!(v.status, CheckStatus::Fail);
+        assert!(v.detail.contains("get pods"));
+    }
+
+    #[test]
+    fn k6_rbac_verdict_denied_writes_only_warn() {
+        let v = rbac_verdict(&[], &["patch deployments".into(), "delete pods".into()]);
+        assert_eq!(v.status, CheckStatus::Warn);
+        assert!(v.detail.contains("patch deployments"));
+    }
+
+    #[test]
+    fn k6_rbac_verdict_all_permitted_pass() {
+        let v = rbac_verdict(&[], &[]);
+        assert_eq!(v.status, CheckStatus::Pass);
+    }
 }

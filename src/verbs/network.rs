@@ -101,9 +101,18 @@ fn network_k8s(
     let mut count = 0usize;
     for s in items {
         count += 1;
-        let name = s.pointer("/metadata/name").and_then(|x| x.as_str()).unwrap_or("");
-        let typ = s.pointer("/spec/type").and_then(|x| x.as_str()).unwrap_or("ClusterIP");
-        let cip = s.pointer("/spec/clusterIP").and_then(|x| x.as_str()).unwrap_or("-");
+        let name = s
+            .pointer("/metadata/name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let typ = s
+            .pointer("/spec/type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("ClusterIP");
+        let cip = s
+            .pointer("/spec/clusterIP")
+            .and_then(|x| x.as_str())
+            .unwrap_or("-");
         let ports: Vec<String> = s
             .pointer("/spec/ports")
             .and_then(|p| p.as_array())

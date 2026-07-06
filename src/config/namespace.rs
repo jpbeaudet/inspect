@@ -729,7 +729,9 @@ mod tests {
         let blank = k8s_cfg(Some("   "), None);
         assert!(blank.validate("staging-k8s").is_err());
         // A real context validates.
-        assert!(k8s_cfg(Some("prod-eks"), None).validate("staging-k8s").is_ok());
+        assert!(k8s_cfg(Some("prod-eks"), None)
+            .validate("staging-k8s")
+            .is_ok());
     }
 
     #[test]

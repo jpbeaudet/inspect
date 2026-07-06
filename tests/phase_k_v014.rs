@@ -69,11 +69,14 @@ fn k2_show_renders_ssh_fields_na_for_k8s() {
 }
 
 /// K2: an env-only k8s namespace with no host/user validates and shows
-/// (the type-conditional validation drops the docker host+user gate).
+/// (the type-conditional validation drops the docker host+user gate). A
+/// `context` is still required — the K5 anti-footgun invariant pins the
+/// kubeconfig context explicitly, so it is part of a valid k8s config.
 #[test]
 fn k2_k8s_namespace_shows_without_host_user() {
     inspect()
         .env("INSPECT_KUBEONLY_TYPE", "kubernetes")
+        .env("INSPECT_KUBEONLY_CONTEXT", "z2-maker")
         .args(["show", "kubeonly"])
         .assert()
         .success()
@@ -130,7 +133,14 @@ fn k2_schema_version_bumped() {
     inspect()
         .env("INSPECT_HOME", &home)
         .args([
-            "add", "k", "--type", "k8s", "--context", "c", "--non-interactive", "--force",
+            "add",
+            "k",
+            "--type",
+            "k8s",
+            "--context",
+            "c",
+            "--non-interactive",
+            "--force",
         ])
         .assert()
         .success();
@@ -145,9 +155,11 @@ fn k2_schema_version_bumped() {
 
 // ---- K3 (v0.1.4): kubectl backend probe + preflight ------------------
 //
-// `show <k8s-ns>` is the reachable preflight surface this wave: it probes
-// the LOCAL kubectl (surface map §10 — k8s transport is local, not SSH)
-// and reports it, or fails loud when kubectl is absent. The pure
+// WA-3 (JP-2026-07-05) splits read from enforce: `show <k8s-ns>` REPORTS
+// kubectl readiness (probing the LOCAL kubectl — surface map §10, k8s
+// transport is local, not SSH — but never hard-failing), while the ACTION
+// verbs (`setup` / read / write) ENFORCE presence and fail loud with the
+// four-question error when kubectl is absent. The pure
 // version-floor + parse logic is exercised by the in-module unit tests in
 // `src/exec/kubectl.rs` (`k3_kubectl_version_floor_enforced`,
 // `k3_parse_*`, `k3_not_found_message_answers_four_questions`) — the crate
@@ -176,16 +188,19 @@ fn k3_kubectl_probe_detects_presence_and_version() {
         .stdout(contains("kubectl:").and(contains("ABSENT").not()));
 }
 
-/// K3: with kubectl NOT findable (empty PATH), `show` on a k8s namespace
-/// fails with the four-question preflight error (what / where / why /
-/// fix) and exits 2 — NOT a raw OS error, NOT a silent success.
+/// K3/WA-3: with kubectl NOT findable (empty PATH), a k8s ACTION verb
+/// (`setup` — it must shell out to kubectl to discover) fails with the
+/// four-question preflight error (what / where / why / fix) and exits 2 —
+/// NOT a raw OS error, NOT a silent success. Enforcement lives in the
+/// action verbs, not in `show` (which only REPORTS kubectl readiness per
+/// the WA-3 read/enforce split).
 #[test]
 fn k3_k8s_verb_fails_loud_when_kubectl_absent() {
     inspect()
         .env("PATH", "/nonexistent-inspect-k3-probe")
         .env("INSPECT_K3ABSENT_TYPE", "k8s")
         .env("INSPECT_K3ABSENT_CONTEXT", "z2-maker")
-        .args(["show", "k3absent"])
+        .args(["setup", "k3absent"])
         .assert()
         .failure()
         .code(2)
@@ -244,8 +259,7 @@ fn wa1_add_reports_resolved_config_path_under_inspect_home() {
         .assert()
         .success()
         .stdout(
-            contains(servers.display().to_string())
-                .and(contains("~/.inspect/servers.toml").not()),
+            contains(servers.display().to_string()).and(contains("~/.inspect/servers.toml").not()),
         );
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -319,10 +333,16 @@ fn wa3_show_json_contract_holds_without_kubectl() {
         .args(["show", "k", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "show --json must exit 0 without kubectl");
+    assert!(
+        out.status.success(),
+        "show --json must exit 0 without kubectl"
+    );
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("show --json must emit valid JSON");
     assert_eq!(v.get("context").and_then(|c| c.as_str()), Some("c"));
-    assert_eq!(v.get("kubectl_available").and_then(|b| b.as_bool()), Some(false));
+    assert_eq!(
+        v.get("kubectl_available").and_then(|b| b.as_bool()),
+        Some(false)
+    );
     let _ = std::fs::remove_dir_all(&home);
 }

@@ -113,7 +113,10 @@ fn scale_k8s(
         )),
     };
     if args.revert_preview {
-        eprintln!("[inspect] revert preview {ns}/{workload}: {}", revert.preview);
+        eprintln!(
+            "[inspect] revert preview {ns}/{workload}: {}",
+            revert.preview
+        );
     }
 
     let mut cmd = crate::exec::kubectl::kubectl_base(cfg);

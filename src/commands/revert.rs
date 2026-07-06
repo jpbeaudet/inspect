@@ -433,12 +433,18 @@ fn revert_command_pair_k8s(
     store: &AuditStore,
     cmd: &str,
 ) -> Result<ExitKind> {
-    let revert = entry.revert.as_ref().expect("kind=command_pair implies Some");
+    let revert = entry
+        .revert
+        .as_ref()
+        .expect("kind=command_pair implies Some");
     let label = entry.selector.clone();
     let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
     if !gate.should_apply() {
         let mut r = Renderer::new();
-        r.summary(format!("DRY RUN. Would revert audit {} ({label})", entry.id));
+        r.summary(format!(
+            "DRY RUN. Would revert audit {} ({label})",
+            entry.id
+        ));
         r.data_line(format!("REVERT: {}", revert.preview));
         r.data_line(format!("  + {cmd}   (local kubectl)"));
         r.next("Re-run with --apply to execute");
@@ -450,7 +456,10 @@ fn revert_command_pair_k8s(
         return Ok(ExitKind::Error);
     }
     let started = Instant::now();
-    let out = std::process::Command::new("sh").arg("-c").arg(cmd).output()?;
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()?;
     let dur = started.elapsed().as_millis() as u64;
     let exit = out.status.code().unwrap_or(1);
     let ok = out.status.success();
@@ -468,7 +477,10 @@ fn revert_command_pair_k8s(
 
     let mut r = Renderer::new();
     if ok {
-        r.summary(format!("reverted audit {} \u{2192} {label} (audit {})", entry.id, rev_entry.id));
+        r.summary(format!(
+            "reverted audit {} \u{2192} {label} (audit {})",
+            entry.id, rev_entry.id
+        ));
     } else {
         r.summary(format!(
             "revert FAILED on {label} (exit {exit}): {}",
@@ -477,7 +489,11 @@ fn revert_command_pair_k8s(
     }
     r.next("inspect audit show <id>");
     r.print();
-    Ok(if ok { ExitKind::Success } else { ExitKind::Error })
+    Ok(if ok {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
 }
 
 fn revert_state_snapshot(

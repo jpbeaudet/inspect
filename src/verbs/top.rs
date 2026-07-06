@@ -39,7 +39,8 @@ fn top_k8s(
     let out = cmd.output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let f = crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+        let f =
+            crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
         // metrics-server absent → the K13/WA-4 degrade path (exit 15).
         crate::tee_eprintln!("top: [{}] {}", f.failure_class(), f.hint(""));
         return Ok(ExitKind::Inner(f.exit_code()));
