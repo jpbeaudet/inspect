@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::cli::SimpleSelectorArgs;
 use crate::error::ExitKind;
+use crate::verbs::output::OutputDoc;
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     let ns_name = args.selector.split('/').next().unwrap_or("");
@@ -46,29 +47,30 @@ fn top_k8s(
         return Ok(ExitKind::Inner(f.exit_code()));
     }
 
-    let as_json = args.format.is_json();
-    let mut rows = 0usize;
+    // H4/R1: emit the standard envelope (`.data.pods[]`) + honor `--select`,
+    // matching the other snapshot read verbs (ps / status / describe) — not a
+    // bare per-line `json!` stream that silently ignores projection.
+    let fmt = args.format.resolve()?;
+    let mut pods: Vec<serde_json::Value> = Vec::new();
+    let mut data_lines: Vec<String> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.is_empty() {
             continue;
         }
-        rows += 1;
         // `kubectl top pods --no-headers`: NAME  CPU(cores)  MEMORY(bytes)
         let name = cols.first().copied().unwrap_or("");
         let cpu = cols.get(1).copied().unwrap_or("");
         let mem = cols.get(2).copied().unwrap_or("");
-        if as_json {
-            println!(
-                "{}",
-                serde_json::json!({ "server": ns, "pod": name, "cpu": cpu, "memory": mem })
-            );
-        } else {
-            println!("{ns}/{name:<40} cpu={cpu:<8} mem={mem}");
-        }
+        pods.push(serde_json::json!({
+            "server": ns, "pod": name, "cpu": cpu, "memory": mem
+        }));
+        data_lines.push(format!("{ns}/{name:<40} cpu={cpu:<8} mem={mem}"));
     }
-    if !as_json {
-        println!("SUMMARY: {rows} pod(s)");
-    }
-    Ok(ExitKind::Success)
+    let summary = format!("{} pod(s)", pods.len());
+    let doc = OutputDoc::new(summary, serde_json::json!({ "pods": pods }))
+        .with_meta("selector", args.selector.clone())
+        .with_meta("runtime", "k8s".to_string())
+        .with_quiet(args.format.quiet);
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }

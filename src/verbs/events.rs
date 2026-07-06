@@ -11,6 +11,7 @@ use anyhow::Result;
 
 use crate::cli::SimpleSelectorArgs;
 use crate::error::ExitKind;
+use crate::verbs::output::OutputDoc;
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
     let ns_name = args.selector.split('/').next().unwrap_or("");
@@ -56,9 +57,14 @@ fn events_k8s(
         serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     let empty = Vec::new();
     let items = v.get("items").and_then(|i| i.as_array()).unwrap_or(&empty);
-    let as_json = args.format.is_json();
     let mut warnings = 0usize;
 
+    // H4/R1: emit the standard envelope (`.data.events[]`) + honor `--select`,
+    // matching the other snapshot read verbs — not a bare per-line `json!`
+    // stream that silently ignores projection.
+    let fmt = args.format.resolve()?;
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut data_lines: Vec<String> = Vec::new();
     // `--sort-by=.lastTimestamp` is oldest-first; reverse for newest-first.
     for e in items.iter().rev() {
         let typ = e.get("type").and_then(|x| x.as_str()).unwrap_or("Normal");
@@ -75,25 +81,21 @@ fn events_k8s(
         if typ == "Warning" {
             warnings += 1;
         }
-        if as_json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "server": ns, "type": typ, "reason": reason,
-                    "object": obj, "message": msg, "last_timestamp": last,
-                })
-            );
-        } else {
-            println!("[{typ:<7}] {reason:<22} {obj:<32} {msg}");
-        }
+        events.push(serde_json::json!({
+            "server": ns, "type": typ, "reason": reason,
+            "object": obj, "message": msg, "last_timestamp": last,
+        }));
+        data_lines.push(format!("[{typ:<7}] {reason:<22} {obj:<32} {msg}"));
     }
 
-    if !as_json {
-        println!(
-            "SUMMARY: {} event(s), {warnings} warning(s) (newest-first). \
-             Note: events expire (~1h retention).",
-            items.len()
-        );
-    }
-    Ok(ExitKind::Success)
+    let summary = format!(
+        "{} event(s), {warnings} warning(s) (newest-first). \
+         Note: events expire (~1h retention).",
+        events.len()
+    );
+    let doc = OutputDoc::new(summary, serde_json::json!({ "events": events }))
+        .with_meta("selector", args.selector.clone())
+        .with_meta("runtime", "k8s".to_string())
+        .with_quiet(args.format.quiet);
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }

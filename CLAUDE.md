@@ -493,6 +493,17 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   envelope verb. Pre-fix shape was bare-NDJSON / bare-object and
   caused `.[0]` / `| length` jq recipes to fail with "Cannot index
   object with number". Don't regress.
+- **k8s snapshot read verbs emit the standard envelope + honor `--select`;
+  k8s line verbs emit true NDJSON + honor `--select` via a streaming filter.**
+  Snapshot (buffered, tabular) verbs — `ps`/`status`/`describe`/`network`/
+  `volumes`/`images`/`ports`/**`top` (`.data.pods[]`)**/**`events`
+  (`.data.events[]`)** — go through `render_doc(.., select_spec())`. Line
+  verbs — `cat`/`ls`/`grep`/`logs` — stream one JSON object per line and apply
+  `--select` per line via `select_filter()` / `flush_filter()`. The two are a
+  principled split, NOT drift: `top`/`events` were fixed off the exit-gate
+  audit (H4/R1) after they shipped as bare `println!(json!(…))` that dropped
+  `--select`; new snapshot verbs use `render_doc`, new line verbs use
+  `select_filter` — never a bare `println!(json!)`.
 - **`compose ls --json` envelope path is `.data.compose_projects[]`,
   field is `.name`.** `compose ps --json` payload path is
   `.data.services[]` (object-keyed `.data`, not array). The shared
