@@ -304,11 +304,17 @@ pub struct K8sExecOut {
 }
 
 /// The `kubectl … ` prefix STRING for an F11 revert `command_pair` payload —
-/// includes `--context`, `--kubeconfig` (expanded), and `-n`, so the payload
-/// is fully self-contained and runs correctly under `sh -c` locally (WD-1
+/// includes `--context`, `--kubeconfig` (expanded), and an explicit, resolved
+/// `-n <ns>` (from [`effective_namespace`]), so the payload is fully
+/// self-contained and reverts in the SAME namespace the mutation targeted (WD-1
 /// caught that omitting `--kubeconfig` broke reverts on a non-default
-/// kubeconfig). Values are config-controlled identifiers/paths.
-pub fn revert_kubectl_prefix(cfg: &crate::config::namespace::NamespaceConfig) -> String {
+/// kubeconfig; H3 extends that to pinning the resolved namespace so a revert
+/// never lands in a different namespace than the apply). Values are
+/// config-controlled identifiers/paths.
+pub fn revert_kubectl_prefix_in(
+    cfg: &crate::config::namespace::NamespaceConfig,
+    ns: &str,
+) -> String {
     let mut s = String::from("kubectl");
     if let Some(ctx) = cfg.context.as_deref() {
         s.push_str(&format!(" --context {ctx}"));
@@ -316,17 +322,35 @@ pub fn revert_kubectl_prefix(cfg: &crate::config::namespace::NamespaceConfig) ->
     if let Some(kc) = cfg.kubeconfig.as_deref() {
         s.push_str(&format!(" --kubeconfig {}", expand_tilde_kc(kc)));
     }
-    if let Some(n) = cfg.k8s_namespace.as_deref() {
-        s.push_str(&format!(" -n {n}"));
-    }
+    s.push_str(&format!(" -n {ns}"));
     s
 }
 
 /// A context-pinned `kubectl` base command (K5: `--context` always explicit,
 /// never the ambient current-context) with `--kubeconfig` + `-n` from config.
 /// The caller appends the subcommand (`get` / `describe` / `top` / `events`).
-/// Reused by K10 `why`, K11 `describe`, K12 `events`, K13 `top`, K14.
+/// Reused by K10 `why`, K11 `describe`, K12 `events`, K13 `top`, K14. When
+/// `k8s_namespace` is unset the `-n` flag is omitted and kubectl uses the
+/// context's default namespace — fine for reads; write verbs instead resolve
+/// and pin the namespace explicitly (see [`kubectl_base_in`]).
 pub fn kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> Command {
+    let ns = cfg
+        .k8s_namespace
+        .as_deref()
+        .filter(|n| !n.trim().is_empty());
+    kubectl_base_impl(cfg, ns)
+}
+
+/// Like [`kubectl_base`] but pins an explicit, already-resolved `-n <ns>` (from
+/// [`effective_namespace`]) regardless of `cfg.k8s_namespace`. The k8s **write**
+/// verbs use this so the mutating command targets exactly the namespace named
+/// in the dry-run preview, the confirm prompt, and the `AuditEntry` (H3/O1) —
+/// never an implicit context-default the audit can't see.
+pub fn kubectl_base_in(cfg: &crate::config::namespace::NamespaceConfig, ns: &str) -> Command {
+    kubectl_base_impl(cfg, Some(ns))
+}
+
+fn kubectl_base_impl(cfg: &crate::config::namespace::NamespaceConfig, ns: Option<&str>) -> Command {
     let mut c = Command::new("kubectl");
     if let Some(ctx) = cfg.context.as_deref() {
         c.args(["--context", ctx]);
@@ -334,10 +358,50 @@ pub fn kubectl_base(cfg: &crate::config::namespace::NamespaceConfig) -> Command 
     if let Some(kc) = cfg.kubeconfig.as_deref() {
         c.args(["--kubeconfig", &expand_tilde_kc(kc)]);
     }
-    if let Some(n) = cfg.k8s_namespace.as_deref() {
+    if let Some(n) = ns {
         c.args(["-n", n]);
     }
     c
+}
+
+/// Resolve the k8s namespace a verb will ACTUALLY act in, for an honest
+/// echo / audit / confirm and for explicit `-n` pinning. Config
+/// `k8s_namespace` wins; otherwise the default namespace the pinned kubeconfig
+/// **context** sets (read locally + offline via `kubectl config view --minify`
+/// — no API round-trip, so it works in dry-run and against an unreachable
+/// cluster); otherwise the literal `"default"` (kubectl's own final fallback).
+///
+/// Closes H3/O1: the write verbs previously echoed/audited
+/// `unwrap_or("default")`, so a context whose default namespace was e.g.
+/// `production` ran there while the confirm prompt + `AuditEntry` said
+/// `default` — a false forensic record on a destructive op. Resolving + pinning
+/// the real value also extends the K5 anti-footgun from context to namespace:
+/// the mutation never rides an implicit context-default. `config view` is
+/// read-only and does not touch `current-context`.
+pub fn effective_namespace(cfg: &crate::config::namespace::NamespaceConfig) -> String {
+    if let Some(n) = cfg.k8s_namespace.as_deref() {
+        if !n.trim().is_empty() {
+            return n.to_string();
+        }
+    }
+    let out = kubectl_base_impl(cfg, None)
+        .args([
+            "config",
+            "view",
+            "--minify",
+            "-o",
+            "jsonpath={.contexts[0].context.namespace}",
+        ])
+        .output();
+    if let Ok(out) = out {
+        if out.status.success() {
+            let ns = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !ns.is_empty() {
+                return ns;
+            }
+        }
+    }
+    "default".to_string()
 }
 
 /// Build the context-pinned `kubectl exec <pod> [-c <c>] --` prefix (K5: the
@@ -474,6 +538,38 @@ mod tests {
     //   forbidden  : kubectl get secrets -n kube-system \
     //                  --as=system:serviceaccount:default:default
     //   unreachable: kubectl --context no-such-ctx get pods
+    // H3/O1: `effective_namespace` prefers an explicit config `k8s_namespace`
+    // and returns it WITHOUT shelling out (the early return before the
+    // `kubectl config view` fallback). This is the deterministic branch — the
+    // context-default query branch needs a live kubeconfig and is covered by
+    // the k8s write acceptance tests. Pins that the write verbs' echo/audit
+    // resolve the real namespace rather than a fabricated "default".
+    #[test]
+    fn h3_effective_namespace_prefers_explicit_config() {
+        let cfg = crate::config::namespace::NamespaceConfig {
+            context: Some("z2-maker".into()),
+            k8s_namespace: Some("production".into()),
+            ..Default::default()
+        };
+        assert_eq!(effective_namespace(&cfg), "production");
+    }
+
+    // A blank `k8s_namespace` is treated as unset (falls through to the
+    // context-default resolver), never echoed as the literal empty string.
+    #[test]
+    fn h3_effective_namespace_treats_blank_config_as_unset() {
+        let cfg = crate::config::namespace::NamespaceConfig {
+            context: Some("z2-maker".into()),
+            k8s_namespace: Some("   ".into()),
+            ..Default::default()
+        };
+        // With no reachable kubeconfig context in the unit-test env, the
+        // resolver's final fallback is kubectl's own default — never "   ".
+        let ns = effective_namespace(&cfg);
+        assert!(!ns.trim().is_empty());
+        assert_ne!(ns, "   ");
+    }
+
     #[test]
     fn k4_classify_forbidden_to_rbac_with_cani_hint() {
         let real = "Error from server (Forbidden): secrets is forbidden: User \

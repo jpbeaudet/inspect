@@ -295,7 +295,10 @@ fn lifecycle_k8s(
     }
 
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // context's default → "default") so the echo / confirm / AuditEntry name the
+    // real target, not a fabricated "default", and pin it explicitly on the ops.
+    let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
     // The K5 anti-footgun echo — which cluster + namespace + workload.
     let target_line = format!("deploy/{workload} in namespace '{k8s_ns}' on context '{context}'");
 
@@ -328,7 +331,7 @@ fn lifecycle_k8s(
     }
 
     // F11 capture-before-apply: the current revision is the undo target.
-    let rev_out = crate::exec::kubectl::kubectl_base(cfg)
+    let rev_out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args([
             "get",
             &format!("deploy/{workload}"),
@@ -345,7 +348,7 @@ fn lifecycle_k8s(
         Revert::command_pair(
             format!(
                 "{} rollout undo deploy/{workload} --to-revision={current_rev}",
-                crate::exec::kubectl::revert_kubectl_prefix(cfg)
+                crate::exec::kubectl::revert_kubectl_prefix_in(cfg, &k8s_ns)
             ),
             format!("rollout undo deploy/{workload} to revision {current_rev}"),
         )
@@ -358,7 +361,7 @@ fn lifecycle_k8s(
     }
 
     let started = Instant::now();
-    let out = crate::exec::kubectl::kubectl_base(cfg)
+    let out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args(["rollout", "restart", &format!("deploy/{workload}")])
         .output()?;
     let dur = started.elapsed().as_millis() as u64;
@@ -369,7 +372,7 @@ fn lifecycle_k8s(
     entry.duration_ms = dur;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.context = Some(context.to_string());
-    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.k8s_namespace = Some(k8s_ns.clone());
     entry.revert = Some(revert);
     entry.applied = Some(success);
     AuditStore::open()?.append(&entry)?;

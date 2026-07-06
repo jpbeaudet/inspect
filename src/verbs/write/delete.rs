@@ -44,12 +44,15 @@ fn delete_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // context's default → "default") so the echo / confirm / AuditEntry name the
+    // real target, not a fabricated "default", and pin it explicitly on the ops.
+    let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
     let target_line = format!("pod '{pod}' in namespace '{k8s_ns}' on context '{context}'");
 
     // Does a controller own this pod? A naked pod (no ownerReferences) will
     // NOT be recreated — deletion is then a permanent loss, so warn harder.
-    let owner_out = crate::exec::kubectl::kubectl_base(cfg)
+    let owner_out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args([
             "get",
             &format!("pod/{pod}"),
@@ -104,7 +107,7 @@ fn delete_k8s(
     }
 
     let started = std::time::Instant::now();
-    let out = crate::exec::kubectl::kubectl_base(cfg)
+    let out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args(["delete", &format!("pod/{pod}")])
         .output()?;
     let dur = started.elapsed().as_millis() as u64;
@@ -115,7 +118,7 @@ fn delete_k8s(
     entry.duration_ms = dur;
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.context = Some(context.to_string());
-    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.k8s_namespace = Some(k8s_ns.clone());
     entry.revert = Some(Revert::unsupported(if naked {
         format!("pod '{pod}' had no controller — deletion is permanent, no inverse")
     } else {

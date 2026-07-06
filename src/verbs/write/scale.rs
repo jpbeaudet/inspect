@@ -37,14 +37,17 @@ fn scale_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // context's default → "default") so the echo / confirm / AuditEntry name
+    // the real target, not a fabricated "default", and pin it explicitly below.
+    let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
     let target_line = format!(
         "deploy/{workload} to {} replica(s) in namespace '{k8s_ns}' on context '{context}'",
         args.replicas
     );
 
     // Capture the current replica count first — it is the revert target.
-    let cur_out = crate::exec::kubectl::kubectl_base(cfg)
+    let cur_out = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns)
         .args([
             "get",
             &format!("deploy/{workload}"),
@@ -104,7 +107,7 @@ fn scale_k8s(
         Some(p) => Revert::command_pair(
             format!(
                 "{} scale deploy/{workload} --replicas={p}",
-                crate::exec::kubectl::revert_kubectl_prefix(cfg)
+                crate::exec::kubectl::revert_kubectl_prefix_in(cfg, &k8s_ns)
             ),
             format!("scale deploy/{workload} back to {p} replica(s)"),
         ),
@@ -119,7 +122,7 @@ fn scale_k8s(
         );
     }
 
-    let mut cmd = crate::exec::kubectl::kubectl_base(cfg);
+    let mut cmd = crate::exec::kubectl::kubectl_base_in(cfg, &k8s_ns);
     cmd.args([
         "scale",
         &format!("deploy/{workload}"),
@@ -139,7 +142,7 @@ fn scale_k8s(
     entry.args = format!("replicas={}", args.replicas);
     entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
     entry.context = Some(context.to_string());
-    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.k8s_namespace = Some(k8s_ns.clone());
     entry.revert = Some(revert);
     entry.applied = Some(success);
     AuditStore::open()?.append(&entry)?;

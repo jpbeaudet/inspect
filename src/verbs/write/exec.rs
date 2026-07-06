@@ -516,7 +516,13 @@ fn exec_k8s(
         return Ok(ExitKind::Error);
     }
     let context = cfg.context.as_deref().unwrap_or("<none>");
-    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    // H3/O1: resolve the namespace kubectl will ACTUALLY act in (config → the
+    // context's default → "default") so the echo / confirm / AuditEntry name the
+    // real target, not a fabricated "default". `exec_in_pod` targets that same
+    // context-default (exec_base omits `-n` when config is unset), so echo ==
+    // command holds without threading a pinned `-n` through the shared
+    // exec-base helper (which reads cat/ls/grep also use).
+    let k8s_ns = crate::exec::kubectl::effective_namespace(cfg);
     let cmd_str = args.cmd.join(" ");
     let target_line = format!("pod '{pod}' in namespace '{k8s_ns}' on context '{context}'");
 
@@ -557,7 +563,7 @@ fn exec_k8s(
     let mut entry = AuditEntry::new("exec", &format!("{ns}/{pod}"));
     entry.args = crate::redact::redact_for_audit(&cmd_str).into_owned();
     entry.context = Some(context.to_string());
-    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.k8s_namespace = Some(k8s_ns.clone());
     entry.revert = Some(Revert::unsupported(format!(
         "in-pod exec has no captured inverse (ephemeral) — manually undo inside pod '{pod}' if needed"
     )));
