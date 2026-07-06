@@ -20,14 +20,15 @@ with a built-in audit + revert trail, and **orchestrate** declarative
 multi-step migrations with rollback.
 
 - **Local-first.** No agent, no daemon, no central server. Just SSH
-  (and `docker` / `systemctl` on the remote).
+  (and `docker` / `systemctl` on the remote), or a local, context-pinned
+  `kubectl` for `type = "k8s"` namespaces.
 - **Dry-run by default.** Every mutating command previews a diff;
   `--apply` is the only way to enact a change. Every apply is audited
   and reversible with `inspect revert <audit-id>`.
 - **Stable JSON envelope.** Every command can emit a versioned
   `summary | data | next` envelope (`--json`); the in-binary
   `--select '<jq>'` flag projects or reshapes it without an external
-  `jq` install (F19), and the envelope still pipes cleanly into `jq`,
+  `jq` install, and the envelope still pipes cleanly into `jq`,
   scripts, or another tool.
 - **LogQL-style search.** A familiar Loki-like query language to
   grep, parse, and aggregate across logs, files, and host state.
@@ -46,25 +47,35 @@ multi-step migrations with rollback.
   stable JSON envelope, `-h`-discoverable contracts, redacted
   stdout, chained `hint:` / `see: inspect help <topic>` recovery
   lines, and explicit exit-code classes (0 ok / 1 no-match /
-  2 usage / 12-14 transport / inner pass-through on `run`) mean
+  2 usage / 12-14 transport / 15 metrics-unavailable /
+  16 no-shell-in-container / inner pass-through on `run`) mean
   an agent learns the surface from `inspect --help` and recovers
   from failures without a custom adapter. **If you already have
   a shell tool wired into your agent, you have the integration.**
 
-> **Current release:** `v0.1.3` — password auth + extended session
-> TTL + `ssh add-key` helper, optional OS keychain, audit log
-> retention, header / PEM / URL credential redaction,
-> parameterized aliases, per-branch matrix rollback,
-> per-namespace env overlay, stale-session auto-reauth,
-> universal `--revert`, file-transfer (`put` / `get` / `cp`),
-> session transcript, multi-step runner, first-class compose
-> verbs, jaq-powered `--select` projection on every JSON-emitting
-> verb. See [archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md](archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md)
-> for the closed scope.
+> **Current release:** `v0.1.4` — the **Kubernetes runtime medium**.
+> A namespace's `type = "k8s"` routes every verb through a
+> context-pinned `kubectl` backend instead of SSH+docker, purely
+> additively (docker users see zero change). Read verbs
+> (`status` / `ps` / `health` / `logs` / `cat` / `ls` / `grep` /
+> `run` / `why` / `describe` / `events` / `top` / `network` /
+> `ports` / `volumes` / `images`) and conservative, audited,
+> revertible write verbs (`scale` / `restart` / `rollout` /
+> `delete` / `exec`) — all envelope-native and `--select`-projectable,
+> with the same dry-run-by-default + audit + revert contract as the
+> docker surface. `fleet` spans mixed docker + k8s namespaces in one
+> rollup. See [`inspect help kubernetes`](src/help/content/kubernetes.md)
+> and [archives/v0.1.4/](archives/v0.1.4/) for the design + smoke record.
 >
-> **Next:** `v0.1.4` — Kubernetes support (mixed Docker + k8s
-> fleets). `v0.1.5` — stabilization sweep before the v0.2.0
-> contract freeze.
+> **Prior:** `v0.1.3` — password auth, OS keychain, credential
+> redaction, parameterized aliases, matrix rollback, env overlay,
+> auto-reauth, universal `--revert`, file transfer, compose verbs,
+> jaq `--select`
+> ([archives/v0.1.3/](archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md)).
+>
+> **Next:** `v0.1.5` — stabilization sweep before the v0.2.0
+> contract freeze (dogfood-driven; the deferred cross-medium
+> `search` + bundle seam land here only if real usage names them).
 
 ---
 
@@ -187,11 +198,14 @@ A longer guided tour lives in **[docs/MANUAL.md](docs/MANUAL.md)**.
 ## How it works
 
 ```
-   you ──► inspect (local) ──► ssh ControlMaster ──► remote host
-                │                                       │
-                │                                       ├── docker / podman
-                │                                       ├── systemctl
-                │                                       └── POSIX coreutils
+   you ──► inspect (local) ─┬─ ssh ControlMaster ──► remote host
+                │           │                          │
+                │           │                          ├── docker / podman
+                │           │                          ├── systemctl
+                │           │                          └── POSIX coreutils
+                │           │
+                │           └─ kubectl (--context pinned) ──► k8s cluster
+                │                (type = "k8s" namespaces; local, not SSH)
                 ▼
         ~/.inspect/
           ├── profiles/<ns>.yaml      # discovered topology, mode 0600
@@ -202,6 +216,12 @@ A longer guided tour lives in **[docs/MANUAL.md](docs/MANUAL.md)**.
 - **One SSH session per host.** OpenSSH `ControlMaster` keeps a
   single authenticated channel open for the duration of your shell.
   Type the passphrase once.
+- **Kubernetes is a runtime, not a transport.** A `type = "k8s"`
+  namespace runs every verb through `kubectl` locally, pinning
+  `--context` on every call and never touching the ambient
+  `current-context` — so a context switch in another shell can never
+  redirect an `inspect` verb at the wrong cluster. Sessionless: no
+  `connect` step.
 - **Profiles are cached.** `inspect setup <ns>` snapshots every
   container, volume, network, and listening port into
   `~/.inspect/profiles/<ns>.yaml`. Drift is detected on next use.
@@ -311,7 +331,7 @@ timeout).
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | maintainers / on-call | Release rollout, incident response, hotfix flow, support matrix, current limitations. |
 | [docs/RELEASING.md](docs/RELEASING.md) | maintainers | How to cut a tag, what the release workflow does, how to update the Homebrew tap. |
 | [CHANGELOG.md](CHANGELOG.md) | everyone | Per-release changes (Keep a Changelog format). |
-| [archives/](archives/) | everyone | Closed planning + smoke + audit artifacts from prior releases (v0.1.2, v0.1.3). |
+| [archives/](archives/) | everyone | Closed planning + smoke + audit artifacts from prior releases (v0.1.2, v0.1.3, v0.1.4). |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | contributors | Dev setup, lint/test gates, PR rules. |
 | [SECURITY.md](SECURITY.md) | reporters | How to report a vulnerability. |
 | `inspect help <topic>` | end users | The same manual content, embedded in the binary, no network. |
@@ -357,7 +377,7 @@ any release. The current shape:
 | v0.1.1 | `run` verb, `--follow`, `--merged`, `--match` / `--exclude`, `--since-last`, secret masking, `--reason`, progress, exit-code surfacing, phantom-service fix. |
 | v0.1.2 | Bundle orchestration (B9), `watch` verb (B10), field-feedback patches B1–B8, defensive hardening pass (audit fsync, http timeouts, panic-safe matrix). |
 | v0.1.3 | Password auth + session TTL + `ssh add-key`, OS keychain, audit retention + GC, header / PEM / URL / env redaction, parameterized aliases, per-branch matrix rollback, per-namespace env overlay, stale-session auto-reauth, universal `--revert`, `put` / `get` / `cp`, session transcript, multi-step runner, first-class `compose` verbs, jaq-powered `--select` projection. |
-| v0.1.4 | Kubernetes support: mixed Docker + k8s fleets, k8s-aware selectors, scoped write verbs (`scale`, `restart`, `delete pod` with audit), bundle-engine integration. |
+| v0.1.4 | Kubernetes runtime medium (purely additive): `type = "k8s"` namespaces driven by a context-pinned `kubectl` backend; envelope-native `--select`-projectable read verbs (`status`/`ps`/`health`/`logs`/`cat`/`ls`/`grep`/`run`/`why`/`describe`/`events`/`top`/`network`/`ports`/`volumes`/`images`); conservative audited-revertible write verbs (`scale`/`restart`/`rollout`/`delete pod`/`exec`); mixed Docker + k8s `fleet` rollup; context-pinning anti-footgun; k8s exit-code bands (15/16). Cross-medium `search` + bundle seam deferred to v0.1.5. |
 | v0.1.5 | Pre-stabilization sweep: CLI surface audit, config / JSON schema freeze, help audit, README rewrite, dead-code + dependency audit, security audit. **No new features.** |
 | v0.2.0 | Stability contract begins. |
 
