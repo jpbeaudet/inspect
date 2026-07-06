@@ -23,9 +23,8 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
 
     let resolved = resolver::resolve(&args.namespace)?;
 
-    // Q6 (v0.1.4): k8s namespaces are sessionless — there is no master to
-    // close. Report N/A (mirrors `connect`) rather than failing on a hostless
-    // config.
+    // k8s namespaces are sessionless — there is no master to close. Report
+    // N/A (mirrors `connect`) rather than failing on a hostless config.
     if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
         println!(
             "SUMMARY: namespace '{}' is Kubernetes (k8s) — disconnect is N/A (sessionless)",

@@ -337,7 +337,7 @@ fn sql_returns(
         Some(o) if !o.trim().is_empty() => format!("psql {} -tAc {}", o, shquote(sql)),
         _ => format!("psql -tAc {}", shquote(sql)),
     };
-    // Built through the runtime executor seam (K1, v0.1.4). Docker today;
+    // Built through the runtime executor seam. Docker today;
     // byte-identical to the prior inline `docker exec … sh -c …`. This is
     // a read-only diagnostic probe, so it uses the read-exec builder.
     let cmd = DockerRuntime.build_read_exec(container, &psql);

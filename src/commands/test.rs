@@ -229,8 +229,8 @@ fn k8s_checks(cfg: &crate::config::namespace::NamespaceConfig, name: &str) -> Ve
     };
 
     // 4-5. RBAC self-test + metrics-server probe — only meaningful once
-    //      the API is reachable. `auth can-i` pre-empts a mid-task Forbidden
-    //      (research w3-P2); the metrics probe pre-answers `top` (w3-P6).
+    //      the API is reachable. `auth can-i` pre-empts a mid-task Forbidden;
+    //      the metrics probe pre-answers `top`.
     if api_ok {
         checks.push(k8s_rbac_check(cfg));
         checks.push(k8s_metrics_check(cfg));
@@ -323,8 +323,8 @@ fn rbac_verdict(denied_reads: &[String], denied_writes: &[String]) -> Check {
 }
 
 /// Metrics-server probe: pre-answers whether `top` will work, so an agent
-/// isn't surprised by `metrics_unavailable` mid-task (research w3-P6). A
-/// missing metrics-server is a cluster-component gap (Warn), not a failure.
+/// isn't surprised by `metrics_unavailable` mid-task. A missing
+/// metrics-server is a cluster-component gap (Warn), not a failure.
 fn k8s_metrics_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
     let mut cmd = k8s_kubectl_base(cfg);
     cmd.args(["top", "pods", "--request-timeout=5s"]);
@@ -358,7 +358,7 @@ fn k8s_metrics_check(cfg: &crate::config::namespace::NamespaceConfig) -> Check {
 }
 
 /// k8s-specific text output — no `host:port` line, and a sessionless NEXT
-/// hint (k8s has no `connect` step — Q6/WA safety property).
+/// hint (k8s has no `connect` step).
 fn emit_text_k8s(name: &str, checks: &[Check], overall: CheckStatus) {
     println!("SUMMARY: namespace '{name}' (k8s) -> {}", overall.label());
     println!("DATA:");

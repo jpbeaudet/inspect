@@ -712,7 +712,7 @@ fn run_single_branch(
                 ));
             }
             let rstep = &resolved[0];
-            // Built through the runtime executor seam (K1, v0.1.4). Docker
+            // Built through the runtime executor seam. Docker
             // today; byte-identical to the prior inline `docker exec …`.
             let cmd = match rstep.container() {
                 Some(container) => DockerRuntime.build_write_exec(container, &body),

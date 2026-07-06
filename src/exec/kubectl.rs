@@ -154,8 +154,8 @@ pub fn floor_warning(semver: Option<(u32, u32)>) -> Option<String> {
 /// raw OS `executable file not found`.
 ///
 /// Note: this deliberately does not append a `see: inspect help
-/// kubernetes` pointer — that editorial topic lands in K24. The `fix:`
-/// line carries the actionable install pointer directly until then.
+/// kubernetes` pointer — the `fix:` line already carries the actionable
+/// install pointer directly, so the error is self-contained.
 pub fn not_found_message(namespace: &str, path_searched: &str) -> String {
     let path = if path_searched.trim().is_empty() {
         "(empty PATH)"
