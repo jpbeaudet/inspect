@@ -32,12 +32,19 @@
 | O3/O4 | O | Low | backlinked to K14/K7 | Path B — tracked |
 | S2 | I | Low | `Unknown` failure hint says "see raw stderr below" but stderr is swallowed — dead-end pointer, no leak | Path A — trivial |
 
-### Counts
+### Counts — first pass (2026-07-06)
 - **Critical: 0**
 - **High: 5** (H1 S1, H2 G1, H3 O1/R3, H4 R1, H5 C1)
 - **Medium: ~10** (C2/C3/C4, G2/G3/G4, R2/R4/R6, O2)
 - **Low: ~7** (W1/W2/W3, O3/O4, S2)
-- **Maturity bar met?** **NO.** 5 Highs. Fix Path-A Highs (H1–H4) + Mediums, obtain JP decision on H5, re-run this audit; target 0-Crit/0-High before tag.
+- **Maturity bar met?** **NO** — 5 Highs.
+
+### Counts — after fix pass (2026-07-06, same day)
+- **Critical: 0**
+- **High: 0** — all five FIXED + pushed (H1 `8ca9e82`, H3 `06322c1`, H4 `1de3759`, H2 `7d6de7d`, H5 `33dd7c6`).
+- **Medium: 0 open** — all seven resolved (R2 `fe5a763`, O2 `0b0a760`, G2/G4 `4dc182a`, C2/C3/C4 `fac89d4` via H5, R6 `e9102f7`, G3 `f1d200e`, R4 `00a8689`).
+- **Low: ~6 open (Path-B tracked, pedantic)** — W1/W2/W3 (cold-path perf hygiene), O3/O4 (backlinked K7/K14), S2 (dead-end hint). None block release; each carries a backlink.
+- **Maturity bar met?** **YES** — 0 Critical / 0 High, only a few pedantic tracked Lows remain (the nucleus asymptote). Pending independent re-audit confirmation below.
 
 ### Per-dimension roll-up
 - **S (sovereign):** BROKEN by H1 (describe_k8s leak). Everything else clean — kubeconfig paths are config identifiers not credentials (never hit argv/audit/cache); `exec_k8s` redacts args+stdout and is fail-closed; write verbs dry-run-default with no secret in revert payloads; discovery caches only name/image/health; no `unwrap`/`expect`/`panic` on fallible k8s boundaries.
