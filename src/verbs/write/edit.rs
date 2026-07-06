@@ -39,6 +39,9 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         return Ok(ExitKind::Error);
     }
 
+    if let Some(ek) = crate::verbs::write::refuse_if_k8s_immutable(&args.target, "edit") {
+        return Ok(ek);
+    }
     let (runner, nses, targets) = plan(&args.target)?;
     let mut planned = Vec::new();
     for s in iter_steps(&nses, &targets) {
@@ -167,7 +170,7 @@ pub fn run(args: EditArgs) -> Result<ExitKind> {
         let dur = started.elapsed().as_millis() as u64;
 
         let mut entry = AuditEntry::new("edit", &w.label);
-        // G2 (post-v0.1.3 audit hardening): a sed expression can
+        // A sed expression can
         // legitimately carry secrets (e.g. rotating an API key in a
         // config file). Redact embedded secrets before recording.
         entry.args = crate::redact::redact_for_audit(&args.expr).into_owned();

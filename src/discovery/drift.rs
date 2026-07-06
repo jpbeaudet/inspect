@@ -25,6 +25,7 @@
 use std::time::Duration;
 
 use crate::discovery::ports_parse::parse_ports_column;
+use crate::exec::runtime::{DockerRuntime, Runtime};
 use crate::profile::cache::{clear_drift_marker, load_profile, write_drift_marker};
 use crate::profile::schema::{Port, Profile};
 use crate::ssh::{run_remote, RunOpts, SshTarget};
@@ -184,11 +185,13 @@ fn cheap_rows(namespace: &str, target: &SshTarget) -> anyhow::Result<Vec<DriftRo
     // captures port-level state in the same single ssh round-trip;
     // the column itself may be empty (containers without exposed
     // ports) and that case parses to `Vec::new()`.
-    let cmd = "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Ports}}' 2>/dev/null";
+    // Built through the runtime executor seam. Docker today;
+    // byte-identical to the prior inline `docker ps --format …` string.
+    let cmd = DockerRuntime.inventory_cmd();
     let out = run_remote(
         namespace,
         target,
-        cmd,
+        &cmd,
         RunOpts {
             timeout: Some(Duration::from_secs(8)),
             stdin: None,

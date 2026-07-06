@@ -5,6 +5,195 @@ All notable changes to `inspect` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — Unreleased
+
+The **Kubernetes release** — introduces the k8s runtime medium purely
+additively (docker users see zero change). Work lands in `K<n>` items
+per `INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`.
+
+### Security (exit-gate audit)
+
+- **`inspect describe <k8s-ns>/<pod>` no longer leaks inline env secrets.**
+  The exit-gate deep audit (`docs/audits/k8s-medium-deep-audit-2026-07-06.md`,
+  finding H1/S1) caught `describe` embedding the raw `kubectl get pod -o json`
+  object verbatim into the `--json` envelope with no redaction — so an inline
+  `spec.*containers[].env[].value` literal and the always-present
+  `kubectl.kubernetes.io/last-applied-configuration` annotation (a full copy of
+  the applied manifest) crossed the stdout boundary in plaintext. `describe` now
+  structurally scrubs both to `<redacted>` before rendering; `env[].valueFrom`
+  references (secretKeyRef / configMapKeyRef) carry no value and are shown by
+  name. This brings `describe` in line with the secret-blindness the `cat` /
+  `logs` / `grep` / `exec` output paths already enforce. Caught pre-tag — no
+  released version ever shipped the leak. Tests: `k11_scrub_*` in
+  `src/verbs/describe.rs`.
+
+### Added
+
+- **K15–K20 — conservative k8s write verbs (scale / restart / rollout /
+  delete / exec), audited and revertible.** Every mutation is dry-run by
+  default, echoes the resolved `{context, k8s_namespace, workload}` in the
+  preview, the confirmation prompt, and the `AuditEntry` (the K5
+  anti-footgun), captures an F11 revert *before* applying, and classifies
+  failures through the K4 taxonomy (never a raw kubectl error). **`scale`**
+  (`kubectl scale deploy`) captures the prior replica count as a
+  `command_pair` revert; `--replicas 0` trips a full-outage confirmation.
+  **`restart`** = `kubectl rollout restart` with a captured `rollout undo
+  --to-revision` inverse. **`rollout`** = `kubectl rollout undo` (fast
+  rollback of a bad deploy), reverting to the pre-undo revision.
+  **`delete`** = `kubectl delete pod` (pods only; the controller recreates
+  it — an `unsupported` revert with an outage guard). **`exec --apply`**
+  runs an in-pod command under the `--no-revert` interlock (ephemeral fs,
+  no synthesisable inverse), args + stdout redacted. Immutable-pod ops
+  (edit / cp / stop / start / port-forward) **refuse with a chained idiom
+  hint** rather than leak a raw error (K20). Write verbs target Deployments
+  (the conservative set) — a StatefulSet/DaemonSet of the same name gets a
+  chained not-found hint naming the kubectl escape hatch, not an opaque
+  failure. Resolved-namespace pinning: the `-n` sent to kubectl is the
+  namespace named in the audit (config → the context's default →
+  `default`), so a destructive op can never land in a namespace the audit
+  didn't record.
+
+- **K7–K14 — k8s read verbs, envelope-native and `--select`-projectable.**
+  `status` / `ps` / `health` (pod rollup with a health verdict), `logs`
+  (`-c <container>`, `--previous`, `--merged`, auto-picks the first
+  container on a multi-container pod rather than erroring like kubectl),
+  `cat` / `ls` / `grep` / `run` (via `kubectl exec`, distroless/no-shell
+  detected and refused with a `kubectl debug` pointer), `why` (deep
+  diagnostic feeding on events), `describe` (the pod object reshaped into
+  the envelope — richer than kubectl's text-only describe, and with inline
+  `env[].value` secrets + the `last-applied-configuration` annotation
+  scrubbed so nothing leaks to stdout), `events` (always newest-first, the
+  #1 kubectl events complaint, auto-scoped by pod), `top` (CPU/mem, cleanly
+  degrading to `metrics_unavailable`/exit-15 when metrics-server is absent),
+  and `ports` / `network` / `volumes` / `images`. Snapshot verbs emit the
+  standard `{schema_version, summary, data, next, meta}` envelope + honor
+  `--select`; line verbs (`cat`/`ls`/`grep`/`logs`) stream true NDJSON and
+  apply `--select` per line.
+
+- **K21 — `fleet` spans docker and k8s namespaces in one rollup.** A mixed
+  fleet query merges docker-runtime and k8s-runtime namespaces into a
+  single status view, each row carrying its runtime.
+
+- **K24 — `inspect help kubernetes` editorial topic.** The cold-start guide
+  to the k8s medium (config, verbs, the anti-footgun context pinning, the
+  read/write contracts) for an agent dropping in from `--help`.
+
+- **K25 — `SMOKE_v0.1.4.md` real-cluster runbook.** The P0–P10 release
+  smoke for the k8s medium, including the P9 gated mutating apply+revert
+  round-trip (WD-1) run strictly inside a disposable `inspect-livetest`
+  namespace.
+
+- **Deferred to v0.1.5 (usage-validated pool):** K22 (cross-medium
+  `search`) and K23 (cross-medium bundle seam) — built only if real devops
+  usage names them as the one feature needed (JP 2026-07-06).
+
+- **K6 (part 1) — `inspect test <k8s-ns>` RBAC self-test + metrics probe.**
+  On top of the K4 config/kubectl/API checks, `test` now runs `kubectl auth
+  can-i` for the exact verbs inspect uses (`get pods`, `get pods/log`,
+  `create pods/exec`, `patch deployments`, `delete pods` — not a superset)
+  and a metrics-server probe, so an operator/agent learns about a missing
+  RBAC grant or absent metrics-server *before* hitting a mid-task Forbidden
+  or a `top` failure. Reads denied → fail; writes denied → warn (diagnostics
+  still work); metrics absent → warn (a cluster-component gap, not a failure).
+  `inspect setup <k8s-ns>` discovers pods via a local, context-pinned `kubectl
+  get pods -o json` (never SSH) and caches a profile in the shared model;
+  `connect`/`disconnect` report N/A (k8s is sessionless, Q6); and a k8s
+  namespace now requires an explicit `context` at config time (anti-footgun).
+
+- **K5 — context-pinning invariant + resolved-target audit fields
+  (anti-footgun).** Wrong-context/namespace destruction is the #1 kubectl
+  horror class. inspect is structurally immune: the k8s runtime pins
+  `--context` explicitly on **every** kubectl command (`scope_flags`) and
+  **never reads or mutates the ambient `current-context`** — a switch in
+  another shell can never redirect an inspect verb at the wrong cluster.
+  Enforced by an exhaustive invariant test over every command builder plus
+  a source-scan test (`k5_ambient_current_context_never_read_or_mutated`)
+  that fails the build if any `kubectl config current-context/use-context`
+  call is introduced. `AuditEntry` gains additive `context` /
+  `k8s_namespace` `Option` fields (`skip_serializing_if`, no schema break)
+  so a k8s write's audit record names exactly which cluster + namespace it
+  touched; docker entries omit them and deserialize unchanged. The
+  resolved-target echo in verb `meta` / write dry-run preview + confirmation
+  prompt is applied by the read verbs (K6+) and write verbs (K15+) that emit
+  those surfaces.
+
+- **K4 — k8s failure-class taxonomy + stderr classifier.** kubectl
+  collapses NotFound / Forbidden / unreachable / metrics-absent into a
+  single non-zero exit with the distinction only in stderr prose;
+  `classify_kubectl_failure` parses it into a stable, agent-branchable
+  `failure_class` (`rbac_forbidden`, `not_found`, `no_shell_in_container`,
+  `metrics_unavailable`, `transport_unreachable`, `transport_auth_failed`,
+  `unknown`) plus a chained CI-gate-quality hint (the RBAC hint embeds the
+  literal `kubectl auth can-i`). Transport reuses the F13 12–14 band by
+  semantic class. First consumer: `inspect test <k8s-ns>` now runs
+  k8s-appropriate checks — config, kubectl backend, and a context-pinned
+  API-reachability probe — instead of the SSH key/tcp checks (which for a
+  k8s namespace reported bogus "no key_path" / "no host" failures, itself a
+  mindtrap); API failures are classified and reported as
+  `[<failure_class>] <hint>`. The `exit_code()` accessor and the
+  `TransportClass` dispatch bridge land in K6 with their first consumers;
+  the exit-code policy is recorded now.
+
+- **K3 — kubectl backend probe + four-question preflight.** k8s
+  namespaces drive a **local** `kubectl` shell-out backend (never over
+  SSH). A local probe (`kubectl version --client -o json`) detects
+  presence + client version and checks a documented floor (v1.19,
+  warn-not-fail). `inspect show <k8s-ns>` reports `kubectl: <version>`
+  when present; when kubectl is absent it fails with a loud,
+  CI-gate-quality **four-question** error (what / where / why / fix,
+  incl. the install URL) and exit code 2 — never a raw OS
+  `executable file not found`. Docker namespaces are unaffected. (A
+  design-review note tracked to K6: `show` should become
+  display-plus-readiness-line rather than hard-fail once `test`/`setup`
+  provide the natural preflight surface.)
+
+- **K2 — namespace `type` / kubeconfig config + type-conditional
+  validation.** `servers.toml` gains four optional fields for the
+  kubernetes runtime medium — `type` (`docker` default | `k8s`),
+  `kubeconfig`, `context`, `namespace` (the in-cluster k8s namespace) —
+  all skipped when unset, so a pre-K2 file loads unchanged as a docker
+  namespace. **Config schema bumped 1 → 2** (additive; no migration —
+  the version-gate on load is unchanged). `NamespaceConfig::validate()`
+  is now **type-conditional**: a docker namespace keeps the `host` +
+  `user` requirement and all SSH/auth/key/ttl checks; a `type = "k8s"`
+  namespace requires **neither** `host` nor `user` (it is addressed by
+  its kubeconfig context, verified at `setup`/`test` in a later item),
+  and its SSH-only fields are inert. An unknown `type` value is rejected
+  loudly (`ConfigError::InvalidRuntimeType`, CI-gate-quality message)
+  rather than silently treated as docker. `inspect add --type k8s`
+  prompts for context/kubeconfig/namespace and skips the SSH prompts;
+  `inspect show` on a k8s namespace renders the SSH-only fields as
+  `N/A (k8s)` and adds `type` + the k8s addressing to both the human and
+  `--json` output (**show `--json` `schema_version` 1 → 2**, adds
+  `type`/`kubeconfig`/`context`/`namespace`). Env overrides
+  `INSPECT_<NS>_TYPE` / `_KUBECONFIG` / `_CONTEXT` / `_NAMESPACE` added.
+  `NamespaceConfig::runtime_kind()` bridges the config to the K1
+  `RuntimeKind` selector. No k8s *verb* runs yet — that is Wave B.
+  Acceptance: `k2_*` in `src/config/namespace.rs` + `src/config/file.rs`
+  and `k2_show_renders_ssh_fields_na_for_k8s` /
+  `k2_k8s_namespace_shows_without_host_user` / `k2_unknown_type_is_rejected`
+  in `tests/phase_k_v014.rs`.
+- **K1 — internal Runtime executor abstraction.** New `Runtime` trait
+  (`src/exec/runtime.rs`) that abstracts runtime-specific command
+  building behind an object-safe seam, with a `RuntimeKind`
+  (`Docker` | `K8s`) selector (`from_type()` maps the future namespace
+  `type` config field) and a `runtime_for(kind) -> Box<dyn Runtime>`
+  factory. Two implementations: `DockerRuntime` (the existing docker
+  command building, extracted behind the trait with **zero behavior
+  change** — the inventory / in-container-exec / lifecycle command
+  strings are byte-identical, and the docker command sites in
+  `discovery/drift.rs` + `bundle/{exec,checks}.rs` +
+  `verbs/write/lifecycle.rs` now dispatch through it), and `K8sRuntime`
+  (kubectl shell-out backend scaffold, context-pinned per the K5
+  anti-footgun invariant). No user-facing k8s surface ships in K1 —
+  runtime selection defaults to docker and the namespace `type` field
+  that selects k8s arrives in K2; the k8s verbs land across Waves B–D.
+  Internal change only (no new flag / JSON field / exit code).
+  Acceptance: `k1_docker_runtime_parity_*`,
+  `k1_runtime_selected_by_namespace_type`, `k1_runtime_trait_object_safe`
+  (in `src/exec/runtime.rs`) + `tests/phase_k_v014.rs` black-box
+  additive-purity smoke.
+
 ## [0.1.3] — 2026-05-10
 
 Closes the v0.1.3 patch backlog (`INSPECT_v0.1.3_BACKLOG.md`): 30 of

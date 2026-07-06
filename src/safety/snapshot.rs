@@ -63,7 +63,7 @@ impl SnapshotStore {
 
 /// Strip either `sha256-` (the on-disk filename prefix) or `sha256:`
 /// (the audit-entry prefix used in `previous_hash` / `new_hash`) from
-/// a hash string. Field smoke (v0.1.3) caught this mismatch when
+/// a hash string. Field smoke caught this mismatch when
 /// `inspect revert` of an `edit` entry built the path
 /// `sha256-sha256:HEX` and got ENOENT — capture-site stored the
 /// colon form, snapshot-store only stripped the dash form.

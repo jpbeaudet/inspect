@@ -22,6 +22,17 @@ pub fn run(args: DisconnectArgs) -> anyhow::Result<ExitKind> {
     crate::transcript::set_namespace(&args.namespace);
 
     let resolved = resolver::resolve(&args.namespace)?;
+
+    // k8s namespaces are sessionless — there is no master to close. Report
+    // N/A (mirrors `connect`) rather than failing on a hostless config.
+    if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        println!(
+            "SUMMARY: namespace '{}' is Kubernetes (k8s) — disconnect is N/A (sessionless)",
+            resolved.name
+        );
+        return Ok(ExitKind::Success);
+    }
+
     let target = SshTarget::from_resolved(&resolved)?;
     let socket = socket_path(&resolved.name);
 

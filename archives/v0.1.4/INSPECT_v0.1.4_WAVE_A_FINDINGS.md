@@ -1,0 +1,320 @@
+# INSPECT v0.1.4 — Wave A live-test findings + crit-bug log
+
+Durable log of findings from live-testing Wave A against the real maker
+cluster (`~/.kube/maker.yaml`, context `z2-maker`, ns `inspect-livetest`)
+via the installed `inspect` binary. Per the LLM-mindtrap=CRIT-BUG rule:
+any behavior that would mislead/trap an agent is filed here immediately and
+fixed **within the wave**. Ranked: crit-bugs first.
+
+Status legend: `🟥 Open crit-bug · 🟧 In progress · ✅ Fixed · 📝 coverage/polish`.
+
+---
+
+## WA-1 — `inspect add` success message reports the WRONG config path (mindtrap) ✅ Fixed
+
+**Surfaced:** K2 live test, 2026-07-04. `INSPECT_HOME=/tmp/k2-livetest inspect
+add maker --type k8s …` printed:
+
+```
+SUMMARY: namespace 'maker' added in ~/.inspect/servers.toml
+```
+
+…but it actually wrote to `/tmp/k2-livetest/servers.toml` (the `INSPECT_HOME`
+override, correctly honored — verified: real `~/.inspect/servers.toml` does not
+exist). The success message **hardcodes `~/.inspect/servers.toml`** instead of
+the resolved path.
+
+**Why it's a crit-bug (agent mindtrap):** an agent (or operator) that reads
+"added in ~/.inspect/servers.toml" and then goes to inspect/edit that file finds
+nothing there — the reported location is a lie whenever `INSPECT_HOME` is set.
+Silent path divergence between "what I did" and "what I told you I did" is
+exactly the trap class the philosophy targets.
+
+**Scope:** likely pre-existing (docker `add` shares the string) but it is on the
+`add` surface K2 touches, so it is in-wave. Sweep: any other message that
+hardcodes `~/.inspect/...` while a resolved path exists (`inspect remove`,
+`connect`, cache/audit paths in success/hint text).
+
+**Fix:** report the **resolved** `servers.toml` path (via `paths::` resolution
+that already honors `INSPECT_HOME_ENV`), not a literal `~/.inspect/...`. Add a
+regression test `wa1_add_reports_resolved_config_path_under_inspect_home`.
+
+---
+
+## WA-2 — K2 acceptance test-name/coverage gap 📝
+
+**Surfaced:** K2 gate, 2026-07-04. The plan (`INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md`
+§5 K2) names five acceptance tests; the committed set
+(`tests/phase_k_v014.rs`) has 5 k2_* tests but not the exact named ones —
+present: `k2_show_renders_ssh_fields_na_for_k8s`,
+`k2_k8s_namespace_shows_without_host_user`, `k2_unknown_type_is_rejected`
+(+2). **Missing meaningful coverage:**
+- `k2_docker_namespace_still_requires_host_user` — the *negative* half of the
+  type-conditional validate (a docker ns without host/user must still fail).
+- `k2_type_defaults_to_docker_when_absent`.
+- `k2_schema_version_bumped` (SCHEMA_VERSION=2 is present in code but untested).
+
+**Fix:** add the three tests under their spec names (the behavior appears
+correct; this is coverage alignment, not a functional bug). Keep the extra
+tests. Low effort.
+
+---
+
+## WA-3 — `inspect show <k8s-ns>` hard-fails on absent kubectl, breaking the config-read JSON contract ✅ RESOLVED (JP-2026-07-05)
+
+**JP DECISION (2026-07-05):** APPROVED as recommended — separate *display*
+from *enforce*. `inspect show` is a pure config read: it now ALWAYS displays
+the on-disk config + a kubectl **readiness line** (`kubectl: <version>` or
+`kubectl: NOT FOUND — <fix>`) and NEVER hard-fails / breaks `--json`. The
+hard four-question preflight moved to the ACTION verbs (`setup` enforces it
+before discovery; read/write verbs classify via K4). Fixes made: removed the
+`show` bail; `kubectl_available` in `--json` now reflects the REAL probe (was
+hardcoded `true` — a latent lie once the bail was gone); test
+`wa3_show_json_contract_holds_without_kubectl` locks the JSON-valid + exit-0 +
+`kubectl_available:false` contract when kubectl is absent. Live: `show k
+--json` (no kubectl) → valid JSON, exit 0; human shows the NOT-FOUND line.
+
+_Original finding:_
+
+**Surfaced:** K3 live test, 2026-07-04. K3 wired the kubectl preflight into
+`inspect show` (the only k8s-reachable surface before K6). Live behavior:
+- kubectl present → `inspect show maker` exit 0, renders `kubectl: v1.36.2`. ✅
+- kubectl absent → `inspect show maker` **exit 2**, four-question error on stderr,
+  **empty stdout**. Same for `inspect show maker --json`.
+
+**The concern (borderline mindtrap, --json case):** `show` is fundamentally a
+*config read* ("show a namespace's resolved configuration"). Hard-failing it when
+the kubectl **backend** is absent conflates two concerns — *display the config I
+wrote* vs *is the backend ready*. Under `--json`, an agent doing
+`inspect show maker --json | jq .context` to read the configured context gets
+**empty stdout + exit 2 + a non-JSON stderr blob** — the JSON contract for a pure
+config read is broken by an unrelated backend check. The config is right there on
+disk; refusing to display it is surprising.
+
+**Why not a crit-bug (and why it's not fixed this turn):** the error itself is
+loud, specific, actionable, correct-exit (not misleading) — and `show` was the
+*only* k8s-reachable surface in K3 (setup/test/read verbs land in K6+). The
+hard-fail-somewhere requirement (`k3_k8s_verb_fails_loud_when_kubectl_absent`)
+needed a reachable verb this turn; `show` was the pragmatic choice.
+
+**Recommended resolution (named unblock = K6):** when K6 lands `test`/`setup`
+(the natural preflight verbs), **move the hard four-question fail there**, and
+make `show` **always display the config + a `kubectl: <version>` / `kubectl: NOT
+FOUND — <fix hint>` readiness line** — never hard-fail a pure config read, and
+never break `--json`. `show` reports readiness; `test`/`setup`/read/write verbs
+enforce it. Tracked to K6 (a real, named unblock — not a silent deferral);
+surfaced to root/JP for the call.
+
+---
+
+## WA-4 — k8s operational-failure exit codes ✅ RESOLVED (JP-2026-07-05)
+
+**JP DECISION (2026-07-05):** ASSIGN DEDICATED exit codes (not coarse
+exit-1) — a no-jq shell consumer must branch directly (skip-metrics vs
+skip-exec are distinct remediations). Implemented as a coherent documented
+band: **transport** (parallel to F13 12–14) `transport_unreachable`=13,
+`transport_auth_failed`=14, `rbac_forbidden`=14; **operational-degradation
+band** `metrics_unavailable`=15, `no_shell_in_container`=16;
+`not_found`/`unknown`=1. Single source of truth: `KubectlFailure::exit_code()`
+(no scattered magic numbers). `failure_class` still carries the fine detail.
+Documented in CLAUDE.md k8s section; test `wa4_exit_code_bands`. First
+consumer: `logs_k8s` returns `ExitKind::Inner(fc.exit_code())` on failure;
+K9 (`no_shell_in_container`=16) + K13 (`metrics_unavailable`=15) return their
+codes when built.
+
+_Original finding:_
+
+**Surfaced:** K4 design, 2026-07-04. The K4 exit-code policy (recorded on
+`KubectlFailure`): transport reuses the F13 band by semantic class
+(`transport_unreachable` → 13, `transport_auth_failed` → 14);
+`rbac_forbidden` → 14 (authorization failure; `failure_class` distinguishes
+it from a credential expiry); `not_found` → 1 (no-match). The **open
+decision**: `metrics_unavailable` / `no_shell_in_container` currently map
+to a coarse exit 1 (general non-match) with the precise `failure_class`
+carrying the detail. Whether these operational classes deserve a
+**dedicated exit code** (vs exit-1-plus-failure_class) is a contract
+decision for JP. The `exit_code()` accessor itself lands in K6 with its
+first verb-exit consumer; the policy is recorded now so the decision isn't
+lost. **Not a blocker.**
+
+## WA-5 — `inspect test` ran SSH-only checks on a k8s namespace (mindtrap) ✅ Fixed
+
+**Surfaced + fixed in K4, 2026-07-04.** Before K4, `inspect test <k8s-ns>`
+ran the docker/SSH check set (key_file, tcp) and would report a k8s
+namespace as failing with "no key_path configured" / "no host configured"
+— nonsensical, misleading noise for a kubeconfig target. K4 added a k8s
+branch (config + kubectl backend + context-pinned API reachability) and a
+k8s-specific text emit (no `host:port` line; sessionless NEXT hint). Fixed
+in the same item that needed `test` as its classifier consumer.
+
+---
+
+## WA-6 — a context-less k8s namespace falls through to the ambient context (footgun) ✅ Fixed (K6)
+
+**FIXED in K6, 2026-07-05:** `NamespaceConfig::validate()` now requires a
+non-empty `context` for a k8s namespace (`ConfigError::MissingField{field:
+"context"}`), so `inspect add --type k8s` without `--context` is rejected at
+config time. Test `k6_k8s_namespace_requires_explicit_context`. Live: `add
+nocxt --type k8s` (no context) → exit 2, `missing required field 'context'`.
+Combined with the K5 invariant (scope_flags only ever emits a configured
+context, never the ambient one), a k8s verb can no longer run against an
+unpinned cluster.
+
+_Original finding:_
+
+**Surfaced:** K5, 2026-07-04. `K8sRuntime::scope_flags` only emits
+`--context` when a context is configured (`Some`). K2 made `context`
+optional at config time (resolvability deferred to setup/test). So a k8s
+namespace added **without** a context would build kubectl commands with **no
+`--context`**, letting kubectl fall through to the ambient `current-context`
+— exactly the footgun K5's invariant exists to prevent. `inspect show` also
+renders `<current-context>` for such a namespace, *implying* inspect uses
+the ambient context.
+
+**Why not fixed in K5:** the enforcement point is `setup`/`test` (K6) —
+where inspect resolves + validates the context against the live cluster.
+**Recommended (K6):** `setup`/`test` must **require** an explicit context
+for a k8s namespace (or resolve-and-record one, never leaving it ambient),
+and the runtime should refuse to build a command without a pinned context.
+Tracked to K6 (named unblock). Not a blocker for K5, whose invariant holds
+for every *configured* context.
+
+---
+
+## WA-7 — k8s `setup`/`profile` prints docker-centric `remote_tooling` line (mindtrap) ✅ Fixed (K7)
+
+**FIXED in K7, 2026-07-05:** added an additive `Profile.runtime` marker
+(`Some("k8s")` set by `discover_k8s`, `None` for docker). `print_human` now
+branches on it: a k8s profile shows `runtime: kubernetes (context pinned:
+<ctx>)` + `pods: N (address by pod name …)` and omits the `remote_tooling`
+line + the jq note (both SSH-host-only facts). Live: `inspect setup
+makersys` → clean k8s-relevant output, no `docker=n` mindtrap. The
+`runtime` marker is reused by status/why to know they're on k8s.
+
+_Original finding:_
+
+**Surfaced:** K6 discovery live test, 2026-07-05. `inspect setup <k8s-ns>`
+succeeds and discovers pods, but the human output includes
+`remote_tooling: rg=n jq=n sed=n grep=n ss=n docker=n journalctl=n` and the
+"jq is optional" note. These are **SSH-host tool probes** — meaningless for a
+k8s namespace (there is no remote host to probe for rg/jq/docker), and
+showing `docker=n` on a Kubernetes profile is misleading (implies inspect
+looked for docker on the cluster). **Fix (K7):** the k8s profile print path
+should omit the `remote_tooling` line (or replace it with k8s-relevant facts
+— kubectl version, metrics-server availability from K6). Tracked to K7 where
+the k8s `status`/`profile` presentation is built. Not a blocker — discovery
+itself is correct.
+
+---
+
+## WD-1 — k8s write verbs: `--apply` mutating live-test ✅ DONE (JP-authorized 2026-07-06)
+
+**COMPLETE.** Ran the SMOKE P9 mutating apply+revert round-trip in the
+throwaway `inspect-livetest` namespace on maker (JP-authorized; smoke-nginx
+deploy; isolated INSPECT_HOME; P10 cleanup deleted the deployment + namespace
+— cluster left as found, nothing outside the sandbox touched). Verified live:
+`scale --replicas 2 --apply` → `revert --apply` restored the prior count (3)
+via a LOCAL kubectl (WD-2); `restart --apply` (rollout restart, revert
+captured); `delete <pod> --apply` (controller recreated it). **This test
+caught a real bug** — the revert command_pair payloads omitted `--kubeconfig`,
+so reverts failed on a non-default kubeconfig (`context "z2-maker" does not
+exist`); fixed via `revert_kubectl_prefix()` (commit eee03e0) and re-verified.
+Exactly the class of bug only a live mutating test surfaces.
+
+_Original finding:_
+
+k8s write verbs (K16 restart, K15 scale, …) are coded with dry-run + `--apply`
++ audit + F11 revert-capture + the K5 resolved-target echo. The **dry-run**
+path is live-verified (no mutation). The **`--apply` mutating** path is
+verified only once, per the guardrail, inside the `inspect-livetest`
+namespace on maker against a throwaway test deployment (create nginx, apply,
+assert, revert, delete). Tracked so the mutating round-trip isn't skipped.
+
+## WD-2 — `inspect revert` executor must run k8s reverts locally ✅ code-complete (round-trip test = WD-1)
+
+**IMPLEMENTED:** `revert_command_pair` now branches on `entry.context.is_some()`
+→ `revert_command_pair_k8s`, which runs the captured `kubectl … rollout
+undo/scale …` payload **locally** (`sh -c`) instead of over SSH, and writes a
+linked revert audit entry carrying `context`/`k8s_namespace`. Dry-run by
+default (mirrors the SSH path). Compiles + clippy clean. The apply-side
+round-trip (apply a k8s write → `inspect revert --apply` → local kubectl
+undo) is validated together with WD-1 in the `inspect-livetest` sandbox.
+
+_Original finding:_
+
+The F11 revert **capture** for a k8s write is a `command_pair` whose payload
+is a local `kubectl … rollout undo/scale …` (recorded in the audit entry with
+`context`/`k8s_namespace`). But the existing `inspect revert` executor
+dispatches `command_pair` payloads over **SSH** to a remote target — a k8s
+namespace has none. So `inspect revert <id>` on a k8s entry must detect the
+`context` field and run the captured kubectl **locally** instead. The capture
+contract (record-the-inverse-before-apply) is met now; the auto-execution
+wiring is this tracked item. Until it lands, the audit entry shows the exact
+manual `kubectl` inverse to run.
+
+---
+
+## Live-verified GREEN (no mindtrap) — Wave A so far
+
+- **K16 k8s `inspect restart`** (rollout-restart) dry-run live-verified vs
+  maker: `restart makersys/coredns` → "DRY RUN. Would rollout-restart
+  deploy/coredns in namespace 'kube-system' on context 'z2-maker'" + the
+  command + revert preview, exit 0 (NO mutation); `stop`/`start` refuse with
+  a `scale --replicas` hint (K20 pod-immutability). The resolved-target
+  anti-footgun echo (context+namespace+workload) is present on every path.
+
+- **K6 k8s discovery** (`inspect setup <k8s-ns>`) live-passes against maker:
+  pointed at `kube-system`, `inspect setup` discovered **7 pods → 7 services**
+  and cached the profile (exit 0, `host: z2-maker` = the pinned context). The
+  parser (`parse_pods`) is pure + total (garbage → empty, never panics) and
+  unit-tested against real captured cluster JSON. (Presentation cleanup for
+  the docker-centric tooling line tracked as WA-7 → K7.)
+
+- **K5 context-pinning invariant** — verified by an exhaustive test over
+  every `K8sRuntime` command builder (`--context` pinned on inventory /
+  read-exec / write-exec / restart / reload / stop / start) plus a
+  source-scan test that fails the build if any `kubectl config
+  current-context / use-context` call is ever introduced. `AuditEntry`
+  `context` / `k8s_namespace` fields round-trip through JSON and are omitted
+  for docker entries. (Live end-to-end echo in verb `meta` lands with the
+  read verbs in K6+; the invariant itself is structural + test-enforced.)
+
+- **K4 failure classifier + `inspect test` k8s branch** live-passes against
+  maker: `inspect test maker` → all checks pass (`config`, `kubectl v1.36.2`,
+  `api API server reachable`), exit 0, sessionless NEXT hint; `inspect test`
+  with a **bad context** → `[transport_unreachable]` + the reachability
+  hint, exit 2. **The real-cluster fixtures caught two genuine classifier
+  bugs the synthetic assumptions missed:** (1) kubectl's bad-context message
+  is `context "X" does not exist`, not the `Error in configuration …` shape
+  first assumed; (2) `context was not found` was being misread as an object
+  `NotFound` (fixed by ordering transport before NotFound + guarding
+  NotFound on `from server`). This is the no-synthetic-verification rule
+  earning its keep.
+
+- **K3 kubectl backend probe** live-passes against maker via the installed binary:
+  present → `inspect show maker` reports `kubectl: v1.36.2` (exit 0); absent
+  (`PATH=/usr/bin:/bin`) → **exit 2** with the four-question error (what/where/why/
+  fix + the install URL + `kubectl version --client` verify command) — **no raw OS
+  error, correct exit class**. The probe is a **local** spawn (`kubectl version
+  --client -o json`), never over SSH (surface map §10). Docker namespaces are
+  unaffected. (One design-review caveat filed as WA-3 above.)
+
+- **K2 config surface** live-passes against maker: `inspect add maker --type k8s
+  --context z2-maker --kubeconfig ~/.kube/maker.yaml --namespace inspect-livetest`
+  → exit 0, clean envelope; `inspect list` shows it; `inspect show maker` renders
+  `type: k8s`, context/kubeconfig/namespace, and every SSH-only field as
+  `N/A (k8s)` (not an error) → exit 0. **This is the correct, agent-legible
+  shape.**
+- **`inspect add --help`** documents the k8s flags *and* the anti-footgun
+  property ("the kubeconfig context inspect pins on every call — it never reads
+  your ambient current-context") — the K5 invariant already surfaced in help.
+- **`INSPECT_HOME` isolation honored** — no real user config clobbered (guardrail
+  respected).
+- **K1** (Runtime trait + docker refactor) committed `a547eda`; docker suite
+  green; retroactive live pass deferred to when a k8s read verb exists to
+  exercise it (K1 is internal — no user-facing k8s verb yet).
+
+---
+
+*WA-1 + WA-2 to be fixed within Wave A (next worker dispatch or folded into the
+K3 dispatch). Fixing WA-1 also swept across other hardcoded-path messages.*

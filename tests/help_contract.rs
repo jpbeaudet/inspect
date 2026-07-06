@@ -265,12 +265,13 @@ fn help_all_dumps_every_topic() {
     // Deterministic separator between topics. Count = topic_count - 1.
     // 14 topics through v0.1.2 → 13 separators; F6 (v0.1.3) added the
     // `compose` topic, taking us to 15 topics → 14 separators; F19
-    // (v0.1.3) added the `select` topic, taking us to 16 → 15.
+    // (v0.1.3) added the `select` topic, taking us to 16 → 15; K24
+    // (v0.1.4) added the `kubernetes` topic, taking us to 17 → 16.
     let bar = "=".repeat(72);
     assert_eq!(
         text.matches(bar.as_str()).count(),
-        15,
-        "expected 15 topic separators in `inspect help all` (F19 added the select topic)"
+        16,
+        "expected 16 topic separators in `inspect help all` (K24 added the kubernetes topic)"
     );
 }
 

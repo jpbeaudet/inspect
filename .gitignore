@@ -12,3 +12,6 @@ Cargo.lock.bak
 
 # Local inspect state (only relevant if you run inspect inside the repo)
 .inspect/
+
+# exit-gate audit intermediate agent artifacts (synthesis doc is the committed record)
+docs/audits/_wip/

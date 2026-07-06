@@ -115,7 +115,7 @@ pub fn socket_path(namespace: &str) -> PathBuf {
     paths::sockets_dir().join(format!("{namespace}.sock"))
 }
 
-/// G5 (v0.1.3): the kernel `sun_path` field (the C-string a
+/// The kernel `sun_path` field (the C-string a
 /// `bind(AF_UNIX)` accepts) is capped at 108 bytes on Linux and 104
 /// on macOS. ssh exits with `unix_listener: path "..." too long for
 /// Unix domain socket` when ControlPath exceeds the cap; the message
@@ -300,7 +300,7 @@ pub fn start_master(
 ) -> Result<ConnectOutcome> {
     ensure_sockets_dir().map_err(anyhow::Error::from)?;
     let socket = socket_path(namespace);
-    // G5 (v0.1.3): fail fast and forensically if the socket path
+    // Fail fast and forensically if the socket path
     // would exceed the kernel `sun_path` cap. ssh would otherwise
     // emit a confusing 'unix_listener: path "…" too long' error from
     // a child process; this check chains to a recovery hint.

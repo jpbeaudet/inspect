@@ -25,6 +25,16 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         parse_duration(s)?;
     }
 
+    // A k8s namespace runs `kubectl logs` (context-pinned),
+    // never the SSH/docker-logs path. Branch early.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return logs_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
 
     // Handle --reset-cursor up front -- it does not stream
@@ -186,7 +196,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
         return Ok(if total > 0 {
             ExitKind::Success
         } else if !args.match_re.is_empty() && !args.follow {
-            // B3 (v0.1.2): same exit-0-with-notice contract as the
+            // Same exit-0-with-notice contract as the
             // non-merged path. We don't bother distinguishing per
             // source here — the merged view is one logical stream.
             if !args.format.is_json() {
@@ -293,7 +303,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
             runner.run(&step.ns.namespace, &step.ns.target, &cmd, opts)
         })?;
         if !out.ok() && out.stdout.is_empty() {
-            // B3 (v0.1.2): when `--match` is in play, the remote
+            // When `--match` is in play, the remote
             // pipeline ends in `grep -E '<pat>'`, which exits 1 when
             // it finds zero lines. That is the predicate doing its
             // job, not a real failure. Suppress the spurious "logs
@@ -353,7 +363,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     Ok(if any_lines {
         ExitKind::Success
     } else if !args.match_re.is_empty() && !args.follow {
-        // B3 (v0.1.2): treat `inspect logs --match <pat>` with zero
+        // Treat `inspect logs --match <pat>` with zero
         // hits as a successful narrowing of the log view, not an
         // error. Mirrors how operators read this flag ("filter the
         // stream, tell me if there's anything") rather than how grep
@@ -370,7 +380,7 @@ pub fn run(mut args: LogsArgs) -> Result<ExitKind> {
     })
 }
 
-/// B3 (v0.1.2): build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
+/// Build the human-readable `"(no matches for X in <window>)"` line printed when `inspect logs --match` produces zero
 /// hits. Pulled out so the same message is reachable from both the
 /// per-step and merged code paths.
 fn no_match_notice(args: &LogsArgs) -> String {
@@ -656,8 +666,203 @@ fn stream_follow(
     }
 }
 
+/// `inspect logs <k8s-ns>/<pod>` via `kubectl logs`. Batch by
+/// True when kubectl's stderr indicates a `--previous` read found no prior
+/// instance (the container has never restarted). That is a normal state — the
+/// pod is running fine on its first instance — not a `not_found` the operator
+/// should chase via name/namespace, so `logs --previous` reports it cleanly.
+fn is_no_previous_instance(stderr: &str) -> bool {
+    stderr.contains("previous terminated container") && stderr.contains("not found")
+}
+
+/// default; `--follow` streams. Redacts every line (unless `--show-secrets`).
+/// On a multi-container pod with no `-c`, auto-picks the first container and
+/// hints the others — never the raw `kubectl` "a container name must be
+/// specified" error (the #1 logs footgun). `--previous` reads the last
+/// terminated container (crash-loop post-mortem).
+fn logs_k8s(
+    args: &LogsArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    use std::io::{BufRead, Write};
+
+    let pod = match args.selector.split_once('/') {
+        Some((_, p)) if !p.is_empty() => p,
+        _ => {
+            crate::tee_eprintln!("logs: specify a pod — e.g. `inspect logs {ns}/<pod>`");
+            crate::tee_eprintln!("hint: `inspect ps {ns}` lists the pods");
+            return Ok(ExitKind::Error);
+        }
+    };
+
+    let build = |container: Option<&str>, follow: bool| -> std::process::Command {
+        let mut c = std::process::Command::new("kubectl");
+        if let Some(ctx) = cfg.context.as_deref() {
+            c.args(["--context", ctx]);
+        }
+        if let Some(kc) = cfg.kubeconfig.as_deref() {
+            c.args(["--kubeconfig", &k8s_expand_tilde(kc)]);
+        }
+        if let Some(n) = cfg.k8s_namespace.as_deref() {
+            c.args(["-n", n]);
+        }
+        c.arg("logs").arg(pod);
+        if let Some(cn) = container {
+            c.args(["-c", cn]);
+        }
+        if args.previous {
+            c.arg("--previous");
+        }
+        if let Some(t) = args.tail {
+            c.arg(format!("--tail={t}"));
+        }
+        if let Some(s) = &args.since {
+            c.arg(format!("--since={s}"));
+        }
+        if follow {
+            c.arg("-f");
+        }
+        c
+    };
+
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
+    let as_json = args.format.is_json();
+    let emit = |line: &str| {
+        if let Some(masked) = redactor.mask_line(line) {
+            if as_json {
+                println!("{}", serde_json::json!({ "line": masked }));
+            } else {
+                println!("{masked}");
+            }
+        }
+    };
+
+    // --follow: stream stdout line-by-line through the redactor.
+    if args.follow {
+        let mut child = build(args.container.as_deref(), true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+        if let Some(out) = child.stdout.take() {
+            let reader = std::io::BufReader::new(out);
+            for line in reader.lines().map_while(std::result::Result::ok) {
+                emit(&line);
+                let _ = std::io::stdout().flush();
+            }
+        }
+        let status = child.wait()?;
+        return Ok(if status.success() {
+            ExitKind::Success
+        } else {
+            ExitKind::Error
+        });
+    }
+
+    // Batch: capture, and on a multi-container ambiguity auto-pick + hint.
+    let out = build(args.container.as_deref(), false).output()?;
+    // `--previous` on a pod whose container has never restarted is a
+    // normal state, not an error — kubectl returns "previous terminated
+    // container … not found", which the generic classifier would render as a
+    // misleading `not_found` ("check the name and -n"). Emit a clear note and
+    // succeed: the query resolved, there is simply no prior instance.
+    if !out.status.success() && args.previous {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if is_no_previous_instance(&stderr) {
+            crate::tee_eprintln!(
+                "note: pod '{pod}' has no previous instance — its container has not \
+                 restarted, so there are no --previous logs to show."
+            );
+            return Ok(ExitKind::Success);
+        }
+    }
+    if !out.status.success() && args.container.is_none() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(containers) = parse_container_choices(&stderr) {
+            if let Some(first) = containers.first() {
+                crate::tee_eprintln!(
+                    "note: pod '{pod}' has {} containers {:?}; showing '{first}' — use `-c <name>` for another",
+                    containers.len(),
+                    containers
+                );
+                let retry = build(Some(first), false).output()?;
+                for line in String::from_utf8_lossy(&retry.stdout).lines() {
+                    emit(line);
+                }
+                return Ok(if retry.status.success() {
+                    ExitKind::Success
+                } else {
+                    ExitKind::Error
+                });
+            }
+        }
+        // Other failure: classify + hint, never a raw kubectl blob. The
+        // exit code carries the classified band so a shell consumer can
+        // branch (e.g. transport vs no-shell vs metrics).
+        let fc =
+            crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+        crate::tee_eprintln!("logs: [{}] {}", fc.failure_class(), fc.hint(""));
+        return Ok(ExitKind::Inner(fc.exit_code()));
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        emit(line);
+    }
+    Ok(if out.status.success() {
+        ExitKind::Success
+    } else {
+        ExitKind::Error
+    })
+}
+
+/// Parse kubectl's "a container name must be specified for pod X, choose one
+/// of: [a b c]" into the container list.
+fn parse_container_choices(stderr: &str) -> Option<Vec<String>> {
+    let start = stderr.find("choose one of: [")? + "choose one of: [".len();
+    let rest = &stderr[start..];
+    let end = rest.find(']')?;
+    let names: Vec<String> = rest[..end]
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+fn k8s_expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = crate::paths::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn k8_parse_container_choices() {
+        let e = "error: a container name must be specified for pod x, choose one of: [app istio-proxy sidecar]";
+        let v = super::parse_container_choices(e).unwrap();
+        assert_eq!(v, vec!["app", "istio-proxy", "sidecar"]);
+        assert!(super::parse_container_choices("some other error").is_none());
+    }
+
+    #[test]
+    fn smoke1_no_previous_instance_detected() {
+        // kubectl's real message when --previous is asked of a never-restarted
+        // container — a clean "no previous", NOT a name/namespace not_found.
+        let e = "Error from server (BadRequest): previous terminated container \
+                 \"coredns\" in pod \"coredns-abc\" not found";
+        assert!(super::is_no_previous_instance(e));
+        // A genuine missing-pod error must NOT be swallowed as "no previous".
+        assert!(!super::is_no_previous_instance(
+            "Error from server (NotFound): pods \"nope\" not found"
+        ));
+    }
+
     use super::*;
     use crate::cli::LogsArgs;
     use crate::format::FormatArgs;
@@ -677,6 +882,8 @@ mod tests {
             show_secrets: false,
             format: FormatArgs::default(),
             follow_timeout_secs: None,
+            container: None,
+            previous: false,
         }
     }
 
@@ -713,7 +920,7 @@ mod tests {
         assert!(s.contains("svc;rm -rf /") || s.contains("'svc;rm -rf /'"));
     }
 
-    // --- B3 (v0.1.2): friendly "(no matches ...)" notice ---
+    // --- Friendly "(no matches ...)" notice ---
 
     #[test]
     fn no_match_notice_single_pattern_with_since() {

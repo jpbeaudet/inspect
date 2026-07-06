@@ -100,6 +100,19 @@ pub enum ConfigError {
     InvalidAuthMode { namespace: String, value: String },
 
     #[error(
+        "invalid runtime type '{value}' for namespace '{namespace}': expected \
+         \"docker\" (default) or \"k8s\"; fix the `type` field in {path}"
+    )]
+    InvalidRuntimeType {
+        namespace: String,
+        value: String,
+        // Resolved servers.toml path, not a hardcoded
+        // `~/.inspect/...`, so the fix-here hint points at the real file
+        // under INSPECT_HOME.
+        path: String,
+    },
+
+    #[error(
         "namespace '{namespace}': password_env is only meaningful with \
          auth = \"password\"; either set auth = \"password\" or unset password_env"
     )]
@@ -354,7 +367,7 @@ pub static ERROR_CATALOG: &[ErrorEntry] = &[
         help_topic: Some("discovery"),
     },
     // ---- ssh ----------------------------------------------------------
-    // G5 (v0.1.3): the kernel's `sun_path` cap (108 bytes on Linux,
+    // The kernel's `sun_path` cap (108 bytes on Linux,
     // 104 on macOS) is conservatively enforced at 104. More specific
     // than the generic "ssh" fragment below, so it must come first.
     ErrorEntry {

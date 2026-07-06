@@ -31,6 +31,18 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
     // expanded later by the resolver and may already carry a
     // service portion, so they pass through unchanged.
     let selector = expand_bare_namespace(&args.selector);
+
+    // A k8s namespace is presented from its discovered profile
+    // (health-aware) — the docker `plan()`/`get_runtime` pipeline
+    // is SSH-bound and would fail on a hostless k8s config. Branch early.
+    if let Some(ns_name) = selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return status_k8s(&args, ns_name, &selector);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&selector)?;
 
     let mut total = 0usize;
@@ -289,6 +301,103 @@ pub fn run(args: StatusArgs) -> Result<ExitKind> {
 
     crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
 }
+/// Present a k8s namespace's `status` from its discovered,
+/// health-aware profile. No live docker-ps reconcile — the profile's
+/// `health_status` (set at `setup` from pod readiness) IS the source; an
+/// operator re-runs `inspect setup <ns> --force` (or status --refresh, a
+/// future increment) to refresh. Emits the same envelope shape as docker
+/// status so an agent branches identically across mediums.
+fn status_k8s(args: &StatusArgs, ns: &str, selector: &str) -> Result<ExitKind> {
+    let fmt = args.format.resolve()?;
+    let profile = match crate::profile::cache::load_profile(ns)? {
+        Some(p) => p,
+        None => {
+            let mut doc = OutputDoc::new(
+                format!("no cached profile for '{ns}' — run `inspect setup {ns}` first"),
+                json!({
+                    "services": [],
+                    "state": "empty_inventory",
+                    "totals": {"total": 0, "healthy": 0, "unhealthy": 0, "unknown": 0},
+                    "compose_projects": [],
+                }),
+            )
+            .with_meta("selector", args.selector.clone())
+            .with_meta("runtime", "k8s".to_string());
+            doc.push_next(crate::verbs::output::NextStep::new(
+                format!("inspect setup {ns}"),
+                "discover the cluster's pods first",
+            ));
+            return crate::format::render::render_doc(&doc, &fmt, &[], args.format.select_spec());
+        }
+    };
+
+    let svc_pat = selector.split_once('/').map(|(_, s)| s).unwrap_or("*");
+    let (mut total, mut healthy, mut unhealthy, mut unknown) = (0usize, 0, 0, 0);
+    let mut services_json: Vec<Value> = Vec::new();
+    let mut data_lines: Vec<String> = Vec::new();
+    for s in &profile.services {
+        if !k8s_glob(svc_pat, &s.name) {
+            continue;
+        }
+        let status_str = match s.health_status {
+            Some(HealthStatus::Ok) => "ok",
+            Some(HealthStatus::Unhealthy) => "unhealthy",
+            Some(HealthStatus::Starting) => "starting",
+            _ => "unknown",
+        };
+        total += 1;
+        match status_str {
+            "ok" => healthy += 1,
+            "unhealthy" => unhealthy += 1,
+            _ => unknown += 1,
+        }
+        let img = s.image.clone().unwrap_or_default();
+        services_json.push(json!({
+            "server": ns,
+            "service": s.name,
+            "status": status_str,
+            "image": img,
+            "aliases": [],
+        }));
+        data_lines.push(format!(
+            "{ns}/{name:<28} {status_str:<10} {img}",
+            name = s.name
+        ));
+    }
+
+    let state = if total > 0 { "ok" } else { "empty_inventory" };
+    let summary =
+        format!("{total} pod(s): {healthy} healthy, {unhealthy} unhealthy, {unknown} unknown");
+    let doc = OutputDoc::new(
+        summary,
+        json!({
+            "services": services_json,
+            "state": state,
+            "totals": {"total": total, "healthy": healthy, "unhealthy": unhealthy, "unknown": unknown},
+            "compose_projects": [],
+        }),
+    )
+    .with_meta("selector", args.selector.clone())
+    .with_meta("runtime", "k8s".to_string())
+    .with_meta("context", profile.host.clone())
+    .with_meta("source", "cached (profile) — refresh with `inspect setup --force`".to_string())
+    .with_quiet(args.format.quiet);
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
+}
+
+/// Minimal pod-name glob for k8s status: `*`/empty matches all; a trailing
+/// `*` is a prefix match; otherwise exact. (Selector-grammar globbing is
+/// refined in the selector work; this covers the common `coredns*` shape.)
+fn k8s_glob(pat: &str, name: &str) -> bool {
+    if pat.is_empty() || pat == "*" {
+        return true;
+    }
+    if let Some(prefix) = pat.strip_suffix('*') {
+        return name.starts_with(prefix);
+    }
+    name == pat
+}
+
 /// Rewrite a service-less selector (`arte`, `prod-*`,
 /// `arte~staging`) into its all-services equivalent (`arte/*` etc.)
 /// so the status loop fans out over containers + systemd units
@@ -318,13 +427,23 @@ fn first_namespace(nses: &[crate::verbs::dispatch::NsCtx]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_bare_namespace;
+    use super::{expand_bare_namespace, k8s_glob};
 
     #[test]
     fn bare_namespace_gets_all_services_glob() {
         assert_eq!(expand_bare_namespace("arte"), "arte/*");
         assert_eq!(expand_bare_namespace("prod-*"), "prod-*/*");
         assert_eq!(expand_bare_namespace("arte~staging"), "arte~staging/*");
+    }
+
+    #[test]
+    fn k7_k8s_glob_matches() {
+        assert!(k8s_glob("*", "coredns-abc"));
+        assert!(k8s_glob("", "anything"));
+        assert!(k8s_glob("coredns*", "coredns-c4dbffb5f-lpx6g"));
+        assert!(!k8s_glob("coredns*", "traefik-9bcdbbd9"));
+        assert!(k8s_glob("traefik-9bcdbbd9-n9mhf", "traefik-9bcdbbd9-n9mhf"));
+        assert!(!k8s_glob("traefik", "traefik-9bcdbbd9-n9mhf")); // exact, not prefix
     }
 
     #[test]

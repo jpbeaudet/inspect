@@ -37,7 +37,7 @@ pub enum PrecheckOutcome {
 /// process-level timeout via `wait_timeout`-style polling? No — ssh's
 /// own `ConnectTimeout` is enough; if ssh itself wedges (very rare), we
 ///
-/// Smoke-caught (v0.1.3): when an inspect-managed master socket is
+/// When an inspect-managed master socket is
 /// already alive for `namespace`, the precheck must reuse it. Without
 /// this short-circuit, an encrypted-key namespace (`inspect connect`
 /// already opened the master, passphrase already entered) fails the
@@ -304,7 +304,7 @@ mod tests {
         assert!(h.contains("ping h"));
     }
 
-    /// Smoke-caught (v0.1.3): the precheck must accept a namespace and
+    /// The precheck must accept a namespace and
     /// short-circuit when the inspect-managed master socket is alive.
     /// This is a compile-level guard on the API shape — the live
     /// short-circuit path is exercised by the v0.1.3 release smoke

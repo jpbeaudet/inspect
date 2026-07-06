@@ -916,7 +916,7 @@ pub fn run(args: &RunArgs) -> Result<ExitKind> {
                     entry.exit = revert_exit;
                     entry.duration_ms = dur;
                     entry.applied = Some(revert_ok);
-                    // G2: revert command body may carry secrets; redact.
+                    // Revert command body may carry secrets; redact.
                     entry.rendered_cmd =
                         Some(crate::redact::redact_for_audit(&cmd_with_env).into_owned());
                     if !effective_overlay.is_empty() {
@@ -1422,7 +1422,7 @@ fn run_one_target(
         );
         e.exit = exit_code;
         e.duration_ms = dur;
-        // G2: redact rendered_cmd to mask any secrets the operator
+        // Redact rendered_cmd to mask any secrets the operator
         // wrote into the steps manifest. `--show-secrets` is not a
         // steps-runner concept (steps are non-interactive), so the
         // safe default applies unconditionally.

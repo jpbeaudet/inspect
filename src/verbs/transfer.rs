@@ -545,7 +545,7 @@ pub(crate) fn build_stream_atomic_script(
 ) -> String {
     let tmp_q = shquote(tmp);
     let path_q = shquote(path);
-    // G9 (v0.1.3): `set -C` enables the shell's `noclobber` flag so
+    // `set -C` enables the shell's `noclobber` flag so
     // the `cat > <tmp>` redirect uses `O_EXCL` semantics — it refuses
     // to follow a pre-existing symlink at the tmp path or to overwrite
     // a regular file. This closes a symlink-race window where an
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn g9_atomic_script_uses_noclobber() {
-        // G9 (v0.1.3): `set -C` must be enabled before the `cat >`
+        // `set -C` must be enabled before the `cat >`
         // redirect so a pre-existing symlink at the tmp path causes
         // the redirect to fail rather than be silently followed.
         let s = build_stream_atomic_script("/etc/foo.tmp", "/etc/foo", false, None, None);

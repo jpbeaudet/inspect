@@ -49,6 +49,24 @@ pub fn run(args: ConnectArgs) -> anyhow::Result<ExitKind> {
     }
 
     let resolved = resolver::resolve(&args.namespace)?;
+
+    // K8s namespaces are sessionless. The kubeconfig context is
+    // resolved per-verb from config and pinned explicitly, so there is no
+    // persistent connection to open — and no sticky `current-context` footgun.
+    // Report N/A clearly rather than attempting an SSH master that would fail
+    // on a hostless config.
+    if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        let ns = &resolved.name;
+        println!("SUMMARY: namespace '{ns}' is Kubernetes (k8s) — connect is N/A");
+        println!(
+            "DATA:    k8s is sessionless; inspect resolves the kubeconfig context per verb\n\
+             \x20        from config and pins it explicitly (no persistent session, no sticky\n\
+             \x20        current-context footgun). There is nothing to connect or disconnect."
+        );
+        println!("NEXT:    inspect test {ns}   (validate reachability + RBAC)");
+        return Ok(ExitKind::Success);
+    }
+
     resolved.config.validate(&resolved.name)?;
     let target = SshTarget::from_resolved(&resolved)?;
 

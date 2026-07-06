@@ -145,7 +145,7 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
         }
     }
 
-    // H2: compute the total target count before fanout so the
+    // Compute the total target count before fanout so the
     // large-fanout interlock fires on the actual fanout size, not just
     // the namespace count. We do a best-effort dry-resolve against each
     // chosen namespace's cached profile; if a profile isn't present the
@@ -202,10 +202,19 @@ pub fn run(args: FleetArgs) -> Result<ExitKind> {
     // Build the per-namespace plan.
     let plan: Vec<NsPlan> = chosen
         .iter()
-        .map(|ns| NsPlan {
-            namespace: ns.clone(),
-            child_args: build_child_args(&args.verb, &inner_args, ns),
-            force_ns: force_ns_mode,
+        .map(|ns| {
+            // K8s child verbs detect their namespace by parsing
+            // the selector, not the fleet env-pin — so for a k8s namespace we
+            // pass the ns (or `<ns>/<inner-token>`) as a direct positional
+            // selector, making the child a normal `inspect <verb> <ns>` call.
+            let is_k8s = ns_resolver::resolve(ns)
+                .map(|r| r.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s)
+                .unwrap_or(false);
+            NsPlan {
+                namespace: ns.clone(),
+                child_args: build_child_args_for(&args.verb, &inner_args, ns, is_k8s),
+                force_ns: force_ns_mode && !is_k8s,
+            }
         })
         .collect();
 
@@ -472,7 +481,7 @@ fn rewrite_inner_selector(raw: &str) -> Result<Option<String>> {
     Ok(Some(format!("_/{trimmed}")))
 }
 
-/// H2: estimate the total number of targets fleet will end up invoking
+/// Estimate the total number of targets fleet will end up invoking
 /// the inner verb on. Uses each namespace's cached profile when
 /// available; falls back to `1` per namespace.
 fn estimate_total_targets(chosen: &[String], selector: Option<&str>, force_ns_mode: bool) -> usize {
@@ -580,6 +589,14 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
                     Some(r) => r,
                     None => continue,
                 };
+                // SMOKE-2: k8s namespaces are sessionless — there is no SSH
+                // master to prewarm. Skip silently rather than build an
+                // `SshTarget` (which fails "namespace has no host" and would
+                // print a docker-centric skip note that reads as a spurious
+                // error for a perfectly valid k8s namespace).
+                if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                    continue;
+                }
                 let target = match SshTarget::from_resolved(resolved) {
                     Ok(t) => t,
                     Err(e) => {
@@ -635,15 +652,50 @@ fn prewarm_masters(chosen: &[String], all: &[crate::config::namespace::ResolvedN
 
 /// Build the argv (excluding the program name) for the child invocation
 /// of `inspect <verb>` for one namespace.
-fn build_child_args(verb: &str, user_args: &[String], ns: &str) -> Vec<String> {
+/// For a k8s namespace a selector-verb gets a
+/// **direct positional selector** (`<ns>` or `<ns>/<inner-token>`) instead of
+/// the env-pin, since k8s child verbs resolve their namespace by parsing the
+/// selector.
+fn build_child_args_for(verb: &str, user_args: &[String], ns: &str, is_k8s: bool) -> Vec<String> {
     let mut out = Vec::with_capacity(user_args.len() + 2);
     out.push(verb.to_string());
     if NAMESPACE_POSITIONAL_VERBS.contains(&verb) {
         // Inject namespace as first positional. The user's args follow.
         out.push(ns.to_string());
         out.extend(user_args.iter().cloned());
+    } else if is_k8s {
+        // k8s selector-verb: build the positional selector from the ns and the
+        // user's inner service/workload token (if any); other flags pass
+        // through. `<inner>` already containing `/` is used verbatim.
+        let mut inner_iter = user_args.iter();
+        let selector = match first_positional_index(user_args) {
+            Some(_) => {
+                // The first positional is the service/workload token.
+                let tok = user_args
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .cloned()
+                    .unwrap_or_default();
+                if tok.contains('/') || tok == "_" {
+                    tok
+                } else {
+                    format!("{ns}/{tok}")
+                }
+            }
+            None => ns.to_string(),
+        };
+        out.push(selector);
+        // Append the remaining (non-first-positional) args verbatim.
+        let mut seen_positional = false;
+        for a in inner_iter.by_ref() {
+            if !a.starts_with('-') && !seen_positional {
+                seen_positional = true; // this is the token we consumed
+                continue;
+            }
+            out.push(a.clone());
+        }
     } else {
-        // Selector-style verbs: forward args verbatim. The selector
+        // Docker selector-style verbs: forward args verbatim. The selector
         // resolver picks up INSPECT_FLEET_FORCE_NS from the environment.
         out.extend(user_args.iter().cloned());
     }
@@ -746,7 +798,7 @@ fn run_child(
     }
     cmd.env("INSPECT_NON_INTERACTIVE", "1");
 
-    // H1: `output()` drains both pipes concurrently, avoiding the
+    // `output()` drains both pipes concurrently, avoiding the
     // deadlock that `read_to_string` on each pipe in sequence can hit
     // when a child writes >64 KB to stderr before exiting.
     match cmd.output() {
@@ -855,13 +907,13 @@ mod tests {
 
     #[test]
     fn build_child_args_selector_verb() {
-        let got = build_child_args("status", &["pulse".to_string()], "prod-1");
+        let got = build_child_args_for("status", &["pulse".to_string()], "prod-1", false);
         assert_eq!(got, vec!["status".to_string(), "pulse".to_string()]);
     }
 
     #[test]
     fn build_child_args_namespace_verb_injects_ns() {
-        let got = build_child_args("setup", &["--force".to_string()], "prod-1");
+        let got = build_child_args_for("setup", &["--force".to_string()], "prod-1", false);
         assert_eq!(
             got,
             vec![

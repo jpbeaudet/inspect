@@ -18,6 +18,7 @@ pub mod engine;
 pub mod env_overlay;
 pub mod field_filter;
 pub mod format;
+pub mod kubectl;
 pub mod map_stage;
 pub mod medium;
 pub mod metric;
@@ -25,6 +26,7 @@ pub mod parsers;
 pub mod pipeline;
 pub mod reader;
 pub mod record;
+pub mod runtime;
 
 #[allow(unused_imports)]
 pub use engine::LogResult;

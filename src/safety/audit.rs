@@ -48,13 +48,13 @@ pub struct AuditEntry {
     /// here so audit downstream can grep on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// B9 (v0.1.2): bundle correlation id. When set, every step run
+    /// Bundle correlation id. When set, every step run
     /// from the same `inspect bundle run` invocation shares this id
     /// so `inspect audit ls --bundle <id>` can reconstruct the
     /// transaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
-    /// B9 (v0.1.2): the step id within the bundle. Lets reviewers
+    /// The step id within the bundle. Lets reviewers
     /// see which YAML step produced this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_step: Option<String>,
@@ -150,6 +150,16 @@ pub struct AuditEntry {
     /// the verb terminated with a transport failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<String>,
+    /// The resolved kubeconfig **context** a k8s verb ran
+    /// against. Part of the anti-footgun contract — the audit record
+    /// names exactly which cluster was touched, never leaving it to an
+    /// ambient `current-context`. `None` for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// The resolved in-cluster **k8s namespace** a k8s verb
+    /// ran against. `None` for docker namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
     /// When this verb invocation was script-mode (`inspect run
     /// --file <path>`), the absolute local path the script was
     /// read from. `None` for `--stdin-script` and for
@@ -427,6 +437,8 @@ impl AuditEntry {
             retry_of: None,
             reauth_id: None,
             failure_class: None,
+            context: None,
+            k8s_namespace: None,
             script_path: None,
             script_sha256: None,
             script_bytes: None,
@@ -720,6 +732,35 @@ fn rand_u32() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn k5_audit_entry_records_context_and_namespace() {
+        // Anti-footgun: a k8s verb's audit record names exactly which
+        // cluster (context) + namespace it touched; the fields round-trip
+        // through JSON. A docker entry (None) omits them entirely
+        // (skip_serializing_if) so older entries (written before these
+        // fields existed) deserialize unchanged.
+        let mut e = AuditEntry::new("scale", "staging-k8s/api");
+        e.context = Some("prod-eks".into());
+        e.k8s_namespace = Some("payments".into());
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"context\":\"prod-eks\""), "json: {json}");
+        assert!(
+            json.contains("\"k8s_namespace\":\"payments\""),
+            "json: {json}"
+        );
+        let back: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.context.as_deref(), Some("prod-eks"));
+        assert_eq!(back.k8s_namespace.as_deref(), Some("payments"));
+
+        // Docker entry: fields omitted from JSON, deserialize to None.
+        let d = AuditEntry::new("restart", "arte/atlas");
+        let djson = serde_json::to_string(&d).unwrap();
+        assert!(!djson.contains("context"), "docker json must omit: {djson}");
+        assert!(!djson.contains("k8s_namespace"));
+        let dback: AuditEntry = serde_json::from_str(&djson).unwrap();
+        assert_eq!(dback.context, None);
+    }
 
     #[test]
     fn roundtrip_append_and_read() {

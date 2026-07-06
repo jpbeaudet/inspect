@@ -318,16 +318,100 @@ The actual `--select` flag implementation is a v0.1.5 backlog item; this entry r
 ## Naming + scope
 
 - `F<n>` items are field-feedback (operator pain). `L<n>` items are
-  pre-existing limitations from the roadmap. **Do not conflate**
-  the prefixes — they live in different sections of the backlog and
-  ship in different orders. Test names use the lowercase prefix
-  (`f14_*`, `l7_*`).
-- v0.1.3 is **OPEN, FROZEN** — final scope is the 25 items in
-  `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md`. Don't expand mid-implementation;
-  surface scope creep as a question to the user.
-- v0.1.4 = Kubernetes only. v0.1.5 = stabilization sweep. v0.2.0 =
-  contract freeze. Anything docker/compose/SSH that doesn't ship in
-  v0.1.3 will not be touched again until v0.1.5+.
+  pre-existing limitations from the roadmap. `S<n>` are stabilization,
+  `P<n>` post-tag patches, `K<n>` the v0.1.4 Kubernetes medium. **Do
+  not conflate** the prefixes — they live in different sections of the
+  backlog and ship in different orders. Test names use the lowercase
+  prefix (`f14_*`, `l7_*`, `k1_*`).
+- **v0.1.4 is SHIPPED** — the Kubernetes runtime medium (23 of the 25
+  K-items; K22 cross-medium `search` + K23 bundle seam deferred to the
+  v0.1.5 usage-validated pool). Closed scope + design in
+  `archives/v0.1.4/`; the exit-gate deep audit (0-Critical/0-High) is
+  `docs/audits/k8s-medium-deep-audit-2026-07-06.md`.
+- **v0.1.5 is the next release — the OPEN one.** A stabilization /
+  dogfooding sweep before the v0.2.0 contract freeze: CLI-surface audit,
+  config + JSON-schema freeze, help audit, dead-code + dependency audit,
+  security audit. The deferred **usage-validated pool** (K22 `search`,
+  K23 bundle seam) builds here *only if* real devops dogfooding names the
+  feature as needed. No speculative features. v0.2.0 = contract freeze.
+- Don't expand a release mid-implementation; surface scope creep as a
+  question to the user.
+
+## Kubernetes medium (shipped v0.1.4)
+
+v0.1.4 shipped the **Kubernetes runtime medium** — purely additive;
+`type = "docker"` (default) users see zero change. The design +
+research + smoke record are archived under `archives/v0.1.4/`
+(`INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md` + `INSPECT_v0.1.4_SURFACE_MAP.md`,
+the `INSPECT_v0.1.4_RESEARCH/` dossiers, `..._RESEARCH_SYNTHESIS.md`,
+`SMOKE_v0.1.4.md`); the exit-gate deep audit is
+`docs/audits/k8s-medium-deep-audit-2026-07-06.md`. The load-bearing
+invariants a future agent must not violate remain in force:
+
+- **Runtime axis ≠ `Medium` axis.** `Medium` (`src/exec/medium.rs`) is
+  the `source=` **locator** parser (logs / file / dir / …) and is
+  **unchanged**. Docker-vs-k8s is a new orthogonal **runtime** axis
+  selected by the namespace `type`. Do not conflate the two axes.
+- **How the runtime axis actually dispatches (corrected 2026-07-06, exit-gate
+  audit H5).** Each verb's `run()` branches on
+  `resolved.config.runtime_kind()`: a `RuntimeKind::K8s` namespace routes to
+  the verb's `*_k8s()` path, which calls the shared **kubectl helper family**
+  in `src/exec/kubectl.rs` (`kubectl_base` / `exec_base` / `exec_in_pod` /
+  `classify_kubectl_failure` / `revert_kubectl_prefix`, each taking
+  `&NamespaceConfig`); the docker path is unchanged. This per-verb
+  `runtime_kind()` fork + kubectl-helper module **is** the runtime seam. The
+  `Runtime` trait (`src/exec/runtime.rs`) is **not** the dispatch seam: it is
+  the byte-parity **extraction harness** for the docker command-string builders
+  (`DockerRuntime`, called concretely at a few sites — `discovery/drift.rs`,
+  `bundle/exec.rs`, `bundle/checks.rs` — and the k1 parity tests). Earlier
+  drafts of this file claimed the trait carried dispatch and made a `kube-rs`
+  swap "mechanical"; that was **aspirational and never realized** — the audit
+  confirmed `Box<dyn Runtime>` is never used for dispatch and `K8sRuntime` is
+  test-only. The claim is corrected here rather than the code (Option B, JP
+  2026-07-06): the per-verb fork is a sound design for two runtimes with
+  heterogeneous per-verb behavior; forcing a premature trait generalization
+  would be its own overfit (Rule 8).
+- **Backend = `kubectl` shell-out for v0.1.4** (Dependency Policy clean —
+  no new crate; probe `kubectl` on PATH exactly like `docker`). A future
+  `kube-rs` swap OR a trait-as-seam refactor is an **explicit ADR/decision**,
+  never a silent add; if it lands it would promote the per-verb fork into a
+  `Runtime` method surface and revive the currently-dormant `K8sRuntime`
+  (deferred to v0.1.5+, JP 2026-07-06 — the dormant impl is the seed).
+- **Selector stays 2-segment.** `<inspect-ns>/<workload>`; the kubeconfig
+  **context** + k8s **namespace** live in config (like the SSH host does
+  for docker), with a kubectl-parity `-n`/`--namespace` + `-A` override.
+  The runtime **pins `--context` explicitly on every kubectl call** and
+  **never reads or mutates the ambient `current-context`** — this is the
+  anti-footgun property (config-per-context is immune to the
+  kubectl "context-pong" that is the #1 kubectl destruction class).
+- **Every k8s write echoes the resolved `{context, k8s_namespace,
+  workload}`** in the dry-run preview, the confirmation prompt, the
+  `AuditEntry`, and the envelope `meta`. This is a k8s write-verb contract
+  alongside the F11 revert contract.
+- **`AuditEntry` extends additively** (no schema break): `context` /
+  `k8s_namespace` are new `Option<T>` + `skip_serializing_if` fields;
+  `failure_class` (already `Option<String>`, F13) gains new **values**
+  (`rbac_forbidden`, `no_shell_in_container`, `metrics_unavailable`, and
+  the k8s transport classes) — a value-space extension, not a field add.
+- **k8s exit-code bands (WA-4, JP-2026-07-05).** Two documented bands, with
+  `failure_class` always carrying the fine detail — the exit code is the
+  coarse class an agent branches on. **Transport band** (parallel to the F13
+  SSH band 12–14): `transport_unreachable` → 13, `transport_auth_failed` →
+  14, `rbac_forbidden` → 14 (`failure_class` distinguishes it from a
+  credential expiry). **Operational-degradation band** (15–16, distinct
+  consumer remediations so distinct codes, not coarse exit-1):
+  `metrics_unavailable` → 15 (skip-metrics path), `no_shell_in_container` →
+  16 (skip-exec path). `not_found` / `unknown` → 1. The single source of
+  truth is `KubectlFailure::exit_code()`; no magic numbers scattered
+  elsewhere.
+- **Conservative write set, F11-captured:** `scale` (command_pair revert),
+  `restart`=rollout-restart (command_pair via captured `rollout undo
+  --to-revision`), `rollout undo`, `delete pod` (unsupported revert +
+  outage guard), `exec --apply`. Immutable-pod ops (`edit`/`cp`/fs-mutation/
+  `stop`/`start`/`port-forward`) **REFUSE with a chained idiom hint** — a
+  raw kubectl/OCI error reaching the agent is a bug.
+- **All 25 K-items ⏸ Proposed** pending JP ratification of Q1–Q8 (recorded
+  in the plan §2); no Proposed item ships until ratified.
 
 ## Working with mid-state working trees
 
@@ -349,10 +433,12 @@ implementation, or partial work. **Verify before assuming**:
 
 - Source: `src/` (verbs in `src/verbs/`, write verbs in
   `src/verbs/write/`, editorial help in `src/help/content/`)
-- Tests: `tests/phase_f_v013.rs` for v0.1.3 work; `tests/phase_*`
-  for older phases; in-tree unit tests next to the code.
+- Tests: `tests/phase_k_v014.rs` for v0.1.4 k8s work;
+  `tests/phase_f_v013.rs` for v0.1.3 work; `tests/phase_*` for older
+  phases; in-tree unit tests next to the code.
 - Docs: `docs/MANUAL.md` (operator), `docs/RUNBOOK.md` (release
-  + maintenance), `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md` (closed scope).
+  + maintenance), `archives/v0.1.4/` + `archives/v0.1.3/` (closed-scope
+  planning + smoke + audit records), `docs/audits/` (deep audits).
 - Audit log path: `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
 - Profile / config: `~/.inspect/servers.toml` (mode 0600).
 
@@ -417,6 +503,17 @@ The `Revert` enum has four kinds (`Unsupported`, `CommandPair`,
   envelope verb. Pre-fix shape was bare-NDJSON / bare-object and
   caused `.[0]` / `| length` jq recipes to fail with "Cannot index
   object with number". Don't regress.
+- **k8s snapshot read verbs emit the standard envelope + honor `--select`;
+  k8s line verbs emit true NDJSON + honor `--select` via a streaming filter.**
+  Snapshot (buffered, tabular) verbs — `ps`/`status`/`describe`/`network`/
+  `volumes`/`images`/`ports`/**`top` (`.data.pods[]`)**/**`events`
+  (`.data.events[]`)** — go through `render_doc(.., select_spec())`. Line
+  verbs — `cat`/`ls`/`grep`/`logs` — stream one JSON object per line and apply
+  `--select` per line via `select_filter()` / `flush_filter()`. The two are a
+  principled split, NOT drift: `top`/`events` were fixed off the exit-gate
+  audit (H4/R1) after they shipped as bare `println!(json!(…))` that dropped
+  `--select`; new snapshot verbs use `render_doc`, new line verbs use
+  `select_filter` — never a bare `println!(json!)`.
 - **`compose ls --json` envelope path is `.data.compose_projects[]`,
   field is `.name`.** `compose ps --json` payload path is
   `.data.services[]` (object-keyed `.data`, not array). The shared

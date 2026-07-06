@@ -13,6 +13,16 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
     // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
+
+    // `inspect ls <k8s-ns>/<pod>:<path>` via `kubectl exec`.
+    if let Some(ns_name) = args.target.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return ls_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.target)?;
 
     // Construct the streaming `--select` filter ONCE at
@@ -101,4 +111,51 @@ pub fn run(args: LsArgs) -> Result<ExitKind> {
     } else {
         ExitKind::Error
     })
+}
+
+/// `inspect ls <k8s-ns>/<pod>[:<path>]` via `kubectl exec <pod>
+/// -- ls`. Distroless/no-shell failures classify to no_shell_in_container ->
+/// exit 16, never a raw OCI error.
+fn ls_k8s(
+    args: &LsArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let rest = args.target.split_once('/').map(|(_, r)| r).unwrap_or("");
+    let (pod, path) = match rest.split_once(':') {
+        Some((p, path)) => (p, if path.is_empty() { "/" } else { path }),
+        None => (rest, "/"),
+    };
+    if pod.is_empty() {
+        crate::tee_eprintln!("ls: specify a pod — `inspect ls {ns}/<pod>[:/path]`");
+        return Ok(ExitKind::Error);
+    }
+
+    let mut argv: Vec<&str> = vec!["ls", "-1"];
+    if args.long {
+        argv.push("-l");
+    }
+    if args.all {
+        argv.push("-A");
+    }
+    argv.push("--");
+    argv.push(path);
+
+    let res = crate::exec::kubectl::exec_in_pod(cfg, pod, None, &argv)?;
+    if let Some(f) = res.failure {
+        crate::tee_eprintln!("ls: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+    let as_json = args.format.is_json();
+    for line in res.stdout.lines() {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::json!({ "entry": crate::format::safe::safe_machine_line(line).as_ref() })
+            );
+        } else {
+            println!("{line}");
+        }
+    }
+    Ok(ExitKind::Success)
 }

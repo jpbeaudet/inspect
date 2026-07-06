@@ -20,6 +20,35 @@ pub fn run(args: SetupArgs) -> anyhow::Result<ExitKind> {
     validate_namespace_name(&args.namespace)?;
     let resolved = resolver::resolve(&args.namespace)?;
     resolved.config.validate(&resolved.name)?;
+
+    // A k8s namespace discovers via a local, context-pinned
+    // `kubectl get pods -o json` (never SSH). Divert before SshTarget, which
+    // would fail on a hostless k8s config.
+    if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        // Enforcement lives in the ACTION verbs (JP-2026-07-05). `setup`
+        // needs kubectl to discover, so it fails loud/specific/actionable (the
+        // four-question error) when kubectl is absent — unlike `show`, which
+        // only reports readiness.
+        let probe = crate::exec::kubectl::probe_kubectl();
+        if !probe.available {
+            anyhow::bail!(crate::exec::kubectl::not_found_message(
+                &resolved.name,
+                &probe.path_searched
+            ));
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let profile = crate::discovery::k8s::discover_k8s(&resolved.name, &resolved.config, &now)
+            .with_context(|| format!("setup '{}' (k8s)", resolved.name))?;
+        crate::profile::cache::save_profile(&profile)
+            .with_context(|| format!("caching profile for '{}'", resolved.name))?;
+        if args.format.is_json() {
+            print_json(&profile, "discovered", args.format.select_spec())?;
+        } else {
+            print_human(&profile, "discovered");
+        }
+        return Ok(ExitKind::Success);
+    }
+
     let target = SshTarget::from_resolved(&resolved)?;
 
     if args.check_drift {
@@ -171,6 +200,26 @@ fn print_human(p: &Profile, status: &str) {
         p.namespace, containers, host_lst, units
     );
     println!("DATA:");
+    let is_k8s = p.runtime.as_deref() == Some("k8s");
+    if is_k8s {
+        // A k8s profile has no remote SSH host to probe for
+        // rg/jq/docker — showing that docker-centric line is a mindtrap.
+        // Surface the k8s-relevant facts instead.
+        println!("  runtime:        kubernetes (context pinned: {})", p.host);
+        println!("  discovered_at:  {}", p.discovered_at);
+        println!(
+            "  pods:           {} (address by pod name — e.g. inspect status {}/<pod>)",
+            p.services.len(),
+            p.namespace
+        );
+        if !p.warnings.is_empty() {
+            println!("WARNINGS:");
+            for w in &p.warnings {
+                println!("  - {w}");
+            }
+        }
+        return;
+    }
     println!("  host:           {}", p.host);
     println!("  discovered_at:  {}", p.discovered_at);
     println!(
@@ -319,7 +368,7 @@ fn merge_retry(prev: &Profile, fresh: &Profile) -> Profile {
     merged
 }
 
-/// B1 (v0.1.2): run [`discovery::ssh_precheck`] and translate any
+/// Run [`discovery::ssh_precheck`] and translate any
 /// failure into a fatal `anyhow::Error` carrying a chained,
 /// human-readable hint. The error message is shaped so that
 /// `error::topic_for_message()` will append `see: inspect help ssh`.

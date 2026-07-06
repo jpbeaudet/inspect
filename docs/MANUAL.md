@@ -131,6 +131,80 @@ master comes up. Re-running `inspect add <ns>` against an existing
 namespace requires `--force` (it idempotently overwrites the entry
 in `servers.toml`).
 
+#### Kubernetes namespaces (v0.1.4, K2)
+
+A namespace can target a Kubernetes cluster instead of a docker host by
+setting `type = "k8s"`. A k8s namespace is addressed by its **kubeconfig
+context**, not by SSH — it needs neither `host` nor `user`, and its
+SSH-only fields (`key_path`, `auth`, `session_ttl`, …) are inert
+(`inspect show` renders them `N/A (k8s)`). Auth inherits your kubeconfig
+entirely; inspect adds no new credential surface.
+
+```toml
+# ~/.inspect/servers.toml  (schema_version = 2)
+[namespaces.staging-k8s]
+type       = "k8s"
+kubeconfig = "~/.kube/staging.yaml"   # optional — else kubectl's default resolution
+context    = "staging"                # the context inspect pins on every call
+namespace  = "default"                # optional — the in-cluster k8s namespace
+```
+
+**Prerequisite — `kubectl` on PATH (K3, v0.1.4).** A k8s namespace drives
+a **local** `kubectl` shell-out backend, so `kubectl` must be installed and
+on your `PATH` (inspect probes it locally, never over SSH). `inspect show
+<k8s-ns>` reports the detected `kubectl:` version; if `kubectl` is missing,
+k8s verbs fail with a loud four-question error (what / where / why / fix)
+and exit code 2 rather than a raw OS error. inspect warns (does not fail)
+if `kubectl` is below the documented floor (v1.19). Auth still inherits
+your kubeconfig — inspect adds no new credential surface.
+
+**The no-wrong-cluster guarantee (K5, v0.1.4).** inspect pins the
+configured `context` explicitly on every `kubectl` call and never reads or
+mutates your ambient `current-context`. So `inspect scale staging-k8s/api`
+always acts on the cluster you configured for `staging-k8s` — a `kubectx`
+switch in another terminal cannot silently redirect it (the "context-pong"
+that causes wrong-cluster incidents). Every k8s **write** also records the
+resolved `context` + `k8s_namespace` in its audit entry, so the log names
+exactly which cluster and namespace were touched.
+
+**k8s is sessionless — no `connect` step (K6/Q6, v0.1.4).** Unlike a docker
+namespace (which opens a persistent SSH master), a k8s namespace resolves
+its kubeconfig context per-verb from config. `inspect connect <k8s-ns>` and
+`inspect disconnect <k8s-ns>` therefore report **N/A** and exit 0 — there is
+no session to open or close, and no sticky `current-context` to leak. Go
+straight from `inspect add` to `inspect test` / `inspect setup`.
+
+**Validating a k8s namespace — `inspect test <ns>` (K4, v0.1.4).** For a
+k8s namespace, `test` runs k8s-appropriate checks — config validity, the
+`kubectl` backend probe (K3), and a **context-pinned** API-reachability
+probe — and skips the SSH key/tcp checks. Any kubectl failure is reported
+with a stable `failure_class` tag and a chained hint rather than raw
+kubectl prose. The taxonomy an agent can branch on: `rbac_forbidden`
+(with the exact `kubectl auth can-i` to run), `not_found`,
+`no_shell_in_container`, `metrics_unavailable`, `transport_unreachable`,
+`transport_auth_failed`, `unknown`. k8s is sessionless, so `test`'s
+success hint points at `inspect setup`, not `inspect connect`.
+
+Or interactively / non-interactively:
+
+```sh
+inspect add staging-k8s --type k8s \
+  --context staging --kubeconfig ~/.kube/staging.yaml --namespace default
+```
+
+inspect **always pins `--context` explicitly** and never reads or
+mutates your ambient `kubectl` `current-context`, so it cannot be
+fooled into acting on the wrong cluster by a stray `kubectl config
+use-context` in another terminal. Only `docker` (the default when
+`type` is absent) and `k8s` / `kubernetes` are valid `type` values; any
+other value is rejected at parse time. Existing docker namespaces are
+unaffected — the schema bump to 2 is purely additive.
+
+> **Note.** K2 lands the k8s namespace *declaration* + validation. The
+> k8s read/write *verbs* (`status`, `logs`, `scale`, …) land in the
+> subsequent v0.1.4 waves; until then a k8s namespace parses, validates,
+> and shows, and `inspect setup`/`test` will verify the context.
+
 ### 3.3 Open a persistent session
 
 ```sh

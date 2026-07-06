@@ -92,6 +92,17 @@ pub fn run(args: CatArgs) -> Result<ExitKind> {
     // Activate the FormatArgs mutex check
     // (e.g. `--select` without `--json` → exit 2).
     args.format.resolve()?;
+
+    // `inspect cat <k8s-ns>/<pod>:<path>` reads via
+    // `kubectl exec <pod> -- cat <path>` (context-pinned) — not the SSH path.
+    if let Some(ns_name) = args.target.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return cat_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.target)?;
     let slice = resolve_slice(&args)?;
 
@@ -230,4 +241,49 @@ fn build_cat(service: Option<&str>, path: &str) -> String {
         Some(svc) => format!("docker exec {} cat -- {}", shquote(svc), shquote(path)),
         None => format!("cat -- {}", shquote(path)),
     }
+}
+
+/// `inspect cat <k8s-ns>/<pod>:<path>` via `kubectl exec <pod> --
+/// cat <path>` (context-pinned). Redacts the output (PEM/secret masking) the
+/// same as docker cat. A distroless/no-shell exec failure is classified as
+/// `no_shell_in_container` → exit 16, never a raw OCI error.
+fn cat_k8s(
+    args: &CatArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let (pod, path) = match args.target.split_once('/').map(|(_, r)| r) {
+        Some(rest) => match rest.split_once(':') {
+            Some((p, path)) if !p.is_empty() && !path.is_empty() => (p, path),
+            _ => {
+                crate::tee_eprintln!(
+                    "cat: k8s target needs a pod + path — `inspect cat {ns}/<pod>:/path/to/file`"
+                );
+                return Ok(ExitKind::Error);
+            }
+        },
+        None => {
+            crate::tee_eprintln!("cat: specify `{ns}/<pod>:/path`");
+            return Ok(ExitKind::Error);
+        }
+    };
+
+    let res = crate::exec::kubectl::exec_in_pod(cfg, pod, None, &["cat", "--", path])?;
+    if let Some(f) = res.failure {
+        crate::tee_eprintln!("cat: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, false);
+    let as_json = args.format.is_json();
+    for line in res.stdout.lines() {
+        if let Some(masked) = redactor.mask_line(line) {
+            if as_json {
+                println!("{}", serde_json::json!({ "line": masked }));
+            } else {
+                println!("{masked}");
+            }
+        }
+    }
+    Ok(ExitKind::Success)
 }

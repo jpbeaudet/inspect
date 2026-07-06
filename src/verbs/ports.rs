@@ -58,6 +58,15 @@ impl PortFilter {
             PortFilter::Range(lo, hi) => line_has_port(line, |q| q >= *lo && q <= *hi),
         }
     }
+
+    /// Test a concrete port value (k8s Service ports come pre-parsed).
+    fn matches_port(&self, port: u16) -> bool {
+        match self {
+            PortFilter::None => true,
+            PortFilter::Single(p) => port == *p,
+            PortFilter::Range(lo, hi) => port >= *lo && port <= *hi,
+        }
+    }
 }
 
 /// Which proto axis (or axes) the verb scans.
@@ -160,6 +169,17 @@ fn line_proto_for_docker(line: &str) -> &'static str {
 pub fn run(args: PortsArgs) -> Result<ExitKind> {
     let filter = PortFilter::from_args(&args)?;
     let axis = ProtoAxis::parse(&args.proto);
+
+    // k8s "ports" = Service ports (kubectl get svc), the
+    // declarative reachability surface.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return ports_k8s(&args, ns_name, &resolved.config, &filter);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
     let mut renderer = Renderer::new();
     let mut count = 0usize;
@@ -268,6 +288,76 @@ fn proto_matches(axis: ProtoAxis, proto: &str) -> bool {
         ProtoAxis::Udp => proto == "udp",
         ProtoAxis::All => true,
     }
+}
+
+/// `inspect ports <k8s-ns>` — Service ports across the namespace
+/// (`kubectl get svc`): service, port/proto, targetPort, nodePort. Honors the
+/// `--port` / `--port-range` filter on the service port.
+fn ports_k8s(
+    args: &PortsArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+    filter: &PortFilter,
+) -> Result<ExitKind> {
+    let mut renderer = Renderer::new();
+    let out = crate::exec::kubectl::kubectl_base(cfg)
+        .args([
+            "get",
+            "svc",
+            "-o",
+            "json",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+        ])
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let f =
+            crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+        crate::tee_eprintln!("ports: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let empty = Vec::new();
+    let items = v.get("items").and_then(|i| i.as_array()).unwrap_or(&empty);
+    let mut count = 0usize;
+    for s in items {
+        let svc = s
+            .pointer("/metadata/name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if let Some(ports) = s.pointer("/spec/ports").and_then(|p| p.as_array()) {
+            for p in ports {
+                let port = p.get("port").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+                if !filter.matches_port(port) {
+                    continue;
+                }
+                let proto = p.get("protocol").and_then(|x| x.as_str()).unwrap_or("TCP");
+                let target = p
+                    .get("targetPort")
+                    .map(|t| t.to_string().trim_matches('"').to_string())
+                    .unwrap_or_else(|| "-".into());
+                let node_port = p.get("nodePort").and_then(|x| x.as_u64());
+                count += 1;
+                let np = node_port
+                    .map(|n| format!(" nodePort={n}"))
+                    .unwrap_or_default();
+                renderer.data_line(format!(
+                    "{ns} | {svc:<28} {port}/{proto:<5} -> target={target}{np}"
+                ));
+                renderer.push_row(
+                    &Envelope::new(ns, "network", "ports")
+                        .with_service(svc)
+                        .put("port", port)
+                        .put("protocol", proto.to_string())
+                        .put("target_port", target)
+                        .put("node_port", node_port),
+                );
+            }
+        }
+    }
+    renderer.summary(format!("{count} service port(s)"));
+    let fmt = args.format.resolve()?;
+    renderer.dispatch(&fmt, args.format.select_filter()?)
 }
 
 #[cfg(test)]

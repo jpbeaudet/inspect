@@ -23,6 +23,13 @@ pub struct Profile {
     /// byte-stable across timezones.
     pub discovered_at: String,
 
+    /// The runtime medium this profile was discovered from —
+    /// `Some("k8s")` for a Kubernetes namespace, `None` for docker (default).
+    /// Lets presentation + status skip docker-only facts (`remote_tooling`,
+    /// the jq note) that are meaningless for a k8s namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+
     #[serde(default)]
     pub remote_tooling: RemoteTooling,
 
@@ -73,6 +80,7 @@ impl Profile {
             namespace: namespace.to_string(),
             host: host.to_string(),
             discovered_at: discovered_at.to_string(),
+            runtime: None,
             remote_tooling: RemoteTooling::default(),
             services: Vec::new(),
             volumes: Vec::new(),

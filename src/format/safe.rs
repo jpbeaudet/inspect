@@ -79,7 +79,7 @@ pub fn safe_terminal_line(s: &str, max_bytes: usize) -> Cow<'_, str> {
         }
     }
     if over_budget {
-        // B8 (v0.1.2): the previous marker `... [truncated, full line: N
+        // The previous marker `... [truncated, full line: N
         // bytes]` was easy for a tired operator to miss when scanning
         // tabular output (the cut row read like a normal continuation).
         // The new marker uses bracket sigils that don't appear in

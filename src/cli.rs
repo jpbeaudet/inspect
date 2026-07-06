@@ -84,22 +84,32 @@ const SEE_ALSO_COMPOSE: &str =
 // ---------------------------------------------------------------------------
 
 const LONG_ADD: &str = "\
-Register or update a namespace's SSH credentials. Idempotent: running \
-`add` again with new flags rewrites the entry (pass `--force` to \
-overwrite an existing entry without re-prompting).
+Register or update a namespace. Idempotent: running `add` again with \
+new flags rewrites the entry (pass `--force` to overwrite an existing \
+entry without re-prompting).
 
-`--non-interactive` requires every value to be supplied on the \
-command line — `--host`, `--user`, `--key-path` are the minimum; \
-`--port` defaults to 22; `--key-passphrase-env` is optional. The \
-verb errors with `missing required value for '<field>'` instead of \
-prompting when a required field is absent. There is NO env-var \
-form (`INSPECT_<NS>_HOST=...` is not consulted); pass values as \
-flags.
+A namespace is one of two runtime types (`--type`):
+  • `docker` (default) — reached over SSH; `--host` + `--user` + \
+    `--key-path` are the minimum, `--port` defaults to 22, \
+    `--key-passphrase-env` is optional.
+  • `k8s` — a Kubernetes cluster reached via kubeconfig; needs NEITHER \
+    host nor user. Set `--context` (the kubeconfig context inspect pins \
+    on every call — it never reads your ambient current-context), and \
+    optionally `--kubeconfig` (a path; else kubectl's default) and \
+    `--namespace` (the in-cluster k8s namespace). Auth inherits your \
+    kubeconfig; inspect adds no new credential surface.
+
+`--non-interactive` requires every required value on the command line \
+and errors with `missing required value for '<field>'` instead of \
+prompting. There is NO env-var form for `add` flags themselves \
+(`INSPECT_<NS>_HOST=...` overrides at resolve time, not at `add` time); \
+pass values as flags.
 
 EXAMPLES
   $ inspect add arte
   $ inspect add prod-eu --host prod-eu.example.com --user ops --key-path ~/.ssh/prod
-  $ inspect add staging --non-interactive --host s.example --user ops --key-path ~/.ssh/s --force";
+  $ inspect add staging --non-interactive --host s.example --user ops --key-path ~/.ssh/s --force
+  $ inspect add staging-k8s --type k8s --context staging --kubeconfig ~/.kube/staging.yaml --namespace default";
 
 const LONG_LIST: &str = "\
 Print every configured namespace with its host, user, and last-known \
@@ -130,10 +140,23 @@ const LONG_SHOW: &str = "\
 Print a namespace's resolved configuration with secrets redacted. Use \
 `--profile` to see the cached discovery profile.
 
+KUBERNETES BACKEND PREFLIGHT (K3, v0.1.4)
+  For a `type = \"k8s\"` namespace, `show` also probes the local \
+  `kubectl` binary (k8s namespaces drive a kubectl shell-out backend, \
+  run LOCALLY against the kubeconfig — not over SSH) and reports it on a \
+  `kubectl:` line (client version) or as `ABSENT`. When kubectl is not \
+  on PATH the command FAILS with a four-question preflight error (what / \
+  where / why / fix) and exits 2 — because no k8s verb can run without \
+  it. kubectl is the one prerequisite for k8s namespaces; docker \
+  namespaces are unaffected. A kubectl older than the documented floor \
+  (v1.19) warns but does not fail. (The `inspect help kubernetes` topic \
+  consolidating this lands in K24.)
+
 EXAMPLES
   $ inspect show arte
   $ inspect show arte --json
-  $ inspect show arte --profile";
+  $ inspect show arte --profile
+  $ inspect show staging-k8s          # includes the kubectl: readiness line";
 
 const LONG_FLEET: &str = "\
 Run an inner verb across multiple namespaces selected by `--ns` (glob, \
@@ -1531,6 +1554,18 @@ pub enum Command {
     /// List networks.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Network(SimpleSelectorArgs),
+    /// (k8s) Pod CPU/memory usage via `kubectl top`. Degrades to
+    /// `metrics_unavailable` (exit 15) when metrics-server is absent.
+    Top(SimpleSelectorArgs),
+    /// (k8s) Cluster/object events, newest-first (`kubectl get
+    /// events`). Optionally scoped to a pod: `inspect events <ns>/<pod>`.
+    Events(SimpleSelectorArgs),
+    /// (k8s) Deep object dump for a pod reshaped into the JSON
+    /// envelope (kubectl describe has no -o json). `inspect describe <ns>/<pod>`.
+    /// Inline `env[].value` literals and the `last-applied-configuration`
+    /// annotation are masked (`<redacted>`) so secrets do not cross stdout;
+    /// `env[].valueFrom` references (secretKeyRef) are shown by name.
+    Describe(SimpleSelectorArgs),
     /// List listening ports.
     #[command(long_about = LONG_SIMPLE_SELECTOR)]
     Ports(PortsArgs),
@@ -1553,6 +1588,18 @@ pub enum Command {
     /// Restart container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Restart(LifecycleArgs),
+    /// (k8s) Scale a Deployment to N replicas (`kubectl scale`).
+    /// Dry-run by default; `--apply` captures the prior replica count so the
+    /// revert scales back. `--replicas 0` stops the workload. Targets
+    /// Deployments (the conservative write set) — for a StatefulSet /
+    /// DaemonSet the not-found error names the kubectl escape hatch.
+    Scale(ScaleArgs),
+    /// (k8s) Delete a pod (`kubectl delete pod`). Narrow: pods
+    /// only. The controller recreates it (deletion is not undoable).
+    Delete(DeleteArgs),
+    /// (k8s) Roll a Deployment back to a prior revision
+    /// (`kubectl rollout undo`) — the fast rollback of a bad deploy.
+    Rollout(RolloutArgs),
     /// Stop container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Stop(LifecycleArgs),
@@ -1596,7 +1643,7 @@ pub enum Command {
     #[command(long_about = LONG_RUN)]
     Run(RunArgs),
 
-    /// Block until a predicate over the target becomes true (B10).
+    /// Block until a predicate over the target becomes true.
     #[command(long_about = LONG_WATCH)]
     Watch(WatchArgs),
 
@@ -1633,7 +1680,7 @@ pub enum Command {
     #[command(long_about = LONG_FLEET)]
     Fleet(FleetArgs),
 
-    // ---- v0.1.2 B9 bundle ----------------------------------------------------
+    // ---- bundle ----------------------------------------------------
     /// YAML-driven multi-step orchestration with rollback.
     #[command(long_about = LONG_BUNDLE)]
     Bundle(BundleArgs),
@@ -1761,6 +1808,27 @@ pub struct AddArgs {
     /// SSH port (default 22).
     #[arg(long)]
     pub port: Option<u16>,
+
+    /// Runtime medium: `docker` (default) or `k8s`. A k8s
+    /// namespace uses kubeconfig/context/namespace instead of
+    /// host/user/key_path.
+    #[arg(long = "type")]
+    pub runtime_type: Option<String>,
+
+    /// (k8s) Path to the kubeconfig. Optional; defaults to kubectl's
+    /// own resolution (`$KUBECONFIG` / `~/.kube/config`).
+    #[arg(long)]
+    pub kubeconfig: Option<String>,
+
+    /// (k8s) kubeconfig context to pin on every kubectl call. inspect
+    /// never reads the ambient `current-context` (anti-footgun).
+    #[arg(long)]
+    pub context: Option<String>,
+
+    /// (k8s) Kubernetes namespace inside the cluster to scope to.
+    /// Optional; defaults to the kubectl default namespace.
+    #[arg(long = "namespace")]
+    pub k8s_namespace: Option<String>,
 
     /// Overwrite an existing entry without prompting.
     #[arg(long)]
@@ -2702,6 +2770,16 @@ pub struct LogsArgs {
     /// Hidden: ssh-side timeout for follow mode (seconds).
     #[arg(long, hide = true)]
     pub follow_timeout_secs: Option<u64>,
+    /// (k8s) Container in a multi-container pod (`kubectl -c`).
+    /// When omitted, inspect auto-picks the first container and hints the
+    /// others rather than erroring like `kubectl logs`. Ignored for docker.
+    #[arg(long = "container", short = 'c', value_name = "NAME")]
+    pub container: Option<String>,
+    /// (k8s) Show the PREVIOUS terminated container's logs
+    /// (`kubectl logs --previous`) — the crash-loop post-mortem view.
+    /// Shows the last terminated instance only. Ignored for docker.
+    #[arg(long = "previous")]
+    pub previous: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2913,6 +2991,86 @@ pub struct LifecycleArgs {
     pub revert_preview: bool,
 }
 
+/// `inspect scale <k8s-ns>/<workload> --replicas N`.
+#[derive(Debug, Args)]
+pub struct ScaleArgs {
+    /// Selector: `<k8s-ns>/<workload>` (a Deployment).
+    pub selector: String,
+    /// Target replica count. `0` stops the workload (with an outage guard).
+    #[arg(long, value_name = "N")]
+    pub replicas: u32,
+    /// Optimistic-concurrency guard: only scale if currently at this many
+    /// replicas (`kubectl scale --current-replicas`).
+    #[arg(long, value_name = "N")]
+    pub current_replicas: Option<u32>,
+    /// Actually perform the mutation. Without this flag, `scale` is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the large-fanout / outage interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// Print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+/// `inspect delete <k8s-ns>/<pod>` — narrow pod deletion.
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// Selector: `<k8s-ns>/<pod>` (pods only; not controllers).
+    pub selector: String,
+    /// Actually perform the deletion. Without this flag, it is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the outage interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+/// `inspect rollout <k8s-ns>/<deploy>` — roll a Deployment back
+/// to its previous (or a named) revision (`kubectl rollout undo`).
+#[derive(Debug, Args)]
+pub struct RolloutArgs {
+    /// Selector: `<k8s-ns>/<workload>` (a Deployment).
+    pub selector: String,
+    /// Roll back to a specific revision (default: the previous one).
+    #[arg(long, value_name = "N")]
+    pub to_revision: Option<u32>,
+    /// Actually perform the rollback. Without this flag, it is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// Print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
 #[derive(Debug, Args)]
 #[command(
     long_about = "Run a state-changing command on the selected targets. Audited; \
@@ -2959,7 +3117,7 @@ pub struct ExecArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
     /// Emit a `[inspect] still running on <ns> (Ns elapsed)` line to
-    /// stderr after this many seconds of remote silence (B7, v0.1.2).
+    /// stderr after this many seconds of remote silence.
     /// Defaults to 30s. Use `--no-heartbeat` to disable.
     #[arg(long, value_name = "SECS", conflicts_with = "no_heartbeat")]
     pub heartbeat: Option<u64>,
@@ -3081,7 +3239,7 @@ pub struct RunArgs {
     /// so `--clean-output --tty` is a clap-level rejection.
     #[arg(long = "tty")]
     pub tty: bool,
-    /// SMOKE 2026-05-09 fail-fast (v0.1.3): catch the
+    /// SMOKE 2026-05-09 fail-fast: catch the
     /// `inspect run --apply` muscle-memory trap. `inspect run` is
     /// READ-ONLY — the audited mutation verb is `inspect exec
     /// --apply`. Pre-fix, `--apply` slipped past clap into the
@@ -3340,7 +3498,7 @@ pub struct WatchArgs {
 }
 
 // ---------------------------------------------------------------------------
-// B9 (v0.1.2) — `inspect bundle`
+// `inspect bundle`
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Args)]
@@ -3884,7 +4042,7 @@ pub struct RevertArgs {
     pub last: Option<usize>,
 }
 
-// ---- compose (v0.1.3) ----------------------------------------------------
+// ---- compose ----------------------------------------------------
 
 #[derive(Debug, Args)]
 #[command(

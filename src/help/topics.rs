@@ -54,6 +54,11 @@ pub const TOPICS: &[Topic] = &[
         body: Some(include_str!("content/write.md")),
     },
     Topic {
+        id: "kubernetes",
+        summary: "Kubernetes namespaces: addressing, verbs, exit codes (v0.1.4)",
+        body: Some(include_str!("content/kubernetes.md")),
+    },
+    Topic {
         id: "safety",
         summary: "Audit log, snapshots, revert",
         body: Some(include_str!("content/safety.md")),
@@ -198,7 +203,7 @@ pub const VERB_TOPICS: &[(&str, &[&str])] = &[
     ("revert", &["safety", "write"]),
     // Fleet orchestrator.
     ("fleet", &["fleet", "write", "selectors"]),
-    // B9 — bundle orchestration.
+    // Bundle orchestration.
     ("bundle", &["write", "safety", "fleet"]),
     // Diagnostic recipes.
     ("why", &["recipes", "examples"]),
@@ -363,8 +368,8 @@ mod tests {
     #[test]
     fn topic_count_matches_bible() {
         // 14 HP-1 editorial topics + 1 compose topic
-        // + 1 select topic.
-        assert_eq!(TOPICS.len(), 16);
+        // + 1 select topic + 1 kubernetes topic.
+        assert_eq!(TOPICS.len(), 17);
     }
 
     #[test]

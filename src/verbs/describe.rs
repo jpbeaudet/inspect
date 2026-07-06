@@ -1,0 +1,303 @@
+//! `inspect describe <k8s-ns>/<pod>` — deep pod dump reshaped into the JSON
+//! envelope.
+//!
+//! kubectl `describe` is text-only (no `-o json`) — its richest view (spec +
+//! status + conditions) can't be projected or piped. inspect reshapes
+//! `kubectl get pod -o json` + the object's Events into the standard envelope,
+//! so an agent can `--select` any field. A Kubernetes verb.
+
+use anyhow::Result;
+
+use crate::cli::SimpleSelectorArgs;
+use crate::error::ExitKind;
+use crate::verbs::output::OutputDoc;
+
+pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
+    let Some((ns_name, cfg)) = crate::verbs::dispatch::require_k8s(
+        &args.selector,
+        "describe is a Kubernetes verb. For docker use `inspect ps` / `inspect why`.",
+    )?
+    else {
+        return Ok(ExitKind::Error);
+    };
+    describe_k8s(&args, &ns_name, &cfg)
+}
+
+fn describe_k8s(
+    args: &SimpleSelectorArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let fmt = args.format.resolve()?;
+    let pod = args
+        .selector
+        .split_once('/')
+        .map(|(_, r)| r.split(':').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    if pod.is_empty() {
+        crate::tee_eprintln!("describe: specify a pod — `inspect describe {ns}/<pod>`");
+        return Ok(ExitKind::Error);
+    }
+
+    let out = crate::exec::kubectl::kubectl_base(cfg)
+        .args([
+            "get",
+            "pod",
+            &pod,
+            "-o",
+            "json",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+        ])
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let f =
+            crate::exec::kubectl::classify_kubectl_failure(&stderr, out.status.code().unwrap_or(1));
+        crate::tee_eprintln!("describe: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+    let mut obj: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+
+    // Secret-blindness: the raw pod object is echoed verbatim into the
+    // `--json` envelope below, so any inline secret in it would cross the
+    // stdout boundary in plaintext. Two carriers leak: an inline
+    // `spec.*containers[].env[].value` literal, and the
+    // `kubectl.kubernetes.io/last-applied-configuration` annotation (a full
+    // copy of the applied manifest, which re-embeds those same env values).
+    // Scrub both before the object is rendered. `env[].valueFrom`
+    // (secretKeyRef/configMapKeyRef) is a *reference* by name, not a value —
+    // it is left intact. A line-level OutputRedactor cannot catch a structured
+    // JSON `"value":"…"` field, so the scrub is structural.
+    scrub_pod_secrets(&mut obj);
+
+    // Human summary of the load-bearing fields (the rest is in --json).
+    let phase = obj
+        .pointer("/status/phase")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let node = obj
+        .pointer("/spec/nodeName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unscheduled>");
+    let pod_ip = obj
+        .pointer("/status/podIP")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let mut data_lines = vec![
+        format!("pod:    {pod}"),
+        format!("phase:  {phase}"),
+        format!("node:   {node}"),
+        format!("podIP:  {pod_ip}"),
+    ];
+    if let Some(containers) = obj.pointer("/spec/containers").and_then(|v| v.as_array()) {
+        for c in containers {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let image = c.get("image").and_then(|v| v.as_str()).unwrap_or("?");
+            data_lines.push(format!("  container {name}: {image}"));
+        }
+    }
+    if let Some(conds) = obj.pointer("/status/conditions").and_then(|v| v.as_array()) {
+        for cd in conds {
+            let t = cd.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let s = cd.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            data_lines.push(format!("  condition {t}={s}"));
+        }
+    }
+
+    let summary = format!("describe {ns}/{pod} (phase {phase}, node {node})");
+    let doc = OutputDoc::new(summary, serde_json::json!({ "pod": obj }))
+        .with_meta("selector", args.selector.clone())
+        .with_meta("runtime", "k8s".to_string())
+        .with_quiet(args.format.quiet);
+    crate::format::render::render_doc(&doc, &fmt, &data_lines, args.format.select_spec())
+}
+
+/// Structurally scrub the two plaintext-secret carriers out of a raw
+/// `kubectl get pod -o json` object before it is echoed into the envelope:
+///
+/// 1. `spec.{containers,initContainers,ephemeralContainers}[].env[].value` —
+///    the inline literal form of an env var. Replaced with
+///    [`crate::redact::REDACTED`]. The `valueFrom` reference form (secretKeyRef
+///    / configMapKeyRef) names a source, carries no value, and is left intact.
+/// 2. `metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]`
+///    — a verbatim copy of the last applied manifest, which re-embeds the same
+///    inline env values (and anything else the operator applied). Dropped whole.
+fn scrub_pod_secrets(obj: &mut serde_json::Value) {
+    for field in ["containers", "initContainers", "ephemeralContainers"] {
+        if let Some(containers) = obj
+            .pointer_mut(&format!("/spec/{field}"))
+            .and_then(|v| v.as_array_mut())
+        {
+            for c in containers {
+                if let Some(env) = c.get_mut("env").and_then(|v| v.as_array_mut()) {
+                    for e in env {
+                        // Only the inline `value` literal leaks; `valueFrom` is
+                        // a by-name reference and stays.
+                        if let Some(v) = e.get_mut("value") {
+                            if v.is_string() {
+                                *v = serde_json::Value::String(crate::redact::REDACTED.to_string());
+                            }
+                        }
+                    }
+                }
+                // `command`/`args` tokens can carry an inline secret
+                // (`--db-password=…`, a connection URL with creds, a PEM). Run
+                // each token through the audit redactor — it masks the known
+                // secret shapes while leaving ordinary flags/paths readable, so
+                // the diagnostic value survives. (A wholly-unstructured bare
+                // secret token is subject to the same pattern-detection limits
+                // as every other inspect output surface — not a describe gap.)
+                for key in ["command", "args"] {
+                    if let Some(arr) = c.get_mut(key).and_then(|v| v.as_array_mut()) {
+                        for tok in arr {
+                            if let Some(s) = tok.as_str() {
+                                *tok = serde_json::Value::String(scrub_arg_token(s));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ann) = obj
+        .pointer_mut("/metadata/annotations")
+        .and_then(|v| v.as_object_mut())
+    {
+        ann.remove("kubectl.kubernetes.io/last-applied-configuration");
+    }
+}
+
+/// Mask a secret carried in a `command`/`args` token. Two shapes:
+/// 1. the audit-redactor patterns (PEM, credential-in-URL, known tokens);
+/// 2. a `--flag=value` (or `flag=value`) whose flag name reads as a secret
+///    (`password`/`secret`/`token`/`key`/`credential`/…) — the common
+///    `--db-password=…` carrier the pattern redactor does not cover.
+///
+/// A wholly-unstructured bare secret token (e.g. a positional password with no
+/// flag) is subject to the same pattern-detection limit as every other inspect
+/// output surface — not a describe-specific gap.
+fn scrub_arg_token(tok: &str) -> String {
+    let base = crate::redact::redact_for_audit(tok).into_owned();
+    if let Some(eq) = base.find('=') {
+        let flag = &base[..eq];
+        let low = flag.to_ascii_lowercase();
+        const SECRET_HINTS: [&str; 9] = [
+            "password",
+            "passwd",
+            "pwd",
+            "secret",
+            "token",
+            "apikey",
+            "api-key",
+            "api_key",
+            "credential",
+        ];
+        // A bare `key=` (not `--key=`) also matches — the flag prefix check
+        // stays permissive because env-style `FOO_TOKEN=...` args are common.
+        if SECRET_HINTS.iter().any(|k| low.contains(k)) {
+            return format!("{flag}={}", crate::redact::REDACTED);
+        }
+    }
+    base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_pod_secrets;
+    use serde_json::json;
+
+    #[test]
+    fn k11_scrub_masks_inline_env_value_keeps_valuefrom() {
+        let mut obj = json!({
+            "spec": { "containers": [ { "name": "app", "env": [
+                { "name": "DB_PASSWORD", "value": "s3cr3t" },
+                { "name": "API_KEY", "valueFrom": { "secretKeyRef": { "name": "api", "key": "k" } } }
+            ] } ] }
+        });
+        scrub_pod_secrets(&mut obj);
+        let env = &obj["spec"]["containers"][0]["env"];
+        assert_eq!(
+            env[0]["value"], "<redacted>",
+            "inline env value must be masked"
+        );
+        assert_eq!(
+            env[0]["name"], "DB_PASSWORD",
+            "the name stays for diagnostics"
+        );
+        assert!(
+            env[1]["valueFrom"]["secretKeyRef"]["name"] == "api",
+            "valueFrom is a by-name reference, not a value — left intact"
+        );
+        assert!(env[1].get("value").is_none());
+    }
+
+    #[test]
+    fn k11_scrub_masks_inline_secret_in_command_args() {
+        let mut obj = json!({
+            "spec": { "containers": [ {
+                "name": "app",
+                "command": ["/bin/server"],
+                "args": ["--port=8080", "--db-password=hunter2"]
+            } ] }
+        });
+        scrub_pod_secrets(&mut obj);
+        let args = &obj["spec"]["containers"][0]["args"];
+        assert_eq!(args[0], "--port=8080", "non-secret flag stays readable");
+        assert!(
+            args[1].as_str().unwrap() != "--db-password=hunter2",
+            "the inline password arg must be masked, got {}",
+            args[1]
+        );
+        // the command (no secret) is untouched
+        assert_eq!(obj["spec"]["containers"][0]["command"][0], "/bin/server");
+    }
+
+    #[test]
+    fn k11_scrub_masks_init_and_ephemeral_containers() {
+        let mut obj = json!({
+            "spec": {
+                "initContainers": [ { "name": "i", "env": [ { "name": "S", "value": "x" } ] } ],
+                "ephemeralContainers": [ { "name": "e", "env": [ { "name": "S", "value": "y" } ] } ]
+            }
+        });
+        scrub_pod_secrets(&mut obj);
+        assert_eq!(
+            obj["spec"]["initContainers"][0]["env"][0]["value"],
+            "<redacted>"
+        );
+        assert_eq!(
+            obj["spec"]["ephemeralContainers"][0]["env"][0]["value"],
+            "<redacted>"
+        );
+    }
+
+    #[test]
+    fn k11_scrub_drops_last_applied_configuration_annotation() {
+        let mut obj = json!({
+            "metadata": { "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": "{\"env\":[{\"value\":\"leak\"}]}",
+                "keep-me": "ok"
+            } }
+        });
+        scrub_pod_secrets(&mut obj);
+        let ann = &obj["metadata"]["annotations"];
+        assert!(
+            ann.get("kubectl.kubernetes.io/last-applied-configuration")
+                .is_none(),
+            "the last-applied annotation re-embeds env values — must be dropped"
+        );
+        assert_eq!(
+            ann["keep-me"], "ok",
+            "other annotations are diagnostics, kept"
+        );
+    }
+
+    #[test]
+    fn k11_scrub_is_noop_on_pod_without_env_or_annotations() {
+        let mut obj = json!({ "spec": { "containers": [ { "name": "app", "image": "nginx" } ] } });
+        let before = obj.clone();
+        scrub_pod_secrets(&mut obj);
+        assert_eq!(obj, before, "no env / no annotations → object unchanged");
+    }
+}

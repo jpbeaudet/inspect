@@ -175,10 +175,10 @@ fn output_formats_pinned() {
 fn jq_pipeline_from_acceptance_script_works() {
     // Plan §11 step 5: the acceptance demo runs this exact predicate.
     // Topic count: 14 through v0.1.2 + 1 for F6's `compose` + 1 for
-    // F19's `select` (v0.1.3) = 16.
+    // F19's `select` (v0.1.3) + 1 for K24's `kubernetes` (v0.1.4) = 17.
     let v = run(&["help", "--json"]);
     assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["topics"].as_array().unwrap().len(), 16);
+    assert_eq!(v["topics"].as_array().unwrap().len(), 17);
     assert!(v["commands"].as_object().unwrap().len() >= 30);
 }
 

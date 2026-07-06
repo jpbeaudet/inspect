@@ -50,6 +50,31 @@ pub fn servers_toml() -> PathBuf {
     inspect_home().join("servers.toml")
 }
 
+/// Render a path for user-facing success / hint / NEXT text. Collapses a
+/// `$HOME/...` prefix back to `~/...` for readability, but **only** when the
+/// path genuinely lives under `$HOME`. Any other location — most importantly
+/// an `INSPECT_HOME` override under `/tmp` or a CI sandbox — is shown as its
+/// real absolute path.
+///
+/// This is the anti-mindtrap contract: a message must never
+/// name `~/.inspect/...` when the tool actually wrote somewhere else, or an
+/// agent that follows the reported path finds nothing there. With
+/// `INSPECT_HOME` unset the output is byte-identical to the old hardcoded
+/// `~/.inspect/...` strings.
+pub fn display_path(path: &Path) -> String {
+    if let Some(home) = home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// Display form of the resolved `servers.toml` path for user-facing text.
+pub fn servers_toml_display() -> String {
+    display_path(&servers_toml())
+}
+
 pub fn aliases_toml() -> PathBuf {
     inspect_home().join("aliases.toml")
 }

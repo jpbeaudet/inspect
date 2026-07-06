@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::exec::runtime::{DockerRuntime, Runtime};
 use crate::ssh::exec::RunOpts;
 use crate::ssh::options::SshTarget;
 use crate::verbs::duration::parse_duration;
@@ -336,11 +337,10 @@ fn sql_returns(
         Some(o) if !o.trim().is_empty() => format!("psql {} -tAc {}", o, shquote(sql)),
         _ => format!("psql -tAc {}", shquote(sql)),
     };
-    let cmd = format!(
-        "docker exec {} sh -c {}",
-        shquote(container),
-        shquote(&psql)
-    );
+    // Built through the runtime executor seam. Docker today;
+    // byte-identical to the prior inline `docker exec … sh -c …`. This is
+    // a read-only diagnostic probe, so it uses the read-exec builder.
+    let cmd = DockerRuntime.build_read_exec(container, &psql);
     let out = runner.run(
         &ns,
         &target,
