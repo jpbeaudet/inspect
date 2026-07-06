@@ -323,22 +323,30 @@ The actual `--select` flag implementation is a v0.1.5 backlog item; this entry r
   not conflate** the prefixes — they live in different sections of the
   backlog and ship in different orders. Test names use the lowercase
   prefix (`f14_*`, `l7_*`, `k1_*`).
-- v0.1.3 is **OPEN, FROZEN** — final scope is the 25 items in
-  `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md`. Don't expand mid-implementation;
-  surface scope creep as a question to the user.
-- v0.1.4 = Kubernetes only. v0.1.5 = stabilization sweep. v0.2.0 =
-  contract freeze. Anything docker/compose/SSH that doesn't ship in
-  v0.1.3 will not be touched again until v0.1.5+.
+- **v0.1.4 is SHIPPED** — the Kubernetes runtime medium (23 of the 25
+  K-items; K22 cross-medium `search` + K23 bundle seam deferred to the
+  v0.1.5 usage-validated pool). Closed scope + design in
+  `archives/v0.1.4/`; the exit-gate deep audit (0-Critical/0-High) is
+  `docs/audits/k8s-medium-deep-audit-2026-07-06.md`.
+- **v0.1.5 is the next release — the OPEN one.** A stabilization /
+  dogfooding sweep before the v0.2.0 contract freeze: CLI-surface audit,
+  config + JSON-schema freeze, help audit, dead-code + dependency audit,
+  security audit. The deferred **usage-validated pool** (K22 `search`,
+  K23 bundle seam) builds here *only if* real devops dogfooding names the
+  feature as needed. No speculative features. v0.2.0 = contract freeze.
+- Don't expand a release mid-implementation; surface scope creep as a
+  question to the user.
 
-## Kubernetes medium (v0.1.4)
+## Kubernetes medium (shipped v0.1.4)
 
-v0.1.4 introduces the **Kubernetes runtime medium** — purely additive;
-`type = "docker"` (default) users see zero change. The design lives in
-`INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md` + `INSPECT_v0.1.4_SURFACE_MAP.md`,
-validated by the research dossiers in `INSPECT_v0.1.4_RESEARCH/`
-(kubectl/k9s/stern/kubectx/popeye/lens + the P1–P8 practitioner
-pain-hunt) and consolidated in `INSPECT_v0.1.4_RESEARCH_SYNTHESIS.md`.
-The load-bearing invariants a future agent must not violate:
+v0.1.4 shipped the **Kubernetes runtime medium** — purely additive;
+`type = "docker"` (default) users see zero change. The design +
+research + smoke record are archived under `archives/v0.1.4/`
+(`INSPECT_v0.1.4_IMPLEMENTATION_PLAN.md` + `INSPECT_v0.1.4_SURFACE_MAP.md`,
+the `INSPECT_v0.1.4_RESEARCH/` dossiers, `..._RESEARCH_SYNTHESIS.md`,
+`SMOKE_v0.1.4.md`); the exit-gate deep audit is
+`docs/audits/k8s-medium-deep-audit-2026-07-06.md`. The load-bearing
+invariants a future agent must not violate remain in force:
 
 - **Runtime axis ≠ `Medium` axis.** `Medium` (`src/exec/medium.rs`) is
   the `source=` **locator** parser (logs / file / dir / …) and is
@@ -425,10 +433,12 @@ implementation, or partial work. **Verify before assuming**:
 
 - Source: `src/` (verbs in `src/verbs/`, write verbs in
   `src/verbs/write/`, editorial help in `src/help/content/`)
-- Tests: `tests/phase_f_v013.rs` for v0.1.3 work; `tests/phase_*`
-  for older phases; in-tree unit tests next to the code.
+- Tests: `tests/phase_k_v014.rs` for v0.1.4 k8s work;
+  `tests/phase_f_v013.rs` for v0.1.3 work; `tests/phase_*` for older
+  phases; in-tree unit tests next to the code.
 - Docs: `docs/MANUAL.md` (operator), `docs/RUNBOOK.md` (release
-  + maintenance), `archives/v0.1.3/INSPECT_v0.1.3_BACKLOG.md` (closed scope).
+  + maintenance), `archives/v0.1.4/` + `archives/v0.1.3/` (closed-scope
+  planning + smoke + audit records), `docs/audits/` (deep audits).
 - Audit log path: `~/.inspect/audit/<YYYY-MM>-<user>.jsonl`.
 - Profile / config: `~/.inspect/servers.toml` (mode 0600).
 
