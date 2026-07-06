@@ -32,6 +32,16 @@ pub fn run(args: ExecArgs) -> Result<ExitKind> {
     }
     let user_cmd = args.cmd.join(" ");
 
+    // K19 (v0.1.4): a k8s namespace runs the writing command via `kubectl
+    // exec <pod> -- <cmd>` under the --apply gate, audited. Branch before SSH.
+    if let Some(ns_name) = args.selector.split('/').next() {
+        if let Ok(resolved) = crate::config::resolver::resolve(ns_name) {
+            if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+                return exec_k8s(&args, ns_name, &resolved.config);
+            }
+        }
+    }
+
     let (runner, nses, targets) = plan(&args.selector)?;
     let steps: Vec<_> = iter_steps(&nses, &targets).collect();
     if steps.is_empty() {
@@ -502,4 +512,86 @@ mod tests {
         assert!(!looks_like_no_shell("permission denied"));
         assert!(!looks_like_no_shell("container not found"));
     }
+}
+
+/// K19 (v0.1.4): `inspect exec <k8s-ns>/<pod> --apply -- <cmd>` — a WRITING
+/// in-pod command via `kubectl exec` under the --apply gate, audited. Dry-run
+/// by default with the K5 resolved-target echo. In-pod fs mutation is
+/// ephemeral (does not survive a restart) and non-dispatchable, so the F11
+/// revert is `unsupported` with a manual-inverse note. Output redacted;
+/// distroless/no-shell -> no_shell_in_container (exit 16, WA-4).
+fn exec_k8s(
+    args: &crate::cli::ExecArgs,
+    ns: &str,
+    cfg: &crate::config::namespace::NamespaceConfig,
+) -> Result<ExitKind> {
+    let pod = args.selector.split_once('/').map(|(_, r)| r.split(':').next().unwrap_or("")).unwrap_or("");
+    if pod.is_empty() {
+        crate::error::emit(format!("exec: specify a pod — `inspect exec {ns}/<pod> --apply -- <cmd>`"));
+        return Ok(ExitKind::Error);
+    }
+    let context = cfg.context.as_deref().unwrap_or("<none>");
+    let k8s_ns = cfg.k8s_namespace.as_deref().unwrap_or("default");
+    let cmd_str = args.cmd.join(" ");
+    let target_line =
+        format!("pod '{pod}' in namespace '{k8s_ns}' on context '{context}'");
+
+    // In-pod exec has no synthesisable inverse (ephemeral) — mirror the docker
+    // exec contract: --apply requires an explicit --no-revert acknowledgement.
+    if args.apply && !args.no_revert {
+        crate::error::emit(
+            "`inspect exec --apply` on a pod requires `--no-revert` — an in-pod command \
+             has no captured inverse (the pod filesystem is ephemeral). For structured, \
+             revertible changes edit the ConfigMap/Secret and `inspect restart <deploy>`.",
+        );
+        return Ok(ExitKind::Error);
+    }
+
+    let gate = SafetyGate::new(args.apply, args.yes, args.yes_all);
+    if !gate.should_apply() {
+        let mut r = crate::verbs::output::Renderer::new();
+        r.summary(format!("DRY RUN. Would exec in {target_line}"));
+        r.data_line(format!("command: kubectl exec {pod} -- {cmd_str}"));
+        r.data_line("revert:  unsupported (in-pod fs mutation is ephemeral)".to_string());
+        r.next("Re-run with --apply to execute".to_string());
+        r.print();
+        return Ok(ExitKind::Success);
+    }
+    // `exec` payload is opaque user shell — the tighter interlock.
+    if let ConfirmResult::Aborted(why) =
+        gate.confirm(Confirm::LargeFanout, 1, &format!("Exec `{cmd_str}` in {target_line}?"))
+    {
+        eprintln!("aborted: {why}");
+        return Ok(ExitKind::Error);
+    }
+
+    let argv: Vec<&str> = args.cmd.iter().map(|s| s.as_str()).collect();
+    let res = crate::exec::kubectl::exec_in_pod(cfg, pod, None, &argv)?;
+
+    let mut entry = AuditEntry::new("exec", &format!("{ns}/{pod}"));
+    entry.args = crate::redact::redact_for_audit(&cmd_str).into_owned();
+    entry.context = Some(context.to_string());
+    entry.k8s_namespace = Some(k8s_ns.to_string());
+    entry.revert = Some(Revert::unsupported(format!(
+        "in-pod exec has no captured inverse (ephemeral) — manually undo inside pod '{pod}' if needed"
+    )));
+    if let Some(f) = &res.failure {
+        entry.exit = f.exit_code() as i32;
+        entry.applied = Some(false);
+        AuditStore::open()?.append(&entry)?;
+        crate::tee_eprintln!("exec: [{}] {}", f.failure_class(), f.hint(""));
+        return Ok(ExitKind::Inner(f.exit_code()));
+    }
+    entry.exit = 0;
+    entry.applied = Some(true);
+    AuditStore::open()?.append(&entry)?;
+    crate::verbs::cache::invalidate(ns);
+
+    let redactor = crate::redact::OutputRedactor::new(args.show_secrets, args.redact_all);
+    for line in res.stdout.lines() {
+        if let Some(m) = redactor.mask_line(line) {
+            println!("{m}");
+        }
+    }
+    Ok(ExitKind::Success)
 }
