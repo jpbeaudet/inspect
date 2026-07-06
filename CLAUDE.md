@@ -343,14 +343,32 @@ The load-bearing invariants a future agent must not violate:
 - **Runtime axis ≠ `Medium` axis.** `Medium` (`src/exec/medium.rs`) is
   the `source=` **locator** parser (logs / file / dir / …) and is
   **unchanged**. Docker-vs-k8s is a new orthogonal **runtime** axis
-  selected by the namespace `type`, behind a `Runtime` trait
-  (`DockerRuntime` refactored behind it with **zero** behavior change;
-  the docker test suite is the additive-purity regression gate). Do not
-  conflate the two axes.
+  selected by the namespace `type`. Do not conflate the two axes.
+- **How the runtime axis actually dispatches (corrected 2026-07-06, exit-gate
+  audit H5).** Each verb's `run()` branches on
+  `resolved.config.runtime_kind()`: a `RuntimeKind::K8s` namespace routes to
+  the verb's `*_k8s()` path, which calls the shared **kubectl helper family**
+  in `src/exec/kubectl.rs` (`kubectl_base` / `exec_base` / `exec_in_pod` /
+  `classify_kubectl_failure` / `revert_kubectl_prefix`, each taking
+  `&NamespaceConfig`); the docker path is unchanged. This per-verb
+  `runtime_kind()` fork + kubectl-helper module **is** the runtime seam. The
+  `Runtime` trait (`src/exec/runtime.rs`) is **not** the dispatch seam: it is
+  the byte-parity **extraction harness** for the docker command-string builders
+  (`DockerRuntime`, called concretely at a few sites — `discovery/drift.rs`,
+  `bundle/exec.rs`, `bundle/checks.rs` — and the k1 parity tests). Earlier
+  drafts of this file claimed the trait carried dispatch and made a `kube-rs`
+  swap "mechanical"; that was **aspirational and never realized** — the audit
+  confirmed `Box<dyn Runtime>` is never used for dispatch and `K8sRuntime` is
+  test-only. The claim is corrected here rather than the code (Option B, JP
+  2026-07-06): the per-verb fork is a sound design for two runtimes with
+  heterogeneous per-verb behavior; forcing a premature trait generalization
+  would be its own overfit (Rule 8).
 - **Backend = `kubectl` shell-out for v0.1.4** (Dependency Policy clean —
   no new crate; probe `kubectl` on PATH exactly like `docker`). A future
-  `kube-rs` swap is an **explicit ADR/decision**, never a silent add; the
-  `Runtime` trait keeps the swap mechanical.
+  `kube-rs` swap OR a trait-as-seam refactor is an **explicit ADR/decision**,
+  never a silent add; if it lands it would promote the per-verb fork into a
+  `Runtime` method surface and revive the currently-dormant `K8sRuntime`
+  (deferred to v0.1.5+, JP 2026-07-06 — the dormant impl is the seed).
 - **Selector stays 2-segment.** `<inspect-ns>/<workload>`; the kubeconfig
   **context** + k8s **namespace** live in config (like the SSH host does
   for docker), with a kubectl-parity `-n`/`--namespace` + `-A` override.

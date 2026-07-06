@@ -67,7 +67,7 @@ yes/no, not a redesign.
 | Q | Decision | Recommendation (from research) | Gates items |
 |---|---|---|---|
 | Q1 | Selector grammar | **2-seg `<inspect-ns>/<workload>` + `-n`/`-A`**; context+ns in config; pin `--context` always (w1-D9, w2-D5, w3-P1) | K1,K2,K5,K7,K8 |
-| Q2 | Backend | **kubectl shell-out**; Runtime trait keeps kube-rs swap mechanical (w1-D7, w3-D11) | K1,K3,K4 |
+| Q2 | Backend | **kubectl shell-out** (w1-D7, w3-D11). ⚠️ *Corrected 2026-07-06 (exit-gate audit H5): the k8s backend landed as the `src/exec/kubectl.rs` helper family + a per-verb `runtime_kind()` branch, NOT via the `Runtime` trait — the trait carries the docker builders only, `K8sRuntime` stayed dormant/test-only. The "trait keeps the kube-rs swap mechanical" claim was aspirational and is corrected in CLAUDE.md §Kubernetes-medium; a trait-as-seam refactor is deferred to v0.1.5+ (JP 2026-07-06, Option B).* | K1,K3,K4 |
 | Q3 | Cross-medium bundles | **Build the seam in v0.1.4; mixed-composition v0.2.0** (w3-D9) | K23 |
 | Q4 | Write set | **scale + rollout-restart + delete-pod + exec --apply**, `rollout undo` as first-class verb, delete-pod/scale-to-0 **outage guard** (w1-D10, P4) | K15–K19 |
 | Q5 | Resource breadth | **pods/deploy/svc/events/top + `describe` for common kinds; `search` covers the rest; secrets always redacted** | K10–K14 |

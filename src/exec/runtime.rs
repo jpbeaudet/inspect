@@ -6,15 +6,22 @@
 //! logs|exec|restart|…` inline. There was no seam at which a different
 //! runtime (kubernetes via `kubectl`) could be swapped in.
 //!
-//! This module introduces that seam. [`Runtime`] abstracts the
-//! runtime-specific command-building + inventory concerns the surface
-//! map §2 enumerates, behind an object-safe trait with two
-//! implementations. K1 lands the byte-clean builders wired this item
-//! (`inventory_cmd`, `build_read_exec`, `build_write_exec`,
-//! `build_lifecycle`); the methods needing later-wave context grow the
-//! trait with their consuming verb (the `logs` builder in K8, the k8s
-//! stderr→`failure_class` classifier in K4, the `kind()` discriminator
-//! + `resolve_target` in K2).
+//! This module introduces that seam for the **docker** command-string
+//! builders. [`Runtime`] abstracts the runtime-specific command-building +
+//! inventory concerns the surface map §2 enumerates, behind an object-safe
+//! trait. K1 landed the byte-clean docker builders (`inventory_cmd`,
+//! `build_read_exec`, `build_write_exec`, `build_lifecycle`), used concretely
+//! via `DockerRuntime` at a few sites.
+//!
+//! **What actually became the k8s seam (corrected 2026-07-06, exit-gate audit
+//! H5):** the later-wave k8s concerns did NOT grow this trait. The k8s
+//! stderr→`failure_class` classifier (K4), the `logs`/exec builders (K8/K9),
+//! and per-verb dispatch all landed as the free-function family in
+//! [`crate::exec::kubectl`] + a per-verb `runtime_kind()` branch. The
+//! `runtime_kind()` discriminator lives on [`crate::config::namespace::
+//! NamespaceConfig`] (K2), not as a trait method. This trait carries the
+//! docker builders; it is not the k8s dispatch path. See the [`K8sRuntime`]
+//! note below.
 //!
 //! - [`DockerRuntime`] — reproduces the **exact** command strings the
 //!   docker verbs already build today. It is a behavior-preserving
@@ -23,14 +30,23 @@
 //!   acceptance tests, which pin that equality). Introducing it changes
 //!   no docker behavior — the existing docker test suite is the
 //!   regression gate.
-//! - [`K8sRuntime`] — the kubernetes runtime, backed by `kubectl`
-//!   shell-out (Q2). K1 lands the command-assembly skeleton + trait
-//!   wiring; the individual k8s verbs land fully in later K-items
-//!   (discovery/read in Wave B, native reads in Wave C, writes in Wave
-//!   D). No user path reaches `K8sRuntime` in K1: runtime selection
-//!   defaults to docker and the namespace `type = "k8s"` field that
-//!   would select it is not introduced until K2. `K8sRuntime` is
-//!   exercised only by unit tests here.
+//! - [`K8sRuntime`] — a **dormant** command-string builder for the
+//!   kubernetes runtime, exercised only by the `k1_*` parity unit tests.
+//!   **It is NOT the live k8s backend** (corrected 2026-07-06, exit-gate
+//!   audit H5). K1 landed this as the seed of a trait-carried k8s runtime,
+//!   but Waves B–D wired the actual k8s verbs to the shared kubectl helper
+//!   family in [`crate::exec::kubectl`] (`kubectl_base` / `exec_base` /
+//!   `exec_in_pod` / `classify_kubectl_failure` / `revert_kubectl_prefix`),
+//!   dispatched by a per-verb `runtime_kind()` branch — NOT through
+//!   `Box<dyn Runtime>`. So `K8sRuntime` never went live: no real path
+//!   constructs it, and `runtime_for(RuntimeKind::K8s)` is called only in
+//!   tests. It is retained as the **explicitly deferred seed** (v0.1.5+, JP
+//!   2026-07-06) for a future trait-as-seam refactor or a `kube-rs` swap; if
+//!   that decision lands, the per-verb fork promotes into `Runtime` methods
+//!   and this impl becomes live. Until then it is dormant-by-design, not a
+//!   half-wired verb. **When adding a k8s verb, wire it to the
+//!   `crate::exec::kubectl` helpers + a `runtime_kind()` branch — do NOT add
+//!   a method here expecting dispatch to reach it.**
 //!
 //! **This is not the transport layer.** [`crate::verbs::runtime::
 //! RemoteRunner`] remains the transport abstraction (how a command
