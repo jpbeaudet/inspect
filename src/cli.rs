@@ -1589,6 +1589,9 @@ pub enum Command {
     /// Dry-run by default; `--apply` captures the prior replica count so the
     /// revert scales back. `--replicas 0` stops the workload.
     Scale(ScaleArgs),
+    /// (k8s, K18 v0.1.4) Delete a pod (`kubectl delete pod`). Narrow: pods
+    /// only. The controller recreates it (deletion is not undoable).
+    Delete(DeleteArgs),
     /// Stop container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Stop(LifecycleArgs),
@@ -3007,6 +3010,27 @@ pub struct ScaleArgs {
     /// Print the captured inverse before applying.
     #[arg(long)]
     pub revert_preview: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+/// K18 (v0.1.4): `inspect delete <k8s-ns>/<pod>` — narrow pod deletion.
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// Selector: `<k8s-ns>/<pod>` (pods only; not controllers).
+    pub selector: String,
+    /// Actually perform the deletion. Without this flag, it is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the outage interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }
