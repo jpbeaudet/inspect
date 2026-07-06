@@ -440,16 +440,10 @@ pub fn exec_base(
     pod: &str,
     container: Option<&str>,
 ) -> Command {
-    let mut c = Command::new("kubectl");
-    if let Some(ctx) = cfg.context.as_deref() {
-        c.args(["--context", ctx]);
-    }
-    if let Some(kc) = cfg.kubeconfig.as_deref() {
-        c.args(["--kubeconfig", &expand_tilde_kc(kc)]);
-    }
-    if let Some(n) = cfg.k8s_namespace.as_deref() {
-        c.args(["-n", n]);
-    }
+    // Reuse `kubectl_base` for the context/kubeconfig/-n prefix so the
+    // blank-`k8s_namespace` filter (N3) and the K5 context pinning apply
+    // uniformly — then append the exec framing.
+    let mut c = kubectl_base(cfg);
     c.arg("exec").arg(pod);
     if let Some(cn) = container {
         c.args(["-c", cn]);

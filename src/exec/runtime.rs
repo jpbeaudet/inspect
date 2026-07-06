@@ -99,18 +99,23 @@ pub enum LifecycleAction {
     Reload,
 }
 
-/// The runtime executor seam. Object-safe (`Box<dyn Runtime>`), so
-/// selection is a runtime value, not a generic parameter.
+/// The docker command-builder seam. Object-safe (`Box<dyn Runtime>`), but
+/// used **concretely** as `DockerRuntime` at the docker call sites — NOT as a
+/// dispatch seam (corrected 2026-07-06, exit-gate audit H5/N2).
 ///
-/// K1 lands the byte-clean command builders that migrate off inline
+/// K1 landed the byte-clean command builders that migrate off inline
 /// `docker …` construction with zero behavior change: `inventory_cmd`,
-/// `build_read_exec`, `build_write_exec`, `build_lifecycle` — each
-/// wired to its real docker call site this item. The methods that need
-/// later-wave context grow the trait with their consuming verb: the
-/// `logs` builder lands in K8 (byte-exact with `verbs/logs.rs`
-/// follow/timestamps/reconnect ordering), the k8s stderr classifier in
-/// K4 (`classify_failure`), and the `kind()` discriminator +
-/// `resolve_target` in K2 (namespace `type` selection + config).
+/// `build_read_exec`, `build_write_exec`, `build_lifecycle` — each wired to
+/// its real docker call site.
+///
+/// The later-wave k8s concerns did **not** grow this trait, contrary to K1's
+/// original intent: the k8s `logs` builder (K8), the stderr→`failure_class`
+/// classifier (K4), and the `runtime_kind()` discriminator + target
+/// resolution (K2) all landed as the free-function family in
+/// [`crate::exec::kubectl`] + `NamespaceConfig::runtime_kind()` + a per-verb
+/// dispatch fork — not as trait methods. So this trait carries only the docker
+/// builders; a future trait-as-seam refactor (v0.1.5+, JP-authorized) would
+/// add the k8s methods and revive [`K8sRuntime`]. See the module doc above.
 pub trait Runtime: Send + Sync {
     /// The inventory command — the "what is running here" probe that
     /// discovery runs to populate the cached profile. Docker →

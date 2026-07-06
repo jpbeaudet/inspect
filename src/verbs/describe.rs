@@ -141,6 +141,22 @@ fn scrub_pod_secrets(obj: &mut serde_json::Value) {
                         }
                     }
                 }
+                // N1: `command`/`args` tokens can carry an inline secret
+                // (`--db-password=…`, a connection URL with creds, a PEM). Run
+                // each token through the L7 audit redactor — it masks the known
+                // secret shapes while leaving ordinary flags/paths readable, so
+                // the diagnostic value survives. (A wholly-unstructured bare
+                // secret token is subject to the same pattern-detection limits
+                // as every other inspect output surface — not a describe gap.)
+                for key in ["command", "args"] {
+                    if let Some(arr) = c.get_mut(key).and_then(|v| v.as_array_mut()) {
+                        for tok in arr {
+                            if let Some(s) = tok.as_str() {
+                                *tok = serde_json::Value::String(scrub_arg_token(s));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -150,6 +166,40 @@ fn scrub_pod_secrets(obj: &mut serde_json::Value) {
     {
         ann.remove("kubectl.kubernetes.io/last-applied-configuration");
     }
+}
+
+/// Mask a secret carried in a `command`/`args` token (N1). Two shapes:
+/// 1. the L7 audit-redactor patterns (PEM, credential-in-URL, known tokens);
+/// 2. a `--flag=value` (or `flag=value`) whose flag name reads as a secret
+///    (`password`/`secret`/`token`/`key`/`credential`/…) — the common
+///    `--db-password=…` carrier the pattern redactor does not cover.
+///
+/// A wholly-unstructured bare secret token (e.g. a positional password with no
+/// flag) is subject to the same pattern-detection limit as every other inspect
+/// output surface — not a describe-specific gap.
+fn scrub_arg_token(tok: &str) -> String {
+    let base = crate::redact::redact_for_audit(tok).into_owned();
+    if let Some(eq) = base.find('=') {
+        let flag = &base[..eq];
+        let low = flag.to_ascii_lowercase();
+        const SECRET_HINTS: [&str; 9] = [
+            "password",
+            "passwd",
+            "pwd",
+            "secret",
+            "token",
+            "apikey",
+            "api-key",
+            "api_key",
+            "credential",
+        ];
+        // A bare `key=` (not `--key=`) also matches — the flag prefix check
+        // stays permissive because env-style `FOO_TOKEN=...` args are common.
+        if SECRET_HINTS.iter().any(|k| low.contains(k)) {
+            return format!("{flag}={}", crate::redact::REDACTED);
+        }
+    }
+    base
 }
 
 #[cfg(test)]
@@ -180,6 +230,27 @@ mod tests {
             "valueFrom is a by-name reference, not a value — left intact"
         );
         assert!(env[1].get("value").is_none());
+    }
+
+    #[test]
+    fn k11_scrub_masks_inline_secret_in_command_args() {
+        let mut obj = json!({
+            "spec": { "containers": [ {
+                "name": "app",
+                "command": ["/bin/server"],
+                "args": ["--port=8080", "--db-password=hunter2"]
+            } ] }
+        });
+        scrub_pod_secrets(&mut obj);
+        let args = &obj["spec"]["containers"][0]["args"];
+        assert_eq!(args[0], "--port=8080", "non-secret flag stays readable");
+        assert!(
+            args[1].as_str().unwrap() != "--db-password=hunter2",
+            "the inline password arg must be masked, got {}",
+            args[1]
+        );
+        // the command (no secret) is untouched
+        assert_eq!(obj["spec"]["containers"][0]["command"][0], "/bin/server");
     }
 
     #[test]

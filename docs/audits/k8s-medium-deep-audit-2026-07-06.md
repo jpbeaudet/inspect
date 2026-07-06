@@ -63,7 +63,20 @@
 7. **H5 (C1):** blocked on JP decision (below); the CLAUDE.md invariant text is corrected in the same change whichever way JP rules.
 
 ### Sovereignty statement
-**BROKEN on this surface by H1**: `inspect describe <ns>/<pod> --json` emits inline pod-env secret literals + the `last-applied-configuration` annotation in plaintext across the stdout boundary. Once H1 lands, the full statement holds: *"no operator secret/credential/kubeconfig content crosses the audit/stdout/stderr/cache boundary in plaintext on the k8s surface."*
+**BROKEN on this surface by H1** (first pass): `inspect describe <ns>/<pod> --json` emitted inline pod-env secret literals + the `last-applied-configuration` annotation in plaintext. **After H1 + the N1 re-audit follow-up, the statement holds** (precise form): *the k8s describe path scrubs every structured inline-secret carrier before rendering — `env[].value` literals, the `last-applied-configuration` annotation, and secret-shaped `command`/`args` tokens (`--*password*=`/PEM/credential-in-URL) — so no operator secret in a canonical carrier crosses the stdout boundary in plaintext.* A wholly-unstructured bare secret token (a positional password with no flag) is subject to the same L7 pattern-detection limit as every other inspect output surface — inherent to pattern-based redaction, not a describe-specific gap. Kubeconfig paths/context are config identifiers (not credentials) and never touch argv/audit/cache; write-verb reverts carry no secrets.
+
+---
+
+## Re-audit (2026-07-06, independent adversarial pass)
+
+An independent agent re-verified every High + Medium against code (HEAD `5788616`) and hunted for regressions the fixes may have introduced. **Verdict: all 5 Highs CONFIRMED-FIXED in code (not just CHANGELOG); 0 Critical / 0 High — maturity bar met.** No High knocked back; no docker-path regression from R4; `effective_namespace`'s offline `config view` cannot hang; the R4 `require_k8s` propagates resolve errors identically to the inline form. It surfaced four minor follow-ups, all now closed:
+
+| ID | Sev | Finding | Resolution |
+|----|-----|---------|------------|
+| N1 | Med (S) | `describe` scrub missed `command`/`args` inline secrets → the *universal* sovereignty statement wasn't literally true | ✅ **FIXED** — `scrub_arg_token` masks secret-shaped tokens (`--*password*=`/PEM/URL-cred); sovereignty statement narrowed to the precise, honest form; test `k11_scrub_masks_inline_secret_in_command_args` |
+| N2 | Low-Med | `runtime.rs` **trait** doc-comment (:103) still promised the un-landed `classify_failure`/`kind()`/`resolve_target` trait methods — contradicting the corrected module doc in the same file (the exact claim H5 killed) | ✅ **FIXED** — trait doc rewritten to match reality (docker builders only; k8s concerns landed as free functions + per-verb fork) |
+| N3 | Low | `exec_base` didn't filter a blank `k8s_namespace` (echo≠command on a pathological `"   "` config) | ✅ **FIXED** — `exec_base` now builds on `kubectl_base` (shared blank-filter + K5 pinning; removes duplication) |
+| N4 | Low | The four write-verb capture-`get`s carried no `--request-timeout` → could hang against a slow API (some run in dry-run) | ✅ **FIXED** — `READ_REQUEST_TIMEOUT` appended to all four capture gets |
 
 ### The one escalation — H5 (C1), JP decision required
 Both fix options are consequential and neither is the coordinator's to self-authorize:

@@ -52,6 +52,7 @@ fn scale_k8s(
             &format!("deploy/{workload}"),
             "-o",
             "jsonpath={.spec.replicas}",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
         ])
         .output()?;
     let prior: Option<u32> = if cur_out.status.success() {

@@ -57,6 +57,7 @@ fn delete_k8s(
             &format!("pod/{pod}"),
             "-o",
             "jsonpath={.metadata.ownerReferences[0].kind}",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
         ])
         .output()?;
     let owner = String::from_utf8_lossy(&owner_out.stdout)

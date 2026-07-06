@@ -337,6 +337,7 @@ fn lifecycle_k8s(
             &format!("deploy/{workload}"),
             "-o",
             "jsonpath={.metadata.annotations.deployment\\.kubernetes\\.io/revision}",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
         ])
         .output()?;
     let current_rev = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
