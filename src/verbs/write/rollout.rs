@@ -140,7 +140,11 @@ fn rollout_k8s(
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let f = crate::exec::kubectl::classify_kubectl_failure(&stderr, entry.exit);
-        crate::tee_eprintln!("rollout: [{}] {}", f.failure_class(), f.hint(""));
+        crate::tee_eprintln!(
+            "rollout: [{}] {}",
+            f.failure_class(),
+            crate::exec::kubectl::deploy_write_hint(f, workload, &k8s_ns, context)
+        );
         Ok(ExitKind::Inner(f.exit_code()))
     }
 }

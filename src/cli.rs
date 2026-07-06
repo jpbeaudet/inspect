@@ -1588,9 +1588,11 @@ pub enum Command {
     /// Restart container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Restart(LifecycleArgs),
-    /// (k8s, K15 v0.1.4) Scale a workload to N replicas (`kubectl scale`).
+    /// (k8s, K15 v0.1.4) Scale a Deployment to N replicas (`kubectl scale`).
     /// Dry-run by default; `--apply` captures the prior replica count so the
-    /// revert scales back. `--replicas 0` stops the workload.
+    /// revert scales back. `--replicas 0` stops the workload. Targets
+    /// Deployments (the v0.1.4 conservative write set) — for a StatefulSet /
+    /// DaemonSet the not-found error names the kubectl escape hatch.
     Scale(ScaleArgs),
     /// (k8s, K18 v0.1.4) Delete a pod (`kubectl delete pod`). Narrow: pods
     /// only. The controller recreates it (deletion is not undoable).

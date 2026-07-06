@@ -371,6 +371,26 @@ fn kubectl_base_impl(cfg: &crate::config::namespace::NamespaceConfig, ns: Option
     c
 }
 
+/// Chained failure hint for a **Deployment-scoped** write verb (scale /
+/// rollout / restart). On `NotFound` it names the deploy-only conservative
+/// write set + the kubectl escape hatch, so a StatefulSet/DaemonSet of the
+/// same name does not fail as an opaque `not_found` (R6 — the K20 refuse-with-
+/// idiom applied to a wrong-kind target). Every other class defers to the
+/// standard [`KubectlFailure::hint`]. `delete`/`exec` target pods, not
+/// Deployments, so they keep the plain hint.
+pub fn deploy_write_hint(f: KubectlFailure, workload: &str, ns: &str, context: &str) -> String {
+    match f {
+        KubectlFailure::NotFound => format!(
+            "no Deployment '{workload}' in namespace '{ns}' on context '{context}'. \
+             inspect's k8s write verbs (scale / restart / rollout) target Deployments — \
+             the v0.1.4 conservative write set. If '{workload}' is a StatefulSet or \
+             DaemonSet, act on it with kubectl directly, e.g. \
+             `kubectl -n {ns} --context {context} scale statefulset/{workload} --replicas N`."
+        ),
+        _ => f.hint(""),
+    }
+}
+
 /// Resolve the k8s namespace a verb will ACTUALLY act in, for an honest
 /// echo / audit / confirm and for explicit `-n` pinning. Config
 /// `k8s_namespace` wins; otherwise the default namespace the pinned kubeconfig
@@ -575,6 +595,32 @@ mod tests {
         let ns = effective_namespace(&cfg);
         assert!(!ns.trim().is_empty());
         assert_ne!(ns, "   ");
+    }
+
+    // R6: a Deployment-scoped write verb turns a wrong-kind `not_found` into a
+    // chained hint that names the deploy-only conservative write set + the
+    // kubectl escape hatch, instead of an opaque "does not exist".
+    #[test]
+    fn r6_deploy_write_hint_notfound_names_scope_and_escape_hatch() {
+        let h = deploy_write_hint(KubectlFailure::NotFound, "my-sts", "prod", "z2-maker");
+        assert!(h.contains("Deployment"), "names the deploy scope: {h}");
+        assert!(
+            h.contains("StatefulSet") && h.contains("DaemonSet"),
+            "names other kinds: {h}"
+        );
+        assert!(
+            h.contains("kubectl -n prod"),
+            "gives the kubectl escape hatch: {h}"
+        );
+        assert!(h.contains("my-sts"), "names the workload: {h}");
+    }
+
+    // Non-NotFound classes defer to the standard hint (no deploy-scope noise).
+    #[test]
+    fn r6_deploy_write_hint_other_class_uses_standard_hint() {
+        let h = deploy_write_hint(KubectlFailure::RbacForbidden, "web", "prod", "z2-maker");
+        assert!(h.contains("RBAC"), "RBAC class keeps its own hint: {h}");
+        assert!(!h.contains("conservative write set"));
     }
 
     #[test]
