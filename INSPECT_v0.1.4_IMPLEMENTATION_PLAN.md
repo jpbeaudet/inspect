@@ -139,14 +139,21 @@ the real maker/hub clusters; clippy + help_contract green throughout.
 - All findings WA-1..7 resolved (WA-3/WA-4 per JP-2026-07-05).
 
 **Two remaining decisions (surfaced to JP):**
-1. **K22 `search` + K23 bundle seam** are deep integrations into SSH-coupled
-   engines (the LogQL per-medium readers; the bundle step executor +
-   preflight/postflight, all `runner.run`-over-SSH). Per research w3-D9 there
-   is **no v0.1.4 field demand** for either (single-medium pains dominate;
-   cross-medium bundle *composition* is already bounded to v0.2.0). Recommend
-   they move to **v0.1.5** (a focused design pass alongside the stabilization
-   sweep) rather than a rushed autopilot refactor — the practical k8s CLI
-   (every read + write verb, fleet, help, smoke) is complete without them.
+1. **K22 `search` + K23 bundle seam — DEFERRED to the v0.1.5 usage-validated
+   pool (JP-2026-07-06).** They are deep integrations into SSH-coupled engines
+   (the LogQL per-medium readers; the bundle step executor + preflight/
+   postflight, all `runner.run`-over-SSH). Research w3-D9 is the *hypothesis*
+   that there is no v0.1.4 field demand (single-medium pains dominate;
+   cross-medium bundle *composition* is already bounded to v0.2.0). **v0.1.5 is
+   a USAGE-FEEDBACK / dogfooding phase, not a build-list**: once v0.1.4 ships,
+   devops sub-coords USE inspect on real maker work and each reports at
+   session-end (what-went-well / what-went-bad / *the ONE feature that would
+   have helped most*). Those reports ARE the v0.1.5 backlog (like the v0.1.3
+   backlog). K22/K23 sit in that pool and get **built only if real usage names
+   search/bundle as "the one feature needed"** — evidence decides, not a
+   pre-commitment. After v0.1.5 usage shows the medium is solid → bump to 2.0 /
+   drop the experimental flag. The practical k8s CLI (every read + write verb,
+   fleet, help, smoke) ships complete in v0.1.4 without them.
 2. **WD-1 mutating round-trip** (apply + local revert) is the one test that
    requires a real maker mutation (throwaway deployment in `inspect-livetest`).
    All write DRY-RUN paths are verified; the mutating cycle is scripted in
