@@ -32,7 +32,13 @@ pub fn discover_k8s(name: &str, cfg: &NamespaceConfig, discovered_at: &str) -> R
     if let Some(ns) = cfg.k8s_namespace.as_deref() {
         cmd.args(["-n", ns]);
     }
-    cmd.args(["get", "pods", "-o", "json", "--request-timeout=10s"]);
+    cmd.args([
+        "get",
+        "pods",
+        "-o",
+        "json",
+        crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+    ]);
 
     let out = cmd
         .output()

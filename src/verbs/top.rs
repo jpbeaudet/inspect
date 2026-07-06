@@ -33,7 +33,12 @@ fn top_k8s(
     let pod = args.selector.split_once('/').map(|(_, r)| r.to_string());
 
     let mut cmd = crate::exec::kubectl::kubectl_base(cfg);
-    cmd.args(["top", "pods", "--no-headers", "--request-timeout=10s"]);
+    cmd.args([
+        "top",
+        "pods",
+        "--no-headers",
+        crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+    ]);
     if let Some(p) = pod.as_deref() {
         cmd.arg(p);
     }

@@ -39,7 +39,7 @@ fn events_k8s(
         "--sort-by=.lastTimestamp",
         "-o",
         "json",
-        "--request-timeout=10s",
+        crate::exec::kubectl::READ_REQUEST_TIMEOUT,
     ]);
     if let Some(p) = pod.as_deref() {
         cmd.args(["--field-selector", &format!("involvedObject.name={p}")]);

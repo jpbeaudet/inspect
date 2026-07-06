@@ -41,7 +41,14 @@ fn describe_k8s(
     }
 
     let out = crate::exec::kubectl::kubectl_base(cfg)
-        .args(["get", "pod", &pod, "-o", "json", "--request-timeout=10s"])
+        .args([
+            "get",
+            "pod",
+            &pod,
+            "-o",
+            "json",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+        ])
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

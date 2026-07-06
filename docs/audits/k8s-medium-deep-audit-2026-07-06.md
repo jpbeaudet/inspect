@@ -24,10 +24,10 @@
 | G2 | Surface 1 | Med | Read verbs K9–K14 (`cat/ls/grep/why/describe/events/top/…`) have no `k<n>_*` acceptance tests | Path A — fix-now (with H2) |
 | G3 | Surface 5 | Med | CHANGELOG v0.1.4 stops at K6 — ~17 shipped items undocumented | Path A — doc sweep |
 | G4 | Surface 5 | Med | Plan marks Waves C/D/E ✅ and asserts the §6 "every K-item has a passing `k<n>_*` test" gate; the tree contradicts it (Class-1 doc-ahead-of-code) | auto-resolves when H2+G2 land |
-| R2 | R + Surface 1 | Med | `exec_k8s` drops `reason` + `duration_ms` from its AuditEntry — scaffold drift vs the other 4 write verbs | Path A — fix-now |
+| R2 | R + Surface 1 | Med | `exec_k8s` drops `reason` + `duration_ms` from its AuditEntry — scaffold drift vs the other 4 write verbs | ✅ **FIXED** — exec_k8s now captures both (commit `fe5a763`) |
 | R4 | R | Med | Dual-verb k8s branch-detection copy-pasted ~15× (near byte-identical, double-resolves); 7 k8s-only verbs use the opposite swallow-vs-propagate convention → one `k8s_route()` helper | Path A — fix-now |
 | R6 | O | Med | Write verbs hardcode `deploy/`; StatefulSet/DaemonSet fail opaquely as `not_found` instead of the K20 REFUSE-with-hint idiom | Path A (refuse+hint) — expansion is JP scope |
-| O2 | O | Med | k8s read `--request-timeout=5s` is a magic literal with no named-const home | Path A — fix-now |
+| O2 | O | Med | k8s read `--request-timeout=5s` is a magic literal with no named-const home | ✅ **FIXED** — `READ_REQUEST_TIMEOUT` const in kubectl.rs; 7 read verbs + discovery use it (the `test` preflight keeps its distinct probe timeout) |
 | W1/W2/W3 | Surface 2/3 + W | Low | builder/expander duplication; RBAC sequential spawns; scattered timeout literals — all cold-path hygiene | Path B — track |
 | O3/O4 | O | Low | backlinked to K14/K7 | Path B — tracked |
 | S2 | I | Low | `Unknown` failure hint says "see raw stderr below" but stderr is swallowed — dead-end pointer, no leak | Path A — trivial |

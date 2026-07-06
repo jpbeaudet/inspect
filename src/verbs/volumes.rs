@@ -76,7 +76,13 @@ fn volumes_k8s(
 ) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
     let out = crate::exec::kubectl::kubectl_base(cfg)
-        .args(["get", "pvc", "-o", "json", "--request-timeout=10s"])
+        .args([
+            "get",
+            "pvc",
+            "-o",
+            "json",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+        ])
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

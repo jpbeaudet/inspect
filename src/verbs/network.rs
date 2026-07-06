@@ -86,7 +86,13 @@ fn network_k8s(
 ) -> Result<ExitKind> {
     let mut renderer = Renderer::new();
     let out = crate::exec::kubectl::kubectl_base(cfg)
-        .args(["get", "svc", "-o", "json", "--request-timeout=10s"])
+        .args([
+            "get",
+            "svc",
+            "-o",
+            "json",
+            crate::exec::kubectl::READ_REQUEST_TIMEOUT,
+        ])
         .output()?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

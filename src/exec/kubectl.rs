@@ -28,6 +28,13 @@ pub const KUBECTL_MIN_MAJOR: u32 = 1;
 /// See [`KUBECTL_MIN_MAJOR`].
 pub const KUBECTL_MIN_MINOR: u32 = 19;
 
+/// Wall-clock cap on a single k8s READ round-trip (`get`/`top`/`events`/
+/// `describe`/discovery). One documented home for the flag instead of the
+/// literal scattered across every read verb (O2). The `test` API-reachability
+/// preflight uses its own shorter probe timeout — a distinct concern, kept
+/// separate on purpose.
+pub const READ_REQUEST_TIMEOUT: &str = "--request-timeout=10s";
+
 /// Outcome of the local kubectl probe.
 #[derive(Debug, Clone)]
 pub struct KubectlProbe {
