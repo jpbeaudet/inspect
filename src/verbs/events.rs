@@ -14,15 +14,14 @@ use crate::error::ExitKind;
 use crate::verbs::output::OutputDoc;
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
-    let ns_name = args.selector.split('/').next().unwrap_or("");
-    let resolved = crate::config::resolver::resolve(ns_name)?;
-    if resolved.config.runtime_kind() != crate::exec::runtime::RuntimeKind::K8s {
-        crate::error::emit(
-            "events is a Kubernetes verb. For docker use `inspect logs` / `inspect why`.",
-        );
+    let Some((ns_name, cfg)) = crate::verbs::dispatch::require_k8s(
+        &args.selector,
+        "events is a Kubernetes verb. For docker use `inspect logs` / `inspect why`.",
+    )?
+    else {
         return Ok(ExitKind::Error);
-    }
-    events_k8s(&args, ns_name, &resolved.config)
+    };
+    events_k8s(&args, &ns_name, &cfg)
 }
 
 fn events_k8s(

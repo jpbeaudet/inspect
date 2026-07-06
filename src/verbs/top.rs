@@ -12,16 +12,15 @@ use crate::error::ExitKind;
 use crate::verbs::output::OutputDoc;
 
 pub fn run(args: SimpleSelectorArgs) -> Result<ExitKind> {
-    let ns_name = args.selector.split('/').next().unwrap_or("");
-    let resolved = crate::config::resolver::resolve(ns_name)?;
-    if resolved.config.runtime_kind() != crate::exec::runtime::RuntimeKind::K8s {
-        crate::error::emit(
-            "top is a Kubernetes verb (pod CPU/memory via metrics-server). For a \
-             docker namespace use `inspect status` / `inspect health`.",
-        );
+    let Some((ns_name, cfg)) = crate::verbs::dispatch::require_k8s(
+        &args.selector,
+        "top is a Kubernetes verb (pod CPU/memory via metrics-server). For a \
+         docker namespace use `inspect status` / `inspect health`.",
+    )?
+    else {
         return Ok(ExitKind::Error);
-    }
-    top_k8s(&args, ns_name, &resolved.config)
+    };
+    top_k8s(&args, &ns_name, &cfg)
 }
 
 fn top_k8s(

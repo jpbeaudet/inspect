@@ -15,15 +15,14 @@ use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::verbs::output::Renderer;
 
 pub fn run(args: ScaleArgs) -> Result<ExitKind> {
-    let ns_name = args.selector.split('/').next().unwrap_or("");
-    let resolved = crate::config::resolver::resolve(ns_name)?;
-    if resolved.config.runtime_kind() != crate::exec::runtime::RuntimeKind::K8s {
-        crate::error::emit(
-            "scale is a Kubernetes verb. For docker use `inspect restart` / compose.",
-        );
+    let Some((ns_name, cfg)) = crate::verbs::dispatch::require_k8s(
+        &args.selector,
+        "scale is a Kubernetes verb. For docker use `inspect restart` / compose.",
+    )?
+    else {
         return Ok(ExitKind::Error);
-    }
-    scale_k8s(&args, ns_name, &resolved.config)
+    };
+    scale_k8s(&args, &ns_name, &cfg)
 }
 
 fn scale_k8s(

@@ -27,6 +27,28 @@ pub enum StepError {
     Other(#[from] anyhow::Error),
 }
 
+/// Resolve `selector`'s namespace and hand back `(ns_name, config)` **iff** it
+/// is a k8s namespace; otherwise emit `refusal` and return `Ok(None)` so the
+/// caller returns the error exit. Collapses the byte-identical dispatch
+/// preamble the **k8s-only** verbs (describe / events / top / scale / rollout /
+/// delete) each copied verbatim (R4). The dual-runtime verbs (why / network /
+/// volumes / images / ports) keep their own `if let Ok(..)` fall-through to the
+/// docker path — a genuinely distinct outcome (Rule 13: collapse identical
+/// shapes, keep distinct ones distinct), so they are not routed through here.
+pub fn require_k8s(
+    selector: &str,
+    refusal: &str,
+) -> Result<Option<(String, crate::config::namespace::NamespaceConfig)>> {
+    let ns_name = selector.split('/').next().unwrap_or("");
+    let resolved = crate::config::resolver::resolve(ns_name)?;
+    if resolved.config.runtime_kind() == crate::exec::runtime::RuntimeKind::K8s {
+        Ok(Some((ns_name.to_string(), resolved.config)))
+    } else {
+        crate::error::emit(refusal);
+        Ok(None)
+    }
+}
+
 /// Per-namespace bundle.
 pub struct NsCtx {
     pub namespace: String,

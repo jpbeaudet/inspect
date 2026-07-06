@@ -16,13 +16,14 @@ use crate::safety::{AuditEntry, AuditStore, Confirm, Revert, SafetyGate};
 use crate::verbs::output::Renderer;
 
 pub fn run(args: RolloutArgs) -> Result<ExitKind> {
-    let ns_name = args.selector.split('/').next().unwrap_or("");
-    let resolved = crate::config::resolver::resolve(ns_name)?;
-    if resolved.config.runtime_kind() != crate::exec::runtime::RuntimeKind::K8s {
-        crate::error::emit("rollout is a Kubernetes verb (rollout undo).");
+    let Some((ns_name, cfg)) = crate::verbs::dispatch::require_k8s(
+        &args.selector,
+        "rollout is a Kubernetes verb (rollout undo).",
+    )?
+    else {
         return Ok(ExitKind::Error);
-    }
-    rollout_k8s(&args, ns_name, &resolved.config)
+    };
+    rollout_k8s(&args, &ns_name, &cfg)
 }
 
 fn rollout_k8s(
