@@ -154,6 +154,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Ports(args) => verbs::ports::run(args),
         Command::Search(args) => commands::search::run(args),
         Command::Restart(args) => verbs::write::lifecycle::restart(args),
+        Command::Scale(args) => verbs::write::scale::run(args),
         Command::Stop(args) => verbs::write::lifecycle::stop(args),
         Command::Start(args) => verbs::write::lifecycle::start(args),
         Command::Reload(args) => verbs::write::lifecycle::reload(args),

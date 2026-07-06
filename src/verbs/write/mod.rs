@@ -11,6 +11,7 @@ pub mod chown;
 pub mod edit;
 pub mod exec;
 pub mod lifecycle; // restart / stop / start / reload
+pub mod scale; // k8s scale (K15)
 pub mod mkdir;
 pub mod rm;
 pub mod touch;

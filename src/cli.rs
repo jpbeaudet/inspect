@@ -1585,6 +1585,10 @@ pub enum Command {
     /// Restart container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Restart(LifecycleArgs),
+    /// (k8s, K15 v0.1.4) Scale a workload to N replicas (`kubectl scale`).
+    /// Dry-run by default; `--apply` captures the prior replica count so the
+    /// revert scales back. `--replicas 0` stops the workload.
+    Scale(ScaleArgs),
     /// Stop container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Stop(LifecycleArgs),
@@ -2974,6 +2978,37 @@ pub struct LifecycleArgs {
     /// `inspect revert <new-id>` will undo, before the mutation runs.
     #[arg(long)]
     pub revert_preview: bool,
+}
+
+/// K15 (v0.1.4): `inspect scale <k8s-ns>/<workload> --replicas N`.
+#[derive(Debug, Args)]
+pub struct ScaleArgs {
+    /// Selector: `<k8s-ns>/<workload>` (a Deployment).
+    pub selector: String,
+    /// Target replica count. `0` stops the workload (with an outage guard).
+    #[arg(long, value_name = "N")]
+    pub replicas: u32,
+    /// Optimistic-concurrency guard: only scale if currently at this many
+    /// replicas (`kubectl scale --current-replicas`).
+    #[arg(long, value_name = "N")]
+    pub current_replicas: Option<u32>,
+    /// Actually perform the mutation. Without this flag, `scale` is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the large-fanout / outage interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// Print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
 }
 
 #[derive(Debug, Args)]
