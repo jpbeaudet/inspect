@@ -13,6 +13,7 @@ pub mod exec;
 pub mod lifecycle; // restart / stop / start / reload
 pub mod scale; // k8s scale (K15)
 pub mod delete; // k8s delete pod (K18)
+pub mod rollout; // k8s rollout undo (K17)
 pub mod mkdir;
 pub mod rm;
 pub mod touch;

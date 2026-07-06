@@ -1592,6 +1592,9 @@ pub enum Command {
     /// (k8s, K18 v0.1.4) Delete a pod (`kubectl delete pod`). Narrow: pods
     /// only. The controller recreates it (deletion is not undoable).
     Delete(DeleteArgs),
+    /// (k8s, K17 v0.1.4) Roll a Deployment back to a prior revision
+    /// (`kubectl rollout undo`) — the fast rollback of a bad deploy.
+    Rollout(RolloutArgs),
     /// Stop container(s).
     #[command(long_about = LONG_LIFECYCLE)]
     Stop(LifecycleArgs),
@@ -3031,6 +3034,34 @@ pub struct DeleteArgs {
     /// Free-form note recorded in the audit entry.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    #[command(flatten)]
+    pub format: crate::format::FormatArgs,
+}
+
+/// K17 (v0.1.4): `inspect rollout <k8s-ns>/<deploy>` — roll a Deployment back
+/// to its previous (or a named) revision (`kubectl rollout undo`).
+#[derive(Debug, Args)]
+pub struct RolloutArgs {
+    /// Selector: `<k8s-ns>/<workload>` (a Deployment).
+    pub selector: String,
+    /// Roll back to a specific revision (default: the previous one).
+    #[arg(long, value_name = "N")]
+    pub to_revision: Option<u32>,
+    /// Actually perform the rollback. Without this flag, it is a dry-run.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the per-verb confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Skip the interlock as well.
+    #[arg(long)]
+    pub yes_all: bool,
+    /// Free-form note recorded in the audit entry.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// Print the captured inverse before applying.
+    #[arg(long)]
+    pub revert_preview: bool,
     #[command(flatten)]
     pub format: crate::format::FormatArgs,
 }

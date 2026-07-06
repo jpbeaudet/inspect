@@ -156,6 +156,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitKind> {
         Command::Restart(args) => verbs::write::lifecycle::restart(args),
         Command::Scale(args) => verbs::write::scale::run(args),
         Command::Delete(args) => verbs::write::delete::run(args),
+        Command::Rollout(args) => verbs::write::rollout::run(args),
         Command::Stop(args) => verbs::write::lifecycle::stop(args),
         Command::Start(args) => verbs::write::lifecycle::start(args),
         Command::Reload(args) => verbs::write::lifecycle::reload(args),
