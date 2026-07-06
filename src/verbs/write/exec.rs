@@ -558,10 +558,17 @@ fn exec_k8s(
     }
 
     let argv: Vec<&str> = args.cmd.iter().map(|s| s.as_str()).collect();
+    let started = Instant::now();
     let res = crate::exec::kubectl::exec_in_pod(cfg, pod, None, &argv)?;
+    let dur = started.elapsed().as_millis() as u64;
 
     let mut entry = AuditEntry::new("exec", &format!("{ns}/{pod}"));
     entry.args = crate::redact::redact_for_audit(&cmd_str).into_owned();
+    // R2: match the other four k8s write verbs' AuditEntry scaffold — record
+    // the operator reason and the wall-clock duration (previously dropped only
+    // on the k8s exec path, a scaffold-drift inconsistency vs docker exec).
+    entry.reason = crate::safety::validate_reason(args.reason.as_deref())?;
+    entry.duration_ms = dur;
     entry.context = Some(context.to_string());
     entry.k8s_namespace = Some(k8s_ns.clone());
     entry.revert = Some(Revert::unsupported(format!(
