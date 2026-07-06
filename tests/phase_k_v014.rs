@@ -346,3 +346,197 @@ fn wa3_show_json_contract_holds_without_kubectl() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ---- K15–K19 (v0.1.4): k8s write verbs — acceptance ------------------
+//
+// The mutating verbs (scale / restart=rollout-restart / rollout undo /
+// delete pod / exec --apply). The live apply+revert round-trips run in the
+// release smoke (SMOKE_v0.1.4 P9, WD-1). These black-box tests pin the
+// cluster-independent contract: the docker-namespace REFUSAL, the
+// missing-target error, the exec `--no-revert` interlock, and the dry-run
+// resolved-target echo (H3: the REAL {context, k8s_namespace, workload}).
+// Dry-run tests that reach a verb's own `kubectl` capture call are guarded on
+// kubectl being present (they never touch a cluster — the capture fails
+// cleanly against the bogus context and the dry run still prints).
+
+fn kubectl_present() -> bool {
+    std::process::Command::new("kubectl")
+        .args(["version", "--client"])
+        .output()
+        .is_ok()
+}
+
+/// K15: `scale` refuses a docker namespace with a chained pointer — a raw
+/// runtime error must never reach the agent.
+#[test]
+fn k15_scale_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K15DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K15DOCK_USER", "u")
+        .args(["scale", "k15dock/web", "--replicas", "2"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
+
+/// K15: `scale` with no workload segment errors before any kubectl call.
+#[test]
+fn k15_scale_errors_on_missing_workload() {
+    inspect()
+        .env("INSPECT_K15NW_TYPE", "k8s")
+        .env("INSPECT_K15NW_CONTEXT", "inspect-test-ctx")
+        .args(["scale", "k15nw", "--replicas", "2"])
+        .assert()
+        .failure()
+        .stderr(contains("specify a workload"));
+}
+
+/// K15: dry-run (no `--apply`) echoes the resolved {namespace, workload,
+/// context} (H3) + the command, exits 0, and mutates nothing. The resolved
+/// namespace comes from config (`effective_namespace` short-circuits, no
+/// kubectl), so the echo is deterministic; the replica-capture `kubectl get`
+/// fails cleanly against the bogus context and the dry run still prints.
+#[test]
+fn k15_scale_dry_run_echoes_resolved_target() {
+    if !kubectl_present() {
+        eprintln!("skip k15_scale_dry_run_echoes_resolved_target: kubectl absent");
+        return;
+    }
+    inspect()
+        .env("INSPECT_K15DR_TYPE", "k8s")
+        .env("INSPECT_K15DR_CONTEXT", "inspect-test-ctx")
+        .env("INSPECT_K15DR_NAMESPACE", "inspect-livetest")
+        .args(["scale", "k15dr/web", "--replicas", "3"])
+        .assert()
+        .success()
+        .stdout(
+            contains("DRY RUN")
+                .and(contains("inspect-livetest"))
+                .and(contains("web"))
+                .and(contains("inspect-test-ctx")),
+        );
+}
+
+/// K17: `rollout` refuses a docker namespace.
+#[test]
+fn k17_rollout_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K17DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K17DOCK_USER", "u")
+        .args(["rollout", "k17dock/web"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
+
+/// K17: `rollout` with no workload errors before any kubectl call.
+#[test]
+fn k17_rollout_errors_on_missing_workload() {
+    inspect()
+        .env("INSPECT_K17NW_TYPE", "k8s")
+        .env("INSPECT_K17NW_CONTEXT", "inspect-test-ctx")
+        .args(["rollout", "k17nw"])
+        .assert()
+        .failure()
+        .stderr(contains("specify a workload"));
+}
+
+/// K18: `delete` refuses a docker namespace with a pointer to `stop`/compose.
+#[test]
+fn k18_delete_refuses_docker_namespace() {
+    inspect()
+        .env("INSPECT_K18DOCK_HOST", "h.example.internal")
+        .env("INSPECT_K18DOCK_USER", "u")
+        .args(["delete", "k18dock/some-pod"])
+        .assert()
+        .failure()
+        .stderr(contains("Kubernetes verb"));
+}
+
+/// K18: `delete` with no pod segment errors before any kubectl call.
+#[test]
+fn k18_delete_errors_on_missing_pod() {
+    inspect()
+        .env("INSPECT_K18NP_TYPE", "k8s")
+        .env("INSPECT_K18NP_CONTEXT", "inspect-test-ctx")
+        .args(["delete", "k18np"])
+        .assert()
+        .failure()
+        .stderr(contains("specify a pod").or(contains("pod")));
+}
+
+/// K18: dry-run echoes the resolved target + exits 0 without deleting.
+#[test]
+fn k18_delete_dry_run_echoes_resolved_target() {
+    if !kubectl_present() {
+        eprintln!("skip k18_delete_dry_run_echoes_resolved_target: kubectl absent");
+        return;
+    }
+    inspect()
+        .env("INSPECT_K18DR_TYPE", "k8s")
+        .env("INSPECT_K18DR_CONTEXT", "inspect-test-ctx")
+        .env("INSPECT_K18DR_NAMESPACE", "inspect-livetest")
+        .args(["delete", "k18dr/web-abc123"])
+        .assert()
+        .success()
+        .stdout(
+            contains("DRY RUN")
+                .and(contains("inspect-livetest"))
+                .and(contains("inspect-test-ctx")),
+        );
+}
+
+/// K19: `exec --apply` on a pod requires `--no-revert` (in-pod fs mutation has
+/// no synthesisable inverse) — the interlock fires before any kubectl call.
+#[test]
+fn k19_exec_apply_requires_no_revert() {
+    inspect()
+        .env("INSPECT_K19NR_TYPE", "k8s")
+        .env("INSPECT_K19NR_CONTEXT", "inspect-test-ctx")
+        .args([
+            "exec",
+            "k19nr/web-abc123",
+            "--apply",
+            "--",
+            "rm",
+            "-rf",
+            "/tmp/x",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--no-revert"));
+}
+
+/// K19: dry-run (no `--apply`) previews the exec + exits 0 without running it.
+#[test]
+fn k19_exec_dry_run_previews_without_running() {
+    inspect()
+        .env("INSPECT_K19DR_TYPE", "k8s")
+        .env("INSPECT_K19DR_CONTEXT", "inspect-test-ctx")
+        .env("INSPECT_K19DR_NAMESPACE", "inspect-livetest")
+        .args(["exec", "k19dr/web-abc123", "--", "echo", "hi"])
+        .assert()
+        .success()
+        .stdout(contains("DRY RUN").and(contains("inspect-livetest")));
+}
+
+/// K16: `restart` on a k8s namespace is `kubectl rollout restart`. Its dry-run
+/// echoes the resolved rollout-restart target (H3) and exits 0 without any
+/// kubectl call (the revert is captured at --apply time), so it is fully
+/// deterministic. `restart` serves both runtimes — this pins the k8s branch.
+#[test]
+fn k16_restart_k8s_dry_run_echoes_rollout_restart_target() {
+    inspect()
+        .env("INSPECT_K16DR_TYPE", "k8s")
+        .env("INSPECT_K16DR_CONTEXT", "inspect-test-ctx")
+        .env("INSPECT_K16DR_NAMESPACE", "inspect-livetest")
+        .args(["restart", "k16dr/web"])
+        .assert()
+        .success()
+        .stdout(
+            contains("DRY RUN")
+                .and(contains("rollout-restart"))
+                .and(contains("inspect-livetest"))
+                .and(contains("web")),
+        );
+}
